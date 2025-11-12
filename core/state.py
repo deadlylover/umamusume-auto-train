@@ -92,6 +92,19 @@ def reload_config():
   _apply_support_region_override()
 
 
+def pause_bot(reason: str) -> None:
+  """Stop the automation loop so the user can inspect the screen."""
+  global is_bot_running
+
+  if stop_event.is_set():
+    warning(reason)
+    return
+
+  warning(reason)
+  stop_event.set()
+  is_bot_running = False
+
+
 def _debug_hover_region(stat: str, region: Tuple[int, int, int, int], *, force: bool = False) -> None:
   """Move the mouse to the center of a stat region for calibration."""
 
