@@ -76,6 +76,10 @@ def count_pixels_of_color(color_rgb=[117,117,117], region=None, tolerance=2):
     else:
         return -1
 
+    # ImageGrab can return RGBA on macOS; drop alpha so the mask bounds match the image channels.
+    if screen.ndim == 3 and screen.shape[2] == 4:
+        screen = screen[:, :, :3]
+
     color = np.array(color_rgb, np.uint8)
 
     # define min/max range ±2
@@ -91,14 +95,17 @@ def find_color_of_pixel(region=None):
     #we can only return one pixel's color here, so we take the x, y and add 1 to them
     region = (region[0], region[1], region[0]+1, region[1]+1)
     screen = np.array(ImageGrab.grab(bbox=region))  # (left, top, right, bottom)
-    return screen[0]
+    pixel = screen[0, 0]
+    if pixel.shape[-1] == 4:
+      pixel = pixel[:3]
+    return pixel
   else:
     return -1
 
 def closest_color(color_dict, target_color):
     closest_name = None
     min_dist = float('inf')
-    target_color = np.array(target_color)
+    target_color = np.array(target_color).reshape(-1)[:3]
     for name, col in color_dict.items():
         col = np.array(col)
         dist = np.linalg.norm(target_color - col)  # Euclidean distance

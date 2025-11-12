@@ -96,5 +96,37 @@
       }
     ]
   },
-  "window_name": "LDPlayer"
+  "debug": {
+    "stop_after_stat_read": false,
+    "hover_stat_regions": false
+  },
+  "window_name": "LDPlayer",
+  "platform": {
+    "profile": "auto",
+    "mac_bluestacks_air": {
+      "process_name": "BlueStacks",
+      "window_name": "BlueStacks Air",
+      "set_bounds": true,
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 640,
+        "height": 1113
+      },
+      "post_focus_delay": 2.5,
+      "apply_offset_x": false,
+      "offset_x": 0,
+      "apply_offset_y": false,
+      "offset_y": 50,
+      "apply_recognition_offset": false,
+      "recognition_offset_x": -253,
+      "recognition_offset_y": 57,
+      "support_region_override": {
+        "x": 480,
+        "y": 200,
+        "width": 100,
+        "height": 545
+      }
+    }
+  }
 }

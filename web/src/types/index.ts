@@ -22,6 +22,38 @@ export const RaceScheduleSchema = z.object({
   date: z.string(),
 });
 
+export const DebugSchema = z.object({
+  stop_after_stat_read: z.boolean(),
+  hover_stat_regions: z.boolean(),
+});
+
+export const PlatformBoundsSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  width: z.number(),
+  height: z.number(),
+});
+
+export const MacBluestacksAirSchema = z.object({
+  process_name: z.string(),
+  window_name: z.string(),
+  set_bounds: z.boolean(),
+  bounds: PlatformBoundsSchema,
+  post_focus_delay: z.number(),
+  apply_offset_x: z.boolean(),
+  offset_x: z.number(),
+  apply_offset_y: z.boolean(),
+  offset_y: z.number(),
+  apply_recognition_offset: z.boolean(),
+  recognition_offset_x: z.number(),
+  recognition_offset_y: z.number(),
+});
+
+export const PlatformSchema = z.object({
+  profile: z.string(),
+  mac_bluestacks_air: MacBluestacksAirSchema,
+});
+
 export const ConfigSchema = z.object({
   config_name: z.string(),
   priority_stat: z.array(z.string()),
@@ -50,11 +82,15 @@ export const ConfigSchema = z.object({
   skill: SkillSchema,
   event: EventSchema,
   window_name: z.string(),
+  debug: DebugSchema.optional(),
+  platform: PlatformSchema.optional(),
 });
 
 export type Stat = z.infer<typeof StatSchema>;
 export type Skill = z.infer<typeof SkillSchema>;
 export type RaceScheduleType = z.infer<typeof RaceScheduleSchema>;
+export type DebugConfig = z.infer<typeof DebugSchema>;
+export type PlatformConfig = z.infer<typeof PlatformSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
 export type UpdateConfigType = <K extends keyof Config>(

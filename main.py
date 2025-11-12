@@ -1,64 +1,23 @@
-from utils.tools import sleep
-import pygetwindow as gw
 import threading
-import uvicorn
-import keyboard
-import pyautogui
-import time
 import traceback
 
-import utils.constants as constants
+import pyautogui
+import uvicorn
+
 from utils.log import info, warning, error, debug
 
 from core.execute import career_lobby
+from core.hotkeys import HotkeyListener
+from core.platform.window_focus import focus_target_window
 import core.state as state
 from server.main import app
 from update_config import update_config
 
 hotkey = "f1"
-
-def focus_umamusume():
-  try:
-    win = gw.getWindowsWithTitle("Umamusume")
-    target_window = next((w for w in win if w.title.strip() == "Umamusume"), None)
-    if not target_window:
-      if not state.WINDOW_NAME:
-        error("Window name cannot be empty! Please set window name in the config.")
-        return False
-      info(f"Couldn't get the steam version window, trying {state.WINDOW_NAME}.")
-      win = gw.getWindowsWithTitle(state.WINDOW_NAME)
-      target_window = next((w for w in win if w.title.strip() == state.WINDOW_NAME), None)
-      if not target_window:
-        error(f"Couldn't find target window named \"{state.WINDOW_NAME}\". Please double check your window name config.")
-        return False
-
-      constants.adjust_constants_x_coords()
-      if target_window.isMinimized:
-        target_window.restore()
-      else:
-        target_window.minimize()
-        sleep(0.2)
-        target_window.restore()
-        sleep(0.5)
-      pyautogui.press("esc")
-      pyautogui.press("f11")
-      time.sleep(5)
-      close_btn = pyautogui.locateCenterOnScreen("assets/buttons/bluestacks/close_btn.png", confidence=0.8, minSearchTime=2)
-      if close_btn:
-        pyautogui.click(close_btn)
-      return True
-
-    if target_window.isMinimized:
-      target_window.restore()
-    else:
-      target_window.minimize()
-      sleep(0.2)
-      target_window.restore()
-      sleep(0.5)
-  except Exception as e:
-    error(f"Error focusing window: {e}")
-    return False
-  return True
+capture_hotkey = "f2"
+support_hotkey = "f3"
+event_hotkey = "f4"
+recreation_hotkey = "f5"
 
 def main():
   print("Uma Auto!")
@@ -66,7 +25,7 @@ def main():
     state.reload_config()
     state.stop_event.clear()
 
-    if focus_umamusume():
+    if focus_target_window():
       info(f"Config: {state.CONFIG_NAME}")
       career_lobby()
     else:
@@ -77,40 +36,97 @@ def main():
   finally:
     debug("[BOT] Stopped.")
 
-def hotkey_listener():
-  while True:
-    keyboard.wait(hotkey)
-    with state.bot_lock:
-      if state.is_bot_running:
-        debug("[BOT] Stopping...")
-        state.stop_event.set()
-        state.is_bot_running = False
+def toggle_bot():
+  with state.bot_lock:
+    if state.is_bot_running:
+      debug("[BOT] Stopping...")
+      state.stop_event.set()
+      state.is_bot_running = False
 
-        if state.bot_thread and state.bot_thread.is_alive():
-          debug("[BOT] Waiting for bot to stop...")
-          state.bot_thread.join(timeout=3)
+      if state.bot_thread and state.bot_thread.is_alive():
+        debug("[BOT] Waiting for bot to stop...")
+        state.bot_thread.join(timeout=3)
 
-          if state.bot_thread.is_alive():
-            debug("[BOT] Bot still running, please wait...")
-          else:
-            debug("[BOT] Bot stopped completely")
+        if state.bot_thread.is_alive():
+          debug("[BOT] Bot still running, please wait...")
+        else:
+          debug("[BOT] Bot stopped completely")
 
-        state.bot_thread = None
-      else:
-        debug("[BOT] Starting...")
-        state.is_bot_running = True
-        state.bot_thread = threading.Thread(target=main, daemon=True)
-        state.bot_thread.start()
-    sleep(0.5)
+      state.bot_thread = None
+    else:
+      debug("[BOT] Starting...")
+      state.is_bot_running = True
+      state.bot_thread = threading.Thread(target=main, daemon=True)
+      state.bot_thread.start()
+
+def trigger_debug_capture():
+  debug(f"Hotkey '{capture_hotkey}' pressed; capturing OCR regions for calibration.")
+
+  def _capture():
+    state.reload_config()
+    debug("Reloaded config for debug capture.")
+    year_path = state.debug_capture_year_region()
+    info(f"[DEBUG] Year-region capture saved to {year_path}")
+    stat_paths = state.debug_capture_stat_regions()
+    for stat, path in stat_paths.items():
+      info(f"[DEBUG] {stat.upper()} stat capture saved to {path}")
+
+  threading.Thread(target=_capture, daemon=True).start()
+
+
+def trigger_support_capture():
+  debug(f"Hotkey '{support_hotkey}' pressed; capturing support OCR region.")
+
+  def _capture_support():
+    state.reload_config()
+    debug("Reloaded config for support capture.")
+    path = state.debug_capture_support_region()
+    info(f"[DEBUG] Support-region capture saved to {path}")
+
+  threading.Thread(target=_capture_support, daemon=True).start()
+
+
+def trigger_event_capture():
+  debug(f"Hotkey '{event_hotkey}' pressed; capturing event OCR region.")
+
+  def _capture_event():
+    state.reload_config()
+    debug("Reloaded config for event capture.")
+    path = state.debug_capture_event_region()
+    info(f"[DEBUG] Event-region capture saved to {path}")
+
+  threading.Thread(target=_capture_event, daemon=True).start()
+
+
+def trigger_recreation_capture():
+  debug(f"Hotkey '{recreation_hotkey}' pressed; capturing recreation OCR region.")
+
+  def _capture_recreation():
+    state.reload_config()
+    debug("Reloaded config for recreation capture.")
+    path = state.debug_capture_recreation_region()
+    info(f"[DEBUG] Recreation-region capture saved to {path}")
+
+  threading.Thread(target=_capture_recreation, daemon=True).start()
 
 def start_server():
   res = pyautogui.resolution()
   if res.width != 1920 or res.height != 1080:
-    error(f"Your resolution is {res.width} x {res.height}. Please set your screen to 1920 x 1080.")
-    return
+    warning_msg = (
+      f"Detected desktop resolution {res.width} x {res.height}. "
+      "The bot is tuned for a 1920 x 1080 BlueStacks Air viewport; "
+      "ensure the streaming window is sized accordingly."
+    )
+    warning(warning_msg)
   host = "127.0.0.1"
   port = 8000
-  info(f"Press '{hotkey}' to start/stop the bot.")
+  info(
+    f"Press '{hotkey}' to start/stop the bot. "
+    f"Press '{capture_hotkey}' for year/stat OCR snapshots. "
+    f"Press '{support_hotkey}' for support-region capture. "
+    f"Press '{event_hotkey}' for event-region capture. "
+    f"Press '{recreation_hotkey}' for recreation-region capture."
+  )
   print(f"[SERVER] Open http://{host}:{port} to configure the bot.")
   config = uvicorn.Config(app, host=host, port=port, workers=1, log_level="warning")
   server = uvicorn.Server(config)
@@ -118,5 +134,16 @@ def start_server():
 
 if __name__ == "__main__":
   update_config()
-  threading.Thread(target=hotkey_listener, daemon=True).start()
+  state.reload_config()
+  listener = HotkeyListener(
+    hotkey,
+    toggle_bot,
+    extra_hotkeys={
+      capture_hotkey: trigger_debug_capture,
+      support_hotkey: trigger_support_capture,
+      event_hotkey: trigger_event_capture,
+      recreation_hotkey: trigger_recreation_capture,
+    },
+  )
+  listener.start()
   start_server()

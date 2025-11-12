@@ -64,6 +64,26 @@ Make sure these conditions are met:
 1. Set custom display size of 800x1080 and DPI to 160.
 2. Make sure to set the window name in the config to match your emulator’s window title exactly. (case-sensitive)
 
+### Bluestacks Air (macOS)
+
+1. Install [BlueStacks Air](https://support.bluestacks.com/) and make sure the streaming window is running at 1920x1080 (Settings → Display → Set Custom profile).
+2. Open **System Settings → Privacy & Security → Accessibility** and grant access to the Terminal / shell you use to run this bot so the global hotkey can be captured.
+3. Update `config.json` (or the template) so that:
+   - `window_name` matches the BlueStacks Air window title exactly.
+   - `platform.profile` is set to `mac_bluestacks_air` (leave as `auto` if you want macOS detection to happen automatically).
+   - Adjust the `platform.mac_bluestacks_air` overrides (`process_name`, `window_name`, `bounds`, etc.) only if your BlueStacks Air window title or screen layout differs from the defaults.
+4. Run `pip install -r requirements.txt` to ensure the optional `pynput` dependency needed for macOS hotkeys is installed.
+5. If you plan to use the web UI, install its dependencies once with:
+
+   ```
+   cd web && npm install
+   ```
+
+   This pulls in the required TypeScript packages (like `zod`) so `npm run build`/`npm run dev` work locally.
+6. Create `config.json` in the project root (copy `config.template.json` if needed) so both the Python bot and the React app can read your settings without TypeScript errors on build.
+
+> The macOS flow relies on `osascript` to focus the BlueStacks Air window and may take a couple of seconds to resize the streaming canvas before the bot starts.
+
 ### Start
 
 Run:

@@ -1,9 +1,14 @@
 import cv2
 import numpy as np
+import os
+import pyautogui
 import re
 import json
 import threading
+import time
+from datetime import datetime
 from math import floor
+from typing import Tuple, Dict
 
 from utils.log import info, warning, error, debug
 
@@ -17,6 +22,11 @@ stop_event = threading.Event()
 is_bot_running = False
 bot_thread = None
 bot_lock = threading.Lock()
+PLATFORM_SETTINGS = {}
+PLATFORM_PROFILE = "auto"
+MAC_AIR_SETTINGS = {}
+DEBUG_STOP_AFTER_STAT_READ = False
+DEBUG_HOVER_STAT_REGIONS = False
 
 MINIMUM_MOOD = None
 PRIORITIZE_G1_RACE = None
@@ -39,6 +49,8 @@ def reload_config():
   global PRIORITY_EFFECTS_LIST, SKIP_TRAINING_ENERGY, NEVER_REST_ENERGY, SKIP_INFIRMARY_UNLESS_MISSING_ENERGY, PREFERRED_POSITION
   global ENABLE_POSITIONS_BY_RACE, POSITIONS_BY_RACE, POSITION_SELECTION_ENABLED, SLEEP_TIME_MULTIPLIER
   global WINDOW_NAME, RACE_SCHEDULE, CONFIG_NAME, USE_OPTIMAL_EVENT_CHOICE, EVENT_CHOICES
+  global PLATFORM_SETTINGS, PLATFORM_PROFILE, MAC_AIR_SETTINGS
+  global DEBUG_STOP_AFTER_STAT_READ, DEBUG_HOVER_STAT_REGIONS
 
   config = load_config()
 
@@ -67,23 +79,157 @@ def reload_config():
   CONFIG_NAME = config["config_name"]
   USE_OPTIMAL_EVENT_CHOICE = config["event"]["use_optimal_event_choice"]
   EVENT_CHOICES = config["event"]["event_choices"]
+  PLATFORM_SETTINGS = config.get("platform", {})
+  PLATFORM_PROFILE = PLATFORM_SETTINGS.get("profile", "auto")
+  MAC_AIR_SETTINGS = PLATFORM_SETTINGS.get("mac_bluestacks_air", {})
+  debug_config = config.get("debug", {})
+  DEBUG_STOP_AFTER_STAT_READ = debug_config.get("stop_after_stat_read", False)
+  DEBUG_HOVER_STAT_REGIONS = debug_config.get("hover_stat_regions", False)
+
+  # Reset recognition/general offsets so the latest config shifts apply cleanly.
+  constants.reset_coordinate_constants()
+  _apply_configured_recognition_offsets()
+  _apply_support_region_override()
 
 
-# Get Stat
-def stat_state():
-  stat_regions = {
+def _debug_hover_region(stat: str, region: Tuple[int, int, int, int], *, force: bool = False) -> None:
+  """Move the mouse to the center of a stat region for calibration."""
+
+  if not (DEBUG_HOVER_STAT_REGIONS or DEBUG_STOP_AFTER_STAT_READ or force):
+    return
+
+  if not region or len(region) < 4:
+    return
+
+  x, y, w, h = region
+  target_x = x + w / 2
+  target_y = y + h / 2
+
+  try:
+    pyautogui.moveTo(target_x, target_y, duration=0.15)
+    debug(f"[DEBUG] Hovering over {stat.upper()} region at ({target_x:.0f}, {target_y:.0f}).")
+  except Exception as exc:  # pragma: no cover - defensive for GUI edge cases
+    warning(f"Failed to hover over {stat} region: {exc}")
+
+
+def _stat_regions() -> Dict[str, Tuple[int, int, int, int]]:
+  return {
     "spd": constants.SPD_STAT_REGION,
     "sta": constants.STA_STAT_REGION,
     "pwr": constants.PWR_STAT_REGION,
     "guts": constants.GUTS_STAT_REGION,
-    "wit": constants.WIT_STAT_REGION
+    "wit": constants.WIT_STAT_REGION,
   }
+
+
+def debug_hover_stat_regions(delay: float = 0.45) -> None:
+  """Force-hover each stat region via hotkey."""
+
+  regions = _stat_regions()
+  for stat, region in regions.items():
+    _debug_hover_region(stat, region, force=True)
+    time.sleep(max(0.05, delay))
+
+
+def debug_capture_year_region() -> str:
+  """Capture the year-region image after hovering it for manual calibration."""
+  region = constants.YEAR_REGION
+  _debug_hover_region("year", region, force=True)
+  time.sleep(0.1)
+
+  img = enhanced_screenshot(region)
+  os.makedirs("debug_captures", exist_ok=True)
+  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+  path = os.path.join("debug_captures", f"year_region_{timestamp}.png")
+  img.save(path)
+  info(f"[DEBUG] Saved year-region capture to {path}")
+  return path
+
+
+def debug_capture_stat_regions(delay: float = 0.2) -> Dict[str, str]:
+  """Capture each stat region image for calibration and return file paths."""
+
+  os.makedirs("debug_captures", exist_ok=True)
+  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+  saved_paths: Dict[str, str] = {}
+  regions = _stat_regions()
+
+  for stat, region in regions.items():
+    _debug_hover_region(stat, region, force=True)
+    time.sleep(max(0.05, delay))
+    img = enhanced_screenshot(region)
+    path = os.path.join("debug_captures", f"{stat}_region_{timestamp}.png")
+    img.save(path)
+    saved_paths[stat] = path
+    info(f"[DEBUG] Saved {stat.upper()} region capture to {path}")
+
+  return saved_paths
+
+
+def debug_capture_support_region() -> str:
+  """Capture the support-card recognition region for calibration."""
+
+  os.makedirs("debug_captures", exist_ok=True)
+  region = constants.SUPPORT_CARD_ICON_BBOX
+  if region and len(region) >= 4:
+    x, y, w, h = region
+    target_x = x + w / 2
+    target_y = y + h / 2
+    _debug_hover_region("support", (x, y, w, h), force=True)
+    time.sleep(0.1)
+  img = enhanced_screenshot(region)
+  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+  path = os.path.join("debug_captures", f"support_region_{timestamp}.png")
+  img.save(path)
+  info(f"[DEBUG] Saved support-region capture to {path}")
+  return path
+
+
+def debug_capture_event_region() -> str:
+  """Capture the event-choice recognition region for calibration."""
+
+  os.makedirs("debug_captures", exist_ok=True)
+  region = constants.EVENT_NAME_REGION
+  _debug_hover_region("event_name", region, force=True)
+  time.sleep(0.1)
+  img = enhanced_screenshot(region)
+  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+  path = os.path.join("debug_captures", f"event_region_{timestamp}.png")
+  img.save(path)
+  info(f"[DEBUG] Saved event-region capture to {path}")
+  return path
+
+
+def debug_capture_recreation_region() -> str:
+  """Capture the recreation decision region for calibration."""
+
+  os.makedirs("debug_captures", exist_ok=True)
+  region = constants.RECREATION_REGION
+  _debug_hover_region("recreation", region, force=True)
+  time.sleep(0.1)
+  img = enhanced_screenshot(region)
+  timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+  path = os.path.join("debug_captures", f"recreation_region_{timestamp}.png")
+  img.save(path)
+  info(f"[DEBUG] Saved recreation-region capture to {path}")
+  return path
+
+
+# Get Stat
+def stat_state():
+  stat_regions = _stat_regions()
 
   result = {}
   for stat, region in stat_regions.items():
+    _debug_hover_region(stat, region)
     img = enhanced_screenshot(region)
     val = extract_number(img)
     result[stat] = val
+
+  if DEBUG_STOP_AFTER_STAT_READ and not stop_event.is_set():
+    info("Debug flag stop_after_stat_read is enabled; stopping bot after stat capture.")
+    stop_event.set()
+
   return result
 
 # Check support card in each training
@@ -391,3 +537,48 @@ def debug_window(screen, x=-1400, y=-100):
   cv2.moveWindow("image", x, y)
   cv2.imshow("image", screen)
   cv2.waitKey(0)
+  _apply_configured_recognition_offsets()
+
+
+def _apply_configured_recognition_offsets():
+  settings = MAC_AIR_SETTINGS or {}
+  if not settings.get("apply_recognition_offset"):
+    return
+
+  x_offset = settings.get("recognition_offset_x", 0)
+  y_offset = settings.get("recognition_offset_y", 0)
+  constants.apply_recognition_offsets(x_offset, y_offset)
+  debug(f"Applied recognition offsets (state reload): x={x_offset}, y={y_offset}.")
+
+
+def _apply_support_region_override():
+  settings = MAC_AIR_SETTINGS or {}
+  override = settings.get("support_region_override")
+  if not override:
+    return
+
+  x = override.get("x")
+  y = override.get("y")
+  width = override.get("width")
+  height = override.get("height")
+
+  if None in (x, y, width, height):
+    warning("Support region override is missing fields; ignoring.")
+    return
+
+  if width < 60 or height < 60:
+    warning(
+      "Support region override is too small (min 60x60 required for template matching); ignoring."
+    )
+    return
+
+  right = x + width
+  bottom = y + height
+  if right <= x or bottom <= y:
+    warning("Support region override dimensions result in non-positive area; ignoring.")
+    return
+
+  constants.SUPPORT_CARD_ICON_BBOX = (x, y, right, bottom)
+  debug(
+    f"Applied support region override to ({x}, {y}, {right}, {bottom})."
+  )

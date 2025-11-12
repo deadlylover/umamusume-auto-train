@@ -28,3 +28,4 @@ dist_ssr
 *.sln
 *.sw?
 config.json
+debug_captures/*

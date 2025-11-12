@@ -160,19 +160,38 @@ def do_recreation():
     click(boxes=recreation_btn)
     sleep(1)
 
-    aoi_event = pyautogui.locateCenterOnScreen("assets/ui/aoi_event.png", confidence=0.8)
-    tazuna_event = pyautogui.locateCenterOnScreen("assets/ui/tazuna_event.png", confidence=0.8)
-    date_complete = pyautogui.locateCenterOnScreen("assets/ui/date_complete.png", confidence=0.8)
+    recreation_region = constants.RECREATION_REGION
+    debug(f"Scanning recreation region {recreation_region} for event templates.")
+    date_complete = pyautogui.locateCenterOnScreen(
+      "assets/ui/date_complete.png", confidence=0.8, region=recreation_region
+    )
+
+    partner_templates = [
+      ("assets/ui/riko_event.png", "Riko"),
+      ("assets/ui/aoi_event.png", "Aoi"),
+      ("assets/ui/tazuna_event.png", "Tazuna"),
+    ]
+
+    partner_match = None
+    for template_path, partner_name in partner_templates:
+      debug(f"Looking for {partner_name} recreation template ({template_path}).")
+      partner_match = pyautogui.locateCenterOnScreen(
+        template_path, confidence=0.8, region=recreation_region
+      )
+      if partner_match:
+        info(f"Found recreation partner: {partner_name}.")
+        break
 
     if date_complete:
+      debug("Recreation already completed; acknowledging dialog.")
       pyautogui.moveTo(410, 500, duration=0.15)
       pyautogui.click()
-    elif aoi_event:
-      pyautogui.moveTo(aoi_event, duration=0.15)
-      pyautogui.click(aoi_event)
-    elif tazuna_event:
-      pyautogui.moveTo(tazuna_event, duration=0.15)
-      pyautogui.click(tazuna_event)
+    elif partner_match:
+      pyautogui.moveTo(partner_match, duration=0.15)
+      pyautogui.click(partner_match)
+    else:
+      warning("Recreation template not found after clicking; attempting to rest instead.")
+      do_rest(0)
   elif recreation_summer_btn:
     click(boxes=recreation_summer_btn)
 
@@ -578,10 +597,29 @@ def career_lobby():
       sleep(0.5)
       do_train(best_training)
     else:
-      info(f"Check recreation with Tazuna or Aoi support card")
+      info("Check recreation with Tazuna/Aoi/Riko support card")
       date_event = pyautogui.locateCenterOnScreen("assets/ui/recreation_with.png", confidence=0.8)
       if date_event:
+        debug("Matched legacy recreation banner.")
+      else:
+        for template in (
+          "assets/ui/tazuna_event.png",
+          "assets/ui/aoi_event.png",
+          "assets/ui/riko_event.png",
+        ):
+          debug(f"Searching for {template} in recreation region {constants.RECREATION_REGION}.")
+          date_event = pyautogui.locateCenterOnScreen(
+            template,
+            confidence=0.8,
+            region=constants.RECREATION_REGION,
+          )
+          if date_event:
+            debug(f"Matched recreation template: {template} at {date_event}.")
+            break
+      if date_event:
+        info("Recreation event found; taking a date.")
         do_recreation()
       else:
+        info("No recreation partner found; resting instead.")
         do_rest(energy_level)
     sleep(1)
