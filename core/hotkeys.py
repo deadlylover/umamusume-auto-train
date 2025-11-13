@@ -1,6 +1,7 @@
 import platform
+import sys
 import threading
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from utils.log import warning, error, debug
 
@@ -20,6 +21,47 @@ try:
   from pynput import keyboard as pynput_keyboard  # type: ignore
 except Exception:  # pragma: no cover
   pynput_keyboard = None
+
+if TYPE_CHECKING:
+  from pynput.keyboard import Listener as PynputListener  # pragma: no cover
+else:
+  PynputListener = Any
+
+def _patch_pynput_for_py313():
+  """Work around Python 3.13 threading.Thread._handle collision on macOS."""
+  if SYSTEM != "darwin":
+    return
+  if sys.version_info < (3, 13):
+    return
+  if not pynput_keyboard:
+    return
+
+  try:
+    from pynput._util import darwin as pynput_darwin  # type: ignore
+    from pynput._util import AbstractListener  # type: ignore
+  except Exception as exc:  # pragma: no cover - defensive
+    debug(f"Unable to patch pynput ListenerMixin: {exc}")
+    return
+
+  mixin = getattr(pynput_darwin, "ListenerMixin", None)
+  if mixin is None or getattr(mixin, "_py313_handle_patch", False):
+    return
+
+  if not hasattr(mixin, "_handler") or not hasattr(mixin, "_handle"):
+    return
+
+  def _patched_handler(self, proxy, event_type, event, refcon):
+    type(self)._handle(self, proxy, event_type, event, refcon)
+    if self._intercept is not None:
+      return self._intercept(event_type, event)
+    if self.suppress:
+      return None
+    return None
+
+  mixin._handler = AbstractListener._emitter(_patched_handler)
+  mixin._py313_handle_patch = True
+
+_patch_pynput_for_py313()
 
 
 class HotkeyListener:
@@ -43,7 +85,7 @@ class HotkeyListener:
 
     self._stop_event = threading.Event()
     self._thread: Optional[threading.Thread] = None
-    self._listener: Optional["pynput_keyboard.Listener"] = None
+    self._listener: Optional[PynputListener] = None
 
   def add_hotkey(self, key: str, callback: Callable[[], None]) -> None:
     if key and callback:
