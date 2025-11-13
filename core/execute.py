@@ -449,7 +449,9 @@ def after_race():
 def auto_buy_skill():
   if state.stop_event.is_set():
     return
-  if check_skill_pts() < state.SKILL_PTS_CHECK:
+  skill_points = check_skill_pts()
+  info(f"Detected skill points: {skill_points}")
+  if skill_points < state.SKILL_PTS_CHECK:
     return
 
   click(img="assets/buttons/skills_btn.png")

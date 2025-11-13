@@ -24,3 +24,8 @@ handler = RotatingFileHandler(
 )
 
 logging.getLogger().addHandler(handler)
+
+# Pillow's PNG plugin logs extremely verbose debug details (STREAM/iCCP) when the
+# root logger is in DEBUG mode; keep it quiet unless explicitly re-enabled.
+logging.getLogger("PIL").setLevel(logging.INFO)
+logging.getLogger("PIL.PngImagePlugin").setLevel(logging.INFO)

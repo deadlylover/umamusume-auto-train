@@ -1,5 +1,6 @@
 import threading
 import traceback
+import time
 
 import pyautogui
 import uvicorn
@@ -70,6 +71,14 @@ def trigger_debug_capture():
     stat_paths = state.debug_capture_stat_regions()
     for stat, path in stat_paths.items():
       info(f"[DEBUG] {stat.upper()} stat capture saved to {path}")
+    try:
+      start_time = time.perf_counter()
+      stats = state.stat_state()
+      elapsed_ms = (time.perf_counter() - start_time) * 1000
+      info(f"[DEBUG] Stat OCR took {elapsed_ms:.1f} ms.")
+      info(f"Current stats: {stats}")
+    except Exception as exc:
+      error(f"[DEBUG] Failed to read stats during capture: {exc}")
 
   threading.Thread(target=_capture, daemon=True).start()
 

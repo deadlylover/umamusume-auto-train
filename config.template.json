@@ -121,7 +121,7 @@
       "apply_offset_y": false,
       "offset_y": 50,
       "apply_recognition_offset": true,
-      "recognition_offset_x": -253,
+      "recognition_offset_x": -251,
       "recognition_offset_y": 57,
       "support_region_override": {
         "x": 480,
