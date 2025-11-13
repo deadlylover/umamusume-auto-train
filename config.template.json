@@ -101,7 +101,7 @@
     "stop_after_stat_read": false,
     "hover_stat_regions": false,
     "region_adjuster": {
-      "enabled": false,
+      "enabled": true,
       "overlay_dim_opacity": 196,
       "overrides_path": "data/region_overrides.json",
       "apply_overrides_on_load": true

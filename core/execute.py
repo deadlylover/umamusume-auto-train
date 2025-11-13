@@ -195,6 +195,19 @@ def do_recreation():
   elif recreation_summer_btn:
     click(boxes=recreation_summer_btn)
 
+def tap_post_race_overlay(taps=2, delay=0.8):
+  """Advance score screens that require manual taps before Try Again appears."""
+  if state.stop_event.is_set():
+    return
+  center_x = constants.GAME_SCREEN_REGION[0] + constants.GAME_SCREEN_REGION[2] // 2
+  center_y = constants.GAME_SCREEN_REGION[1] + constants.GAME_SCREEN_REGION[3] // 2
+  for _ in range(max(1, taps)):
+    if state.stop_event.is_set():
+      return
+    pyautogui.moveTo(center_x, center_y, duration=0.15)
+    pyautogui.click()
+    sleep(delay)
+
 def do_race(prioritize_g1 = False, img = None):
   if state.stop_event.is_set():
     return False
@@ -427,13 +440,16 @@ def race_prep():
   if not next_button:
     info(f"Wouldn't be able to move onto the after race since there's no next button.")
     if state.RETRY_FAILED_RACE:
+      info("Retry mode enabled; tapping through results to surface Try Again.")
+      tap_post_race_overlay()
+      sleep(0.8)
       if click(img="assets/buttons/try_again_btn.png", confidence=0.85, minSearch=get_secs(2), region=constants.SCREEN_BOTTOM_REGION):
         info("Retrying failed race via Try Again button.")
         if _retry_failed_race_sequence():
           return
         warning("Try Again flow failed; pausing for manual recovery.")
       else:
-        warning("Retry flag enabled but Try Again button not found.")
+        warning("Retry flag enabled but Try Again button not found after tapping.")
     warning("Pausing bot so we can capture the Try Again screen without ending the run.")
     state.pause_bot("Missing Next button after a race; manual Try Again required.")
     return
@@ -490,13 +506,17 @@ def career_lobby():
       continue
     if matches["cancel"]:
       clock_icon = match_template("assets/icons/clock_icon.png", threshold=0.8)
-      if clock_icon:
-        if state.RETRY_FAILED_RACE:
+      if state.RETRY_FAILED_RACE:
+        if clock_icon:
           info("Lost race detected; retry flow enabled, waiting for Try Again.")
         else:
-          info("Lost race, wait for input.")
+          info("Cancel detected without clock; tapping to reach Try Again screen.")
+          tap_post_race_overlay()
           continue
       else:
+        if clock_icon:
+          info("Lost race, wait for input.")
+          continue
         click(boxes=matches["cancel"])
         continue
     if click(boxes=matches["retry"]):
