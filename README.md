@@ -95,6 +95,20 @@ python main.py
 Start:
 press `f1` to start/stop the bot.
 
+### OCR Region Adjuster
+
+If `debug.region_adjuster.enabled` is set to `true` in your config, you can press `F6` at any time to open a calibration window:
+
+- The tool captures your current screen, dims everything, and highlights the selected OCR region/BBox so you can verify alignment.
+- Use the on-screen ▲ ▼ ◀ ▶ buttons (or the keyboard arrow keys) to nudge the active region 1px at a time; hold `Shift` to move in 5px steps. Pick regions from the list on the right to switch targets.
+- The **Resize** controls widen/narrow or raise/lower the highlighted box so you can match different emulator/device layouts without editing constants.
+- A status readout shows the detected BlueStacks window title and size so you can confirm the emulator matches the expected calibration dimensions.
+- The **Window Bounds** section lets you edit the macOS `set_bounds` values (x/y/width/height) and press **Set Bounds** to immediately resize/move the BlueStacks Air window via AppleScript—handy when the window title isn't visible in the menubar.
+- Click **Refresh Screenshot** after moving in-game UI elements or resizing BlueStacks to grab a new background image.
+- Hit **Save Overrides** to write all current coordinates to `debug.region_adjuster.overrides_path`; closing the window automatically reloads the bot config so the new bounds take effect immediately.
+
+This workflow replaces the older offset fields and makes it easier to keep macOS OCR regions tuned without editing `utils/constants.py` directly.
+
 ### Configuration
 
 Open your browser and go to: `http://127.0.0.1:8000/` to easily edit the bot's configuration.

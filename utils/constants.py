@@ -69,9 +69,19 @@ OCR_BBOX_NAMES = {
   "ENERGY_BBOX",
 }
 
+ADJUSTABLE_EXTRA_REGION_NAMES = {
+  "SCREEN_BOTTOM_REGION",
+  "SCREEN_MIDDLE_REGION",
+  "SCREEN_TOP_REGION",
+  "GAME_SCREEN_REGION",
+}
+
+ADJUSTABLE_COORDINATE_NAMES = tuple(sorted(OCR_REGION_NAMES | OCR_BBOX_NAMES | ADJUSTABLE_EXTRA_REGION_NAMES))
+
 GENERAL_OFFSET_APPLIED = False
 RECOGNITION_OFFSET_APPLIED = False
 _COORD_SNAPSHOT = {}
+REGION_OVERRIDES_ACTIVE = False
 
 
 def _capture_original_coordinates():
@@ -169,7 +179,7 @@ def adjust_constants_x_coords(offset=405):
 def reset_coordinate_constants():
   """Restore REGION/BBOX/MOUSE tuples to their original values and clear offset flags."""
 
-  global GENERAL_OFFSET_APPLIED, RECOGNITION_OFFSET_APPLIED
+  global GENERAL_OFFSET_APPLIED, RECOGNITION_OFFSET_APPLIED, REGION_OVERRIDES_ACTIVE
   if not _COORD_SNAPSHOT:
     return
 
@@ -179,6 +189,105 @@ def reset_coordinate_constants():
 
   GENERAL_OFFSET_APPLIED = False
   RECOGNITION_OFFSET_APPLIED = False
+  # Region overrides piggy-back on the same coordinate globals, so clearing the
+  # snapshot restores the factory defaults as well.
+  REGION_OVERRIDES_ACTIVE = False
+
+
+def adjustable_coordinate_names():
+  return ADJUSTABLE_COORDINATE_NAMES
+
+
+def _is_region_name(name):
+  return name in OCR_REGION_NAMES or name in ADJUSTABLE_EXTRA_REGION_NAMES
+
+
+def _is_bbox_name(name):
+  return name in OCR_BBOX_NAMES
+
+
+def export_adjustable_coordinates():
+  """Return the current OCR regions/bboxes for external tooling."""
+
+  payload = []
+  g = globals()
+  for name in ADJUSTABLE_COORDINATE_NAMES:
+    value = g.get(name)
+    if not isinstance(value, tuple):
+      continue
+    kind = "region" if _is_region_name(name) else "bbox"
+    payload.append({"name": name, "kind": kind, "value": list(value)})
+  return payload
+
+
+def _normalize_override_tuple(name, value):
+  if not isinstance(value, (list, tuple)):
+    raise ValueError(f"Override for {name} must be a list/tuple, got {type(value).__name__}.")
+
+  if len(value) < 4:
+    raise ValueError(f"Override for {name} must have four elements, got {len(value)}.")
+
+  normalized = tuple(int(round(v)) for v in value[:4])
+  if _is_region_name(name):
+    # Regions are stored as (x, y, width, height).
+    return normalized
+
+  if _is_bbox_name(name):
+    # Bounding boxes use (x1, y1, x2, y2) to align with template-matching
+    # expectations.
+    x1, y1, x2, y2 = normalized
+    if x2 <= x1 or y2 <= y1:
+      raise ValueError(f"Override for {name} produces invalid bbox coordinates: {normalized}.")
+    return normalized
+
+  raise ValueError(f"{name} is not a recognized OCR region/bbox.")
+
+
+def apply_region_overrides(overrides):
+  """Apply overrides from an in-memory mapping."""
+
+  if not overrides:
+    return False
+
+  global REGION_OVERRIDES_ACTIVE
+  changed = False
+  g = globals()
+
+  for name, value in overrides.items():
+    if name not in ADJUSTABLE_COORDINATE_NAMES:
+      continue
+    try:
+      normalized = _normalize_override_tuple(name, value)
+    except ValueError:
+      continue
+    g[name] = normalized
+    changed = True
+
+  if changed:
+    REGION_OVERRIDES_ACTIVE = True
+  return changed
+
+
+def apply_region_overrides_from_path(path):
+  """Load overrides from JSON (name -> tuple) and apply them."""
+
+  if not path:
+    return False
+
+  target_path = Path(path)
+  if not target_path.exists():
+    return False
+
+  try:
+    with target_path.open("r", encoding="utf-8") as file:
+      data = json.load(file)
+  except Exception:
+    return False
+
+  if isinstance(data, dict):
+    return apply_region_overrides(data)
+
+  return False
 
 # Load all races once to be used when selecting them
 from pathlib import Path

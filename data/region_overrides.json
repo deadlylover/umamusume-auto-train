@@ -1,0 +1,140 @@
+{
+  "CRITERIA_REGION": [
+    204,
+    112,
+    310,
+    60
+  ],
+  "ENERGY_BBOX": [
+    183,
+    173,
+    543,
+    213
+  ],
+  "EVENT_NAME_REGION": [
+    -10,
+    262,
+    365,
+    30
+  ],
+  "FAILURE_REGION": [
+    -1,
+    827,
+    560,
+    65
+  ],
+  "FULL_STATS_APTITUDE_REGION": [
+    144,
+    397,
+    425,
+    100
+  ],
+  "FULL_STATS_STATUS_REGION": [
+    14,
+    632,
+    580,
+    365
+  ],
+  "GAME_SCREEN_REGION": [
+    0,
+    50,
+    620,
+    1080
+  ],
+  "GUTS_STAT_REGION": [
+    344,
+    780,
+    55,
+    20
+  ],
+  "MOOD_REGION": [
+    454,
+    182,
+    130,
+    25
+  ],
+  "PWR_STAT_REGION": [
+    249,
+    780,
+    55,
+    20
+  ],
+  "RACE_INFO_TEXT_REGION": [
+    34,
+    392,
+    525,
+    35
+  ],
+  "RACE_LIST_BOX_REGION": [
+    9,
+    637,
+    585,
+    290
+  ],
+  "RECREATION_REGION": [
+    5,
+    357,
+    620,
+    300
+  ],
+  "SCREEN_BOTTOM_REGION": [
+    0,
+    750,
+    620,
+    330
+  ],
+  "SCREEN_MIDDLE_REGION": [
+    0,
+    300,
+    620,
+    450
+  ],
+  "SCREEN_TOP_REGION": [
+    0,
+    0,
+    620,
+    300
+  ],
+  "SKILL_PTS_REGION": [
+    509,
+    837,
+    65,
+    35
+  ],
+  "SPD_STAT_REGION": [
+    59,
+    780,
+    55,
+    20
+  ],
+  "STA_STAT_REGION": [
+    154,
+    780,
+    55,
+    20
+  ],
+  "SUPPORT_CARD_ICON_BBOX": [
+    487,
+    203,
+    587,
+    748
+  ],
+  "TURN_REGION": [
+    9,
+    137,
+    110,
+    53
+  ],
+  "WIT_STAT_REGION": [
+    439,
+    780,
+    55,
+    20
+  ],
+  "YEAR_REGION": [
+    4,
+    91,
+    165,
+    25
+  ]
+}

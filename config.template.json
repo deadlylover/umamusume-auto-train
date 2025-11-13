@@ -99,7 +99,13 @@
   },
   "debug": {
     "stop_after_stat_read": false,
-    "hover_stat_regions": false
+    "hover_stat_regions": false,
+    "region_adjuster": {
+      "enabled": false,
+      "overlay_dim_opacity": 196,
+      "overrides_path": "data/region_overrides.json",
+      "apply_overrides_on_load": true
+    }
   },
   "_comment_window_name": "Mac users must keep this set to 'BlueStacks Air' so the specialized bounds/offset flags stay active.",
   "window_name": "BlueStacks Air",
@@ -107,7 +113,7 @@
     "profile": "auto",
     "mac_bluestacks_air": {
       "process_name": "BlueStacks",
-      "window_name": "BlueStacks Air",
+      "window_name": "BlueStacks",
       "set_bounds": true,
       "bounds": {
         "x": 0,

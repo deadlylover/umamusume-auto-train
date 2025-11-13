@@ -28,6 +28,7 @@ PLATFORM_PROFILE = "auto"
 MAC_AIR_SETTINGS = {}
 DEBUG_STOP_AFTER_STAT_READ = False
 DEBUG_HOVER_STAT_REGIONS = False
+REGION_ADJUSTER_CONFIG = {}
 
 MINIMUM_MOOD = None
 PRIORITIZE_G1_RACE = None
@@ -56,6 +57,7 @@ def reload_config():
   global WINDOW_NAME, RACE_SCHEDULE, CONFIG_NAME, USE_OPTIMAL_EVENT_CHOICE, EVENT_CHOICES
   global PLATFORM_SETTINGS, PLATFORM_PROFILE, MAC_AIR_SETTINGS
   global DEBUG_STOP_AFTER_STAT_READ, DEBUG_HOVER_STAT_REGIONS
+  global REGION_ADJUSTER_CONFIG
 
   config = load_config()
 
@@ -91,11 +93,13 @@ def reload_config():
   debug_config = config.get("debug", {})
   DEBUG_STOP_AFTER_STAT_READ = debug_config.get("stop_after_stat_read", False)
   DEBUG_HOVER_STAT_REGIONS = debug_config.get("hover_stat_regions", False)
+  REGION_ADJUSTER_CONFIG = _normalize_region_adjuster_config(debug_config.get("region_adjuster", {}))
 
   # Reset recognition/general offsets so the latest config shifts apply cleanly.
   constants.reset_coordinate_constants()
   _apply_configured_recognition_offsets()
   _apply_support_region_override()
+  _apply_region_adjuster_overrides()
 
 
 def pause_bot(reason: str) -> None:
@@ -601,3 +605,46 @@ def _apply_support_region_override():
   debug(
     f"Applied support region override to ({x}, {y}, {right}, {bottom})."
   )
+
+
+def _normalize_region_adjuster_config(raw_config):
+  raw_config = raw_config or {}
+
+  def _bool(value, default=False):
+    if value is None:
+      return default
+    return bool(value)
+
+  def _clamped_opacity(value):
+    try:
+      numeric = int(value)
+    except (TypeError, ValueError):
+      numeric = 196
+    return max(0, min(255, numeric))
+
+  overrides_path = raw_config.get("overrides_path") or "data/region_overrides.json"
+  overrides_path = Path(overrides_path)
+  if not overrides_path.is_absolute():
+    overrides_path = (BASE_DIR / overrides_path).resolve()
+
+  return {
+    "enabled": _bool(raw_config.get("enabled"), False),
+    "overlay_dim_opacity": _clamped_opacity(raw_config.get("overlay_dim_opacity", 196)),
+    "overrides_path": str(overrides_path),
+    "apply_overrides_on_load": _bool(raw_config.get("apply_overrides_on_load"), True),
+  }
+
+
+def _apply_region_adjuster_overrides():
+  if not REGION_ADJUSTER_CONFIG.get("enabled"):
+    return
+
+  if not REGION_ADJUSTER_CONFIG.get("apply_overrides_on_load", True):
+    return
+
+  path = REGION_ADJUSTER_CONFIG.get("overrides_path")
+  applied = constants.apply_region_overrides_from_path(path)
+  if applied:
+    debug(f"Applied region-adjuster overrides from {path}.")
+  else:
+    debug("Region-adjuster enabled but no overrides were applied (missing or empty file).")

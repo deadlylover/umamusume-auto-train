@@ -10,6 +10,7 @@ from utils.log import info, warning, error, debug
 from core.execute import career_lobby
 from core.hotkeys import HotkeyListener
 from core.platform.window_focus import focus_target_window
+from core.region_adjuster import run_region_adjuster_session
 import core.state as state
 from server.main import app
 from update_config import update_config
@@ -19,6 +20,7 @@ capture_hotkey = "f2"
 support_hotkey = "f3"
 event_hotkey = "f4"
 recreation_hotkey = "f5"
+region_adjuster_hotkey = "f6"
 
 def main():
   print("Uma Auto!")
@@ -118,6 +120,23 @@ def trigger_recreation_capture():
 
   threading.Thread(target=_capture_recreation, daemon=True).start()
 
+
+def trigger_region_adjuster():
+  debug(f"Hotkey '{region_adjuster_hotkey}' pressed; opening OCR region adjuster.")
+
+  if not state.REGION_ADJUSTER_CONFIG.get("enabled"):
+    warning("Region adjuster is disabled in config. Enable debug.region_adjuster.enabled to use it.")
+    return
+
+  def _open_adjuster():
+    settings = dict(state.REGION_ADJUSTER_CONFIG)
+    success = run_region_adjuster_session(settings)
+    if success:
+      debug("Region adjuster reported success; reloading config to apply overrides.")
+      state.reload_config()
+
+  threading.Thread(target=_open_adjuster, daemon=True).start()
+
 def start_server():
   res = pyautogui.resolution()
   if res.width != 1920 or res.height != 1080:
@@ -134,7 +153,8 @@ def start_server():
     f"Press '{capture_hotkey}' for year/stat OCR snapshots. "
     f"Press '{support_hotkey}' for support-region capture. "
     f"Press '{event_hotkey}' for event-region capture. "
-    f"Press '{recreation_hotkey}' for recreation-region capture."
+    f"Press '{recreation_hotkey}' for recreation-region capture. "
+    f"Press '{region_adjuster_hotkey}' to open the OCR region adjuster."
   )
   print(f"[SERVER] Open http://{host}:{port} to configure the bot.")
   config = uvicorn.Config(app, host=host, port=port, workers=1, log_level="warning")
@@ -152,6 +172,7 @@ if __name__ == "__main__":
       support_hotkey: trigger_support_capture,
       event_hotkey: trigger_event_capture,
       recreation_hotkey: trigger_recreation_capture,
+      region_adjuster_hotkey: trigger_region_adjuster,
     },
   )
   listener.start()
