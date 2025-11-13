@@ -21,6 +21,7 @@ def _build_context(settings: Dict[str, Any]) -> Dict[str, Any]:
     "window_names": _window_name_candidates(),
     "process_names": _process_name_candidates(),
     "mac_bounds": _mac_bounds_settings(),
+    "recognition_offset": _active_recognition_offset_snapshot(settings),
   }
 
 
@@ -88,6 +89,18 @@ def _mac_bounds_settings() -> Dict[str, Any]:
       "width": int(bounds.get("width", 640) or 640),
       "height": int(bounds.get("height", 1113) or 1113),
     },
+  }
+
+
+def _active_recognition_offset_snapshot(settings: Dict[str, Any]) -> Dict[str, Any]:
+  mac_settings = getattr(bot_state, "MAC_AIR_SETTINGS", {}) or {}
+  enabled = bool(mac_settings.get("apply_recognition_offset"))
+  x, y = getattr(bot_state, "ACTIVE_RECOGNITION_OFFSET", (0, 0))
+  return {
+    "x": int(x or 0),
+    "y": int(y or 0),
+    "enabled": enabled,
+    "respected_by_overrides": bool(settings.get("respect_recognition_offset")),
   }
 
 

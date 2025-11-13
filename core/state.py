@@ -29,6 +29,7 @@ MAC_AIR_SETTINGS = {}
 DEBUG_STOP_AFTER_STAT_READ = False
 DEBUG_HOVER_STAT_REGIONS = False
 REGION_ADJUSTER_CONFIG = {}
+ACTIVE_RECOGNITION_OFFSET = (0, 0)
 
 MINIMUM_MOOD = None
 PRIORITIZE_G1_RACE = None
@@ -97,9 +98,16 @@ def reload_config():
 
   # Reset recognition/general offsets so the latest config shifts apply cleanly.
   constants.reset_coordinate_constants()
+  respect_region_adjuster_offsets = REGION_ADJUSTER_CONFIG.get("respect_recognition_offset", False)
+
+  if respect_region_adjuster_offsets:
+    _apply_region_adjuster_overrides()
+
   _apply_configured_recognition_offsets()
   _apply_support_region_override()
-  _apply_region_adjuster_overrides()
+
+  if not respect_region_adjuster_offsets:
+    _apply_region_adjuster_overrides()
 
 
 def pause_bot(reason: str) -> None:
@@ -565,14 +573,18 @@ def debug_window(screen, x=-1400, y=-100):
 
 
 def _apply_configured_recognition_offsets():
+  global ACTIVE_RECOGNITION_OFFSET
   settings = MAC_AIR_SETTINGS or {}
   if not settings.get("apply_recognition_offset"):
+    info("Recognition offset disabled; using base OCR coordinates.")
+    ACTIVE_RECOGNITION_OFFSET = (0, 0)
     return
 
   x_offset = settings.get("recognition_offset_x", 0)
   y_offset = settings.get("recognition_offset_y", 0)
   constants.apply_recognition_offsets(x_offset, y_offset)
-  debug(f"Applied recognition offsets (state reload): x={x_offset}, y={y_offset}.")
+  ACTIVE_RECOGNITION_OFFSET = (int(x_offset), int(y_offset))
+  info(f"Recognition offset applied: x={x_offset}, y={y_offset}.")
 
 
 def _apply_support_region_override():
@@ -633,6 +645,7 @@ def _normalize_region_adjuster_config(raw_config):
     "overlay_dim_opacity": _clamped_opacity(raw_config.get("overlay_dim_opacity", 196)),
     "overrides_path": str(overrides_path),
     "apply_overrides_on_load": _bool(raw_config.get("apply_overrides_on_load"), True),
+    "respect_recognition_offset": _bool(raw_config.get("respect_recognition_offset"), False),
   }
 
 

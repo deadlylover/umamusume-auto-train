@@ -104,7 +104,8 @@
       "enabled": true,
       "overlay_dim_opacity": 196,
       "overrides_path": "data/region_overrides.json",
-      "apply_overrides_on_load": true
+      "apply_overrides_on_load": true,
+      "respect_recognition_offset": false
     }
   },
   "_comment_window_name": "Mac users must keep this set to 'BlueStacks Air' so the specialized bounds/offset flags stay active.",

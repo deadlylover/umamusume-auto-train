@@ -30,6 +30,13 @@ class RegionAdjusterApp:
     self.process_names: List[str] = context.get("process_names") or []
     bounds_context = context.get("mac_bounds") or {}
     self.bounds_default = bounds_context.get("bounds") or {"x": 0, "y": 0, "width": 640, "height": 1113}
+    offset_context = context.get("recognition_offset") or {}
+    self._recognition_offset_enabled = bool(offset_context.get("enabled"))
+    self._recognition_offset_values = (
+      int(offset_context.get("x", 0) or 0),
+      int(offset_context.get("y", 0) or 0),
+    )
+    self._recognition_offset_respected = bool(offset_context.get("respected_by_overrides"))
 
     self.regions: Dict[str, Dict] = {}
     self.region_order: List[str] = []
@@ -84,6 +91,15 @@ class RegionAdjusterApp:
     side_panel.grid(row=0, column=2, rowspan=2, sticky="ns")
 
     tk.Label(side_panel, text="OCR Regions", fg="white", bg="#232323", font=("Helvetica", 12, "bold")).pack(anchor="w")
+    offset_text = self._format_offset_text()
+    tk.Label(
+      side_panel,
+      text=offset_text,
+      fg="#f0c674",
+      bg="#232323",
+      wraplength=220,
+      justify="left",
+    ).pack(anchor="w", pady=(2, 8))
     self.region_listbox = tk.Listbox(
       side_panel,
       height=25,
@@ -170,6 +186,13 @@ class RegionAdjusterApp:
     ).pack(fill=tk.X, pady=(0, 0))
     self._set_coord_text()
     self._update_window_dimensions()
+
+  def _format_offset_text(self) -> str:
+    if not self._recognition_offset_enabled:
+      return "Recognition offset: disabled"
+    x, y = self._recognition_offset_values
+    suffix = "applied to overrides" if self._recognition_offset_respected else "not applied to overrides"
+    return f"Recognition offset: x={x}, y={y} ({suffix})"
 
   def _bind_hotkeys(self):
     self.root.bind("<Up>", lambda event: self._handle_arrow(event, 0, -1))

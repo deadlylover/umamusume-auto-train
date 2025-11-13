@@ -68,6 +68,8 @@ def trigger_debug_capture():
   def _capture():
     state.reload_config()
     debug("Reloaded config for debug capture.")
+    active_offset = getattr(state, "ACTIVE_RECOGNITION_OFFSET", (0, 0))
+    info(f"[DEBUG] Recognition offset in effect: x={active_offset[0]}, y={active_offset[1]}")
     year_path = state.debug_capture_year_region()
     info(f"[DEBUG] Year-region capture saved to {year_path}")
     stat_paths = state.debug_capture_stat_regions()
@@ -129,6 +131,8 @@ def trigger_region_adjuster():
     return
 
   def _open_adjuster():
+    state.reload_config()
+    debug("Reloaded config before launching region adjuster.")
     settings = dict(state.REGION_ADJUSTER_CONFIG)
     success = run_region_adjuster_session(settings)
     if success:
