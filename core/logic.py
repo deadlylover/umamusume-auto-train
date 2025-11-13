@@ -253,7 +253,7 @@ def decide_race_for_goal(year, turn, criteria, keywords):
   return no_race
 
 def filter_races_by_aptitude(race_list, aptitudes):
-  GRADE_SCORE = {"a": 2, "b": 1}
+  GRADE_SCORE = {"s": 2, "a": 2, "b": 1}
 
   results = []
   for race in race_list:

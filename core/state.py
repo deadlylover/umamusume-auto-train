@@ -534,6 +534,7 @@ def check_aptitudes():
   }
 
   aptitude_images = {
+    "s" : "assets/ui/aptitude_s.png",
     "a" : "assets/ui/aptitude_a.png",
     "b" : "assets/ui/aptitude_b.png",
     "c" : "assets/ui/aptitude_c.png",

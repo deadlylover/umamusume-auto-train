@@ -488,7 +488,15 @@ def career_lobby():
       continue
     if click(boxes=matches["next2"]):
       continue
-    if click(boxes=matches["cancel"]):
+    if matches["cancel"]:
+      clock_icon = match_template("assets/icons/clock_icon.png", threshold=0.8)
+      if clock_icon:
+        info("Lost race, wait for input.")
+        continue
+      else:
+        click(boxes=matches["cancel"])
+        continue
+    if click(boxes=matches["retry"]):
       continue
     if click(boxes=matches["retry"]):
       continue
