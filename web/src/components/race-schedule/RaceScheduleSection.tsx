@@ -1,6 +1,7 @@
 import { ChevronsRight } from "lucide-react";
 import PrioritizeG1 from "./PrioritizeG1";
 import CancelConsecutive from "./CancelConsecutive";
+import RetryFailedRace from "./RetryFailedRace";
 import RaceSchedule from "./RaceSchedule";
 import type { Config, UpdateConfigType } from "@/types";
 
@@ -10,7 +11,12 @@ type Props = {
 };
 
 export default function RaceScheduleSection({ config, updateConfig }: Props) {
-  const { prioritize_g1_race, cancel_consecutive_race, race_schedule } = config;
+  const {
+    prioritize_g1_race,
+    cancel_consecutive_race,
+    retry_failed_race,
+    race_schedule,
+  } = config;
 
   return (
     <div className="bg-card p-6 rounded-xl shadow-lg border border-border/20">
@@ -28,6 +34,10 @@ export default function RaceScheduleSection({ config, updateConfig }: Props) {
           setCancelConsecutive={(val) =>
             updateConfig("cancel_consecutive_race", val)
           }
+        />
+        <RetryFailedRace
+          retryFailedRace={retry_failed_race}
+          setRetryFailedRace={(val) => updateConfig("retry_failed_race", val)}
         />
         <RaceSchedule
           raceSchedule={race_schedule}

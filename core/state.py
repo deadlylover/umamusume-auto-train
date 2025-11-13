@@ -4,6 +4,7 @@ import os
 import pyautogui
 import re
 import json
+from pathlib import Path
 import threading
 import time
 from datetime import datetime
@@ -37,10 +38,14 @@ MAX_FAILURE = None
 STAT_CAPS = None
 SKILL_LIST = None
 CANCEL_CONSECUTIVE_RACE = None
+RETRY_FAILED_RACE = None
 SLEEP_TIME_MULTIPLIER = 1
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 def load_config():
-  with open("config.json", "r", encoding="utf-8") as file:
+  config_path = BASE_DIR / "config.json"
+  with config_path.open("r", encoding="utf-8") as file:
     return json.load(file)
 
 def reload_config():
@@ -61,6 +66,7 @@ def reload_config():
   MAX_FAILURE = config["maximum_failure"]
   PRIORITIZE_G1_RACE = config["prioritize_g1_race"]
   CANCEL_CONSECUTIVE_RACE = config["cancel_consecutive_race"]
+  RETRY_FAILED_RACE = config.get("retry_failed_race", False)
   STAT_CAPS = config["stat_caps"]
   IS_AUTO_BUY_SKILL = config["skill"]["is_auto_buy_skill"]
   SKILL_PTS_CHECK = config["skill"]["skill_pts_check"]

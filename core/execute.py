@@ -322,6 +322,66 @@ def race_select(prioritize_g1 = False, img = None):
 
     return False
 
+def _retry_failed_race_sequence():
+  if state.stop_event.is_set():
+    return False
+
+  race_btn_clicked = False
+  for img_path in (
+    "assets/buttons/race_btn.png",
+    "assets/buttons/bluestacks/race_btn.png",
+  ):
+    if click(img=img_path, confidence=0.8, minSearch=get_secs(10), region=constants.SCREEN_BOTTOM_REGION):
+      race_btn_clicked = True
+      break
+
+  if race_btn_clicked:
+    info(f"Went into the race, sleep for {get_secs(10)} seconds to allow loading.")
+  else:
+    info("Race button not found; waiting for Try Again to reload the race.")
+
+  sleep(10)
+  if not click("assets/buttons/race_exclamation_btn.png", confidence=0.8, minSearch=get_secs(10)):
+    info("Couldn't find \"Race!\" button, looking for alternative version.")
+    if not click("assets/buttons/race_exclamation_btn_portrait.png", confidence=0.8, minSearch=get_secs(10)):
+      warning("Failed to find any \"Race!\" button after Try Again.")
+      return False
+
+  sleep(0.5)
+  skip_btn = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(2), region=constants.SCREEN_BOTTOM_REGION)
+  skip_btn_big = pyautogui.locateOnScreen("assets/buttons/skip_btn_big.png", confidence=0.8, minSearchTime=get_secs(2), region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE)
+  if not skip_btn_big and not skip_btn:
+    warning("Couldn't find skip buttons at first search.")
+    skip_btn = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(10), region=constants.SCREEN_BOTTOM_REGION)
+    skip_btn_big = pyautogui.locateOnScreen("assets/buttons/skip_btn_big.png", confidence=0.8, minSearchTime=get_secs(10), region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE)
+    if not skip_btn_big and not skip_btn:
+      warning("Still couldn't find skip buttons while retrying race.")
+      return False
+
+  for target in (skip_btn, skip_btn_big):
+    if target:
+      click(boxes=target, click=3)
+  sleep(3)
+  for target in (skip_btn, skip_btn_big):
+    if target:
+      click(boxes=target, click=3)
+  sleep(0.5)
+  for target in (skip_btn, skip_btn_big):
+    if target:
+      click(boxes=target, click=3)
+  sleep(3)
+  skip_btn_final = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(5), region=constants.SCREEN_BOTTOM_REGION)
+  if skip_btn_final:
+    click(boxes=skip_btn_final, click=3)
+
+  close_btn = pyautogui.locateOnScreen("assets/buttons/close_btn.png", confidence=0.8, minSearchTime=get_secs(5))
+  if close_btn:
+    click(boxes=close_btn, click=3)
+
+  info("Finished race retry job.")
+  return True
+
+
 def race_prep():
   global PREFERRED_POSITION_SET
 
@@ -366,43 +426,16 @@ def race_prep():
   next_button = pyautogui.locateCenterOnScreen("assets/buttons/next_btn.png", confidence=0.9, minSearchTime=get_secs(4), region=constants.SCREEN_BOTTOM_REGION)
   if not next_button:
     info(f"Wouldn't be able to move onto the after race since there's no next button.")
+    if state.RETRY_FAILED_RACE:
+      if click(img="assets/buttons/try_again_btn.png", confidence=0.85, minSearch=get_secs(2), region=constants.SCREEN_BOTTOM_REGION):
+        info("Retrying failed race via Try Again button.")
+        if _retry_failed_race_sequence():
+          return
+        warning("Try Again flow failed; pausing for manual recovery.")
+      else:
+        warning("Retry flag enabled but Try Again button not found.")
     warning("Pausing bot so we can capture the Try Again screen without ending the run.")
-    # TODO: Implement automated Try Again handling once the button asset is captured.
     state.pause_bot("Missing Next button after a race; manual Try Again required.")
-    # if click("assets/buttons/race_btn.png", confidence=0.8, minSearch=get_secs(10), region=constants.SCREEN_BOTTOM_REGION):
-    #   info(f"Went into the race, sleep for {get_secs(10)} seconds to allow loading.")
-    #   sleep(10)
-    #   if not click("assets/buttons/race_exclamation_btn.png", confidence=0.8, minSearch=get_secs(10)):
-    #     info("Couldn't find \"Race!\" button, looking for alternative version.")
-    #     click("assets/buttons/race_exclamation_btn_portrait.png", confidence=0.8, minSearch=get_secs(10))
-    #   sleep(0.5)
-    #   skip_btn = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(2), region=constants.SCREEN_BOTTOM_REGION)
-    #   skip_btn_big = pyautogui.locateOnScreen("assets/buttons/skip_btn_big.png", confidence=0.8, minSearchTime=get_secs(2), region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE)
-    #   if not skip_btn_big and not skip_btn:
-    #     warning("Coulnd't find skip buttons at first search.")
-    #     skip_btn = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(10), region=constants.SCREEN_BOTTOM_REGION)
-    #     skip_btn_big = pyautogui.locateOnScreen("assets/buttons/skip_btn_big.png", confidence=0.8, minSearchTime=get_secs(10), region=constants.SKIP_BTN_BIG_REGION_LANDSCAPE)
-    #   if skip_btn:
-    #     click(boxes=skip_btn, click=3)
-    #   if skip_btn_big:
-    #     click(boxes=skip_btn_big, click=3)
-    #   sleep(3)
-    #   if skip_btn:
-    #     click(boxes=skip_btn, click=3)
-    #   if skip_btn_big:
-    #     click(boxes=skip_btn_big, click=3)
-    #   sleep(0.5)
-    #   if skip_btn:
-    #     click(boxes=skip_btn, click=3)
-    #   if skip_btn_big:
-    #     click(boxes=skip_btn_big, click=3)
-    #   sleep(3)
-    #   skip_btn = pyautogui.locateOnScreen("assets/buttons/skip_btn.png", confidence=0.8, minSearchTime=get_secs(5), region=constants.SCREEN_BOTTOM_REGION)
-    #   click(boxes=skip_btn, click=3)
-    #   #since we didn't get the trophy before, if we get it we close the trophy
-    #   close_btn = pyautogui.locateOnScreen("assets/buttons/close_btn.png", confidence=0.8, minSearchTime=get_secs(5))
-    #   click(boxes=close_btn, click=3)
-    #   info("Finished race skipping job.")
     return
 
 def after_race():

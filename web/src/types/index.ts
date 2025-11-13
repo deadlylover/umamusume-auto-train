@@ -68,6 +68,7 @@ export const ConfigSchema = z.object({
   maximum_failure: z.number(),
   prioritize_g1_race: z.boolean(),
   cancel_consecutive_race: z.boolean(),
+  retry_failed_race: z.boolean(),
   position_selection_enabled: z.boolean(),
   enable_positions_by_race: z.boolean(),
   preferred_position: z.string(),

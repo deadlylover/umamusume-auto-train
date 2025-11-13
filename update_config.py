@@ -1,10 +1,12 @@
 import json
 import os
+from pathlib import Path
 
 from utils.log import debug
 
-TEMPLATE_FILE = "config.template.json"
-CONFIG_FILE = "config.json"
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATE_FILE = BASE_DIR / "config.template.json"
+CONFIG_FILE = BASE_DIR / "config.json"
 is_changed = False
 
 def deep_merge(template: dict, user_config: dict) -> dict:
@@ -33,22 +35,22 @@ def deep_merge(template: dict, user_config: dict) -> dict:
   return updated_config
 
 def update_config():
-  if not os.path.exists(TEMPLATE_FILE):
+  if not TEMPLATE_FILE.exists():
     raise FileNotFoundError(f"Missing template file: {TEMPLATE_FILE}")
 
   # load template
-  with open(TEMPLATE_FILE, "r", encoding="utf-8") as f:
+  with TEMPLATE_FILE.open("r", encoding="utf-8") as f:
     template = json.load(f)
 
   # if there's no config.json, make a new one
-  if not os.path.exists(CONFIG_FILE):
+  if not CONFIG_FILE.exists():
     debug("config.json not found. Creating a new one from template...")
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    with CONFIG_FILE.open("w", encoding="utf-8") as f:
       json.dump(template, f, indent=2)
     return template
 
   # load user config
-  with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+  with CONFIG_FILE.open("r", encoding="utf-8") as f:
     user_config = json.load(f)
 
   # merge config
@@ -56,7 +58,7 @@ def update_config():
 
   if is_changed:
     # save new config
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    with CONFIG_FILE.open("w", encoding="utf-8") as f:
       json.dump(updated_config, f, indent=2)
     debug("config.json successfully updated!")
   else:

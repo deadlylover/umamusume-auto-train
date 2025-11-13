@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 MOOD_REGION=(705, 125, 835 - 705, 150 - 125)
 TURN_REGION=(260, 81, 370 - 260, 140 - 87)
@@ -180,9 +181,15 @@ def reset_coordinate_constants():
   RECOGNITION_OFFSET_APPLIED = False
 
 # Load all races once to be used when selecting them
+from pathlib import Path
+
 RACES = ""
-with open("data/races.json", "r", encoding="utf-8") as file:
-  RACES = json.load(file)
+_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "races.json"
+try:
+  with _DATA_PATH.open("r", encoding="utf-8") as file:
+    RACES = json.load(file)
+except FileNotFoundError:
+  raise FileNotFoundError(f"Missing races JSON at {_DATA_PATH}") from None
 
 # Build a lookup dict for fast (year, date) searches
 RACE_LOOKUP = {}
