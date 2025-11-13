@@ -1,4 +1,5 @@
 import pyautogui
+import time
 from utils.tools import sleep, get_secs, drag_scroll, click_and_hold
 from PIL import ImageGrab
 
@@ -12,7 +13,7 @@ from core.logic import do_something, decide_race_for_goal
 from utils.log import info, warning, error, debug
 import utils.constants as constants
 
-from core.recognizer import is_btn_active, multi_match_templates
+from core.recognizer import is_btn_active, multi_match_templates, match_template
 from utils.scenario import ura
 from core.skill import buy_skill
 from core.events import event_choice, get_event_name
@@ -394,6 +395,40 @@ def _retry_failed_race_sequence():
   info("Finished race retry job.")
   return True
 
+def _wait_for_try_again_and_retry(max_wait_seconds: float = 18.0) -> bool:
+  """Keep tapping until the Try Again button appears, then run the retry flow."""
+  info("Retry mode enabled; waiting for Try Again button before pausing.")
+  deadline = time.monotonic() + max_wait_seconds
+  next_overlay_tap = 0.0
+
+  while time.monotonic() < deadline:
+    if state.stop_event.is_set():
+      return False
+
+    try_again_btn = pyautogui.locateCenterOnScreen(
+      "assets/buttons/try_again_btn.png",
+      confidence=0.85,
+      minSearchTime=get_secs(0.3),
+      region=constants.SCREEN_BOTTOM_REGION,
+    )
+    if try_again_btn:
+      pyautogui.moveTo(try_again_btn, duration=0.225)
+      pyautogui.click()
+      info("Retrying failed race via Try Again button.")
+      if _retry_failed_race_sequence():
+        return True
+      warning("Try Again flow failed; pausing for manual recovery.")
+      return False
+
+    now = time.monotonic()
+    if now >= next_overlay_tap:
+      tap_post_race_overlay(taps=1, delay=0.2)
+      next_overlay_tap = now + 1.5
+
+    sleep(0.5)
+
+  warning(f"Retry flag enabled but Try Again button not found after waiting {max_wait_seconds:.0f}s.")
+  return False
 
 def race_prep():
   global PREFERRED_POSITION_SET
@@ -439,17 +474,8 @@ def race_prep():
   next_button = pyautogui.locateCenterOnScreen("assets/buttons/next_btn.png", confidence=0.9, minSearchTime=get_secs(4), region=constants.SCREEN_BOTTOM_REGION)
   if not next_button:
     info(f"Wouldn't be able to move onto the after race since there's no next button.")
-    if state.RETRY_FAILED_RACE:
-      info("Retry mode enabled; tapping through results to surface Try Again.")
-      tap_post_race_overlay()
-      sleep(0.8)
-      if click(img="assets/buttons/try_again_btn.png", confidence=0.85, minSearch=get_secs(2), region=constants.SCREEN_BOTTOM_REGION):
-        info("Retrying failed race via Try Again button.")
-        if _retry_failed_race_sequence():
-          return
-        warning("Try Again flow failed; pausing for manual recovery.")
-      else:
-        warning("Retry flag enabled but Try Again button not found after tapping.")
+    if state.RETRY_FAILED_RACE and _wait_for_try_again_and_retry():
+      return
     warning("Pausing bot so we can capture the Try Again screen without ending the run.")
     state.pause_bot("Missing Next button after a race; manual Try Again required.")
     return
@@ -508,7 +534,10 @@ def career_lobby():
       clock_icon = match_template("assets/icons/clock_icon.png", threshold=0.8)
       if state.RETRY_FAILED_RACE:
         if clock_icon:
-          info("Lost race detected; retry flow enabled, waiting for Try Again.")
+          if _wait_for_try_again_and_retry():
+            continue
+          warning("Retry wait timed out while on clock screen.")
+          continue
         else:
           info("Cancel detected without clock; tapping to reach Try Again screen.")
           tap_post_race_overlay()
