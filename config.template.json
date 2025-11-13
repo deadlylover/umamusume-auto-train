@@ -100,7 +100,8 @@
     "stop_after_stat_read": false,
     "hover_stat_regions": false
   },
-  "window_name": "LDPlayer",
+  "_comment_window_name": "Mac users must keep this set to 'BlueStacks Air' so the specialized bounds/offset flags stay active.",
+  "window_name": "BlueStacks Air",
   "platform": {
     "profile": "auto",
     "mac_bluestacks_air": {
@@ -118,7 +119,7 @@
       "offset_x": 0,
       "apply_offset_y": false,
       "offset_y": 50,
-      "apply_recognition_offset": false,
+      "apply_recognition_offset": true,
       "recognition_offset_x": -253,
       "recognition_offset_y": 57,
       "support_region_override": {
