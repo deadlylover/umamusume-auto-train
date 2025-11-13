@@ -29,3 +29,4 @@ dist_ssr
 *.sw?
 config.json
 debug_captures/*
+data/region_overrides.json
