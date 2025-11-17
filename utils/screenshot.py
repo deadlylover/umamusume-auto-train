@@ -37,6 +37,8 @@ def capture_region(region=(0, 0, 1920, 1080)) -> Image.Image:
 
 def enhance_image_for_ocr(image: Image.Image, scale: float = 3.0):
   img = np.array(image)
+  if img.ndim == 2:
+    img = np.stack((img,)*3, axis=-1)
   img = np.pad(img, ((0,0), (0,2), (0,0)), mode='constant', constant_values=150)
 
   gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)

@@ -405,6 +405,20 @@ def check_criteria_detail():
   text = extract_text(img)
   return text
 
+def check_goal_deadline_turns():
+  """Read 'X turn(s) until goal deadline' banner shown on insufficient fan prompts."""
+  img = enhanced_screenshot(constants.GOAL_DEADLINE_REGION)
+  text = extract_text_improved(img)
+  if not text:
+    debug("Goal deadline OCR returned empty result.")
+  match = re.search(r"(\d+)\s*turn", text, re.IGNORECASE)
+  if match:
+    try:
+      return int(match.group(1))
+    except ValueError:
+      return None
+  return None
+
 def check_skill_pts():
   img = enhanced_screenshot(constants.SKILL_PTS_REGION)
   text = extract_number(img)

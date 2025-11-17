@@ -24,6 +24,7 @@ templates = {
   "next": "assets/buttons/next_btn.png",
   "next2": "assets/buttons/next2_btn.png",
   "cancel": "assets/buttons/cancel_btn.png",
+  "race": "assets/buttons/race_btn.png",
   "tazuna": "assets/ui/tazuna_hint.png",
   "infirmary": "assets/buttons/infirmary_btn.png",
   "retry": "assets/buttons/retry_btn.png",
@@ -208,6 +209,29 @@ def tap_post_race_overlay(taps=2, delay=0.8):
     pyautogui.moveTo(center_x, center_y, duration=0.15)
     pyautogui.click()
     sleep(delay)
+
+def handle_insufficient_fans_prompt(matches) -> bool:
+  """Handle the goal reminder dialog that exposes Race/Cancel buttons."""
+  race_boxes = matches.get("race") or []
+  cancel_boxes = matches.get("cancel") or []
+  if not race_boxes or not cancel_boxes:
+    return False
+
+  turns_until_goal = state.check_goal_deadline_turns()
+  if turns_until_goal is None:
+    info("Insufficient fans prompt detected but unable to read goal deadline; cancelling to resume training.")
+    click(boxes=cancel_boxes[0], text="Cancelling insufficient fans prompt (deadline OCR unavailable).")
+    return True
+
+  if turns_until_goal <= 5:
+    info(f"Goal deadline is {turns_until_goal} turn(s) away; choosing Race from insufficient fans prompt.")
+    # TODO: Expand this heuristic once we confirm OCR reliability across resolutions.
+    click(boxes=race_boxes[0], text="Racing because deadline is near.")
+    return True
+
+  info(f"Goal deadline is {turns_until_goal} turn(s) away; cancelling race prompt to keep training.")
+  click(boxes=cancel_boxes[0], text="Cancelling insufficient fans prompt (deadline still far).")
+  return True
 
 def do_race(prioritize_g1 = False, img = None):
   if state.stop_event.is_set():
@@ -395,15 +419,16 @@ def _retry_failed_race_sequence():
   info("Finished race retry job.")
   return True
 
-def _wait_for_try_again_and_retry(max_wait_seconds: float = 18.0) -> bool:
-  """Keep tapping until the Try Again button appears, then run the retry flow."""
+def _wait_for_try_again_and_retry(max_wait_seconds: float = 18.0):
+  """Keep tapping until Try Again or Next appears, then act accordingly."""
   info("Retry mode enabled; waiting for Try Again button before pausing.")
   deadline = time.monotonic() + max_wait_seconds
   next_overlay_tap = 0.0
+  next_button_search_at = time.monotonic() + 3.0
 
   while time.monotonic() < deadline:
     if state.stop_event.is_set():
-      return False
+      return None
 
     try_again_btn = pyautogui.locateCenterOnScreen(
       "assets/buttons/try_again_btn.png",
@@ -416,19 +441,31 @@ def _wait_for_try_again_and_retry(max_wait_seconds: float = 18.0) -> bool:
       pyautogui.click()
       info("Retrying failed race via Try Again button.")
       if _retry_failed_race_sequence():
-        return True
+        return "retried"
       warning("Try Again flow failed; pausing for manual recovery.")
-      return False
+      return None
 
     now = time.monotonic()
     if now >= next_overlay_tap:
       tap_post_race_overlay(taps=1, delay=0.2)
       next_overlay_tap = now + 1.5
 
+    if now >= next_button_search_at:
+      next_button = pyautogui.locateCenterOnScreen(
+        "assets/buttons/next_btn.png",
+        confidence=0.9,
+        minSearchTime=get_secs(0.4),
+        region=constants.SCREEN_BOTTOM_REGION,
+      )
+      if next_button:
+        info("Next button appeared after delay; resuming normally.")
+        return "next"
+      next_button_search_at = now + 3.0
+
     sleep(0.5)
 
   warning(f"Retry flag enabled but Try Again button not found after waiting {max_wait_seconds:.0f}s.")
-  return False
+  return None
 
 def race_prep():
   global PREFERRED_POSITION_SET
@@ -474,11 +511,20 @@ def race_prep():
   next_button = pyautogui.locateCenterOnScreen("assets/buttons/next_btn.png", confidence=0.9, minSearchTime=get_secs(4), region=constants.SCREEN_BOTTOM_REGION)
   if not next_button:
     info(f"Wouldn't be able to move onto the after race since there's no next button.")
-    if state.RETRY_FAILED_RACE and _wait_for_try_again_and_retry():
+    if state.RETRY_FAILED_RACE:
+      outcome = _wait_for_try_again_and_retry()
+      if outcome == "retried":
+        return
+      if outcome == "next":
+        info("Next button detected after waiting; proceeding with results.")
+      else:
+        warning("Pausing bot so we can capture the Try Again screen without ending the run.")
+        state.pause_bot("Missing Next button after a race; manual Try Again required.")
+        return
+    else:
+      warning("Pausing bot so we can capture the Try Again screen without ending the run.")
+      state.pause_bot("Missing Next button after a race; manual Try Again required.")
       return
-    warning("Pausing bot so we can capture the Try Again screen without ending the run.")
-    state.pause_bot("Missing Next button after a race; manual Try Again required.")
-    return
 
 def after_race():
   if state.stop_event.is_set():
@@ -530,11 +576,18 @@ def career_lobby():
       continue
     if click(boxes=matches["next2"]):
       continue
+    if matches["race"] and matches["cancel"]:
+      if handle_insufficient_fans_prompt(matches):
+        continue
     if matches["cancel"]:
       clock_icon = match_template("assets/icons/clock_icon.png", threshold=0.8)
       if state.RETRY_FAILED_RACE:
         if clock_icon:
-          if _wait_for_try_again_and_retry():
+          outcome = _wait_for_try_again_and_retry()
+          if outcome == "retried":
+            continue
+          if outcome == "next":
+            info("Next button detected while waiting on clock screen; resuming.")
             continue
           warning("Retry wait timed out while on clock screen.")
           continue
@@ -684,6 +737,8 @@ def career_lobby():
     # Check training button
     if not go_to_training():
       debug("Training button is not found.")
+      if handle_insufficient_fans_prompt(matches):
+        continue
       continue
 
     # Last, do training
