@@ -6,8 +6,7 @@ import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Calendar } from "lucide-react";
 import RaceScheduleDialog from "./race-schedule/RaceDialog";
-import type { RaceScheduleDataType } from "@/types/raceType";
-import type { RaceScheduleType } from "@/types";
+import type { RaceScheduleDataType, RaceScheduleType } from "@/types/race.type";
 
 type Props = {
   raceSchedule: RaceScheduleType[];
@@ -38,9 +37,7 @@ export default function RaceSchedule({
 
   const getRaceData = async () => {
     try {
-      const res = await fetch(
-        "https://raw.githubusercontent.com/samsulpanjul/umamusume-auto-train/refs/heads/emulator/data/races.json"
-      );
+      const res = await fetch("/data/races.json");
       if (!res.ok) throw new Error("Failed to fetch races");
       return res.json();
     } catch (error) {

@@ -30,3 +30,7 @@ dist_ssr
 config.json
 debug_captures/*
 data/region_overrides.json
+
+# Reference copies and agent docs
+ref/
+AGENTS.md

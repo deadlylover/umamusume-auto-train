@@ -1,74 +1,45 @@
-import { EventSchema } from "./eventType";
+import { EventSchema } from "./event.type";
 
 import { z } from "zod";
-
-export const StatSchema = z.object({
-  spd: z.number(),
-  sta: z.number(),
-  pwr: z.number(),
-  guts: z.number(),
-  wit: z.number(),
-});
-
-export const SkillSchema = z.object({
-  is_auto_buy_skill: z.boolean(),
-  skill_pts_check: z.number(),
-  skill_list: z.array(z.string()),
-});
-
-export const RaceScheduleSchema = z.object({
-  name: z.string(),
-  year: z.string(),
-  date: z.string(),
-});
-
-export const DebugSchema = z.object({
-  stop_after_stat_read: z.boolean(),
-  hover_stat_regions: z.boolean(),
-});
-
-export const PlatformBoundsSchema = z.object({
-  x: z.number(),
-  y: z.number(),
-  width: z.number(),
-  height: z.number(),
-});
-
-export const MacBluestacksAirSchema = z.object({
-  process_name: z.string(),
-  window_name: z.string(),
-  set_bounds: z.boolean(),
-  bounds: PlatformBoundsSchema,
-  post_focus_delay: z.number(),
-  apply_offset_x: z.boolean(),
-  offset_x: z.number(),
-  apply_offset_y: z.boolean(),
-  offset_y: z.number(),
-  apply_recognition_offset: z.boolean(),
-  recognition_offset_x: z.number(),
-  recognition_offset_y: z.number(),
-});
-
-export const PlatformSchema = z.object({
-  profile: z.string(),
-  mac_bluestacks_air: MacBluestacksAirSchema,
-});
+import { RaceScheduleSchema } from "./race.type";
+import { StatSchema } from "./stat.type";
+import { SkillSchema } from "./skill.type";
+import { TrainingStrategySchema } from "./training-strategy.type";
 
 export const ConfigSchema = z.object({
   config_name: z.string(),
   priority_stat: z.array(z.string()),
   priority_weights: z.array(z.number()),
+  stat_caps: StatSchema,
   sleep_time_multiplier: z.number(),
   skip_training_energy: z.number(),
   never_rest_energy: z.number(),
   skip_infirmary_unless_missing_energy: z.number(),
+  hint_hunting_enabled: z.boolean(),
+  hint_hunting_weights: StatSchema,
+  use_skip_claw_machine: z.boolean(),
+  wit_training_score_ratio_threshold: z.number(),
+  rainbow_support_weight_addition: z.number(),
+  non_max_support_weight: z.number(),
+  scenario_gimmick_weight: z.number(),
+  race_turn_threshold: z.number(),
+  do_mission_races_if_possible: z.boolean(),
+  prioritize_missions_over_g1: z.boolean(),
+  minimum_condition_severity: z.number(),
   priority_weight: z.string(),
   minimum_mood: z.string(),
   minimum_mood_junior_year: z.string(),
   maximum_failure: z.number(),
-  prioritize_g1_race: z.boolean(),
+  minimum_aptitudes: z.object({
+    surface: z.string(),
+    distance: z.string(),
+    style: z.string(),
+  }),
+  rest_before_summer_energy: z.number(),
+  use_adb: z.boolean(),
+  device_id: z.string(),
+  use_race_schedule: z.boolean(),
   cancel_consecutive_race: z.boolean(),
-  retry_failed_race: z.boolean(),
   position_selection_enabled: z.boolean(),
   enable_positions_by_race: z.boolean(),
   preferred_position: z.string(),
@@ -79,19 +50,12 @@ export const ConfigSchema = z.object({
     long: z.string(),
   }),
   race_schedule: z.array(RaceScheduleSchema),
-  stat_caps: StatSchema,
   skill: SkillSchema,
   event: EventSchema,
+  training_strategy: TrainingStrategySchema,
   window_name: z.string(),
-  debug: DebugSchema.optional(),
-  platform: PlatformSchema.optional(),
 });
 
-export type Stat = z.infer<typeof StatSchema>;
-export type Skill = z.infer<typeof SkillSchema>;
-export type RaceScheduleType = z.infer<typeof RaceScheduleSchema>;
-export type DebugConfig = z.infer<typeof DebugSchema>;
-export type PlatformConfig = z.infer<typeof PlatformSchema>;
 export type Config = z.infer<typeof ConfigSchema>;
 
 export type UpdateConfigType = <K extends keyof Config>(

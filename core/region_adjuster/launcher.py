@@ -14,10 +14,15 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 def _build_context(settings: Dict[str, Any]) -> Dict[str, Any]:
+  constants.apply_region_overrides(overrides_path=settings.get("overrides_path"))
   return {
     "overlay_dim_opacity": int(settings.get("overlay_dim_opacity", 196)),
     "overrides_path": settings.get("overrides_path"),
     "regions": constants.export_adjustable_coordinates(),
+    "templates": constants.export_adjuster_template_map(),
+    "all_templates": constants.export_all_template_assets(),
+    "training_positions": {name: list(pos) for name, pos in constants.TRAINING_BUTTON_POSITIONS.items()},
+    "base_dir": str(BASE_DIR),
     "window_names": _window_name_candidates(),
     "process_names": _process_name_candidates(),
     "mac_bounds": _mac_bounds_settings(),

@@ -1,19 +1,27 @@
+# main.py - Umamusume Auto Train Entry Point
+# macOS-adapted fork with Unity Cup scenario support
+
 import threading
 import traceback
 import time
+import platform
 
 import pyautogui
 import uvicorn
 
-from utils.log import info, warning, error, debug
+from utils.log import info, warning, error, debug, init_logging
 
-from core.execute import career_lobby
+from core.skeleton import career_lobby
 from core.hotkeys import HotkeyListener
 from core.platform.window_focus import focus_target_window
 from core.region_adjuster import run_region_adjuster_session
-import core.state as state
+import core.config as config
+import core.bot as bot
+import utils.constants as constants
 from server.main import app
 from update_config import update_config
+
+SYSTEM = platform.system().lower()
 
 hotkey = "f1"
 capture_hotkey = "f2"
@@ -25,11 +33,11 @@ region_adjuster_hotkey = "f6"
 def main():
   print("Uma Auto!")
   try:
-    state.reload_config()
-    state.stop_event.clear()
+    config.reload_config()
+    bot.stop_event.clear()
 
     if focus_target_window():
-      info(f"Config: {state.CONFIG_NAME}")
+      info(f"Config: {config.CONFIG_NAME}")
       career_lobby()
     else:
       error("Failed to focus Umamusume window")
@@ -40,34 +48,36 @@ def main():
     debug("[BOT] Stopped.")
 
 def toggle_bot():
-  with state.bot_lock:
-    if state.is_bot_running:
+  with bot.bot_lock:
+    if bot.is_bot_running:
       debug("[BOT] Stopping...")
-      state.stop_event.set()
-      state.is_bot_running = False
+      bot.stop_event.set()
+      bot.is_bot_running = False
 
-      if state.bot_thread and state.bot_thread.is_alive():
+      if bot.bot_thread and bot.bot_thread.is_alive():
         debug("[BOT] Waiting for bot to stop...")
-        state.bot_thread.join(timeout=3)
+        bot.bot_thread.join(timeout=3)
 
-        if state.bot_thread.is_alive():
+        if bot.bot_thread.is_alive():
           debug("[BOT] Bot still running, please wait...")
         else:
           debug("[BOT] Bot stopped completely")
 
-      state.bot_thread = None
+      bot.bot_thread = None
     else:
       debug("[BOT] Starting...")
-      state.is_bot_running = True
-      state.bot_thread = threading.Thread(target=main, daemon=True)
-      state.bot_thread.start()
+      bot.is_bot_running = True
+      bot.bot_thread = threading.Thread(target=main, daemon=True)
+      bot.bot_thread.start()
 
 def trigger_debug_capture():
   debug(f"Hotkey '{capture_hotkey}' pressed; capturing OCR regions for calibration.")
 
   def _capture():
-    state.reload_config()
+    config.reload_config()
     debug("Reloaded config for debug capture.")
+    # Import state functions dynamically to avoid circular imports
+    from core import state
     active_offset = getattr(state, "ACTIVE_RECOGNITION_OFFSET", (0, 0))
     info(f"[DEBUG] Recognition offset in effect: x={active_offset[0]}, y={active_offset[1]}")
     year_path = state.debug_capture_year_region()
@@ -91,8 +101,9 @@ def trigger_support_capture():
   debug(f"Hotkey '{support_hotkey}' pressed; capturing support OCR region.")
 
   def _capture_support():
-    state.reload_config()
+    config.reload_config()
     debug("Reloaded config for support capture.")
+    from core import state
     path = state.debug_capture_support_region()
     info(f"[DEBUG] Support-region capture saved to {path}")
 
@@ -103,8 +114,9 @@ def trigger_event_capture():
   debug(f"Hotkey '{event_hotkey}' pressed; capturing event OCR region.")
 
   def _capture_event():
-    state.reload_config()
+    config.reload_config()
     debug("Reloaded config for event capture.")
+    from core import state
     path = state.debug_capture_event_region()
     info(f"[DEBUG] Event-region capture saved to {path}")
 
@@ -115,8 +127,9 @@ def trigger_recreation_capture():
   debug(f"Hotkey '{recreation_hotkey}' pressed; capturing recreation OCR region.")
 
   def _capture_recreation():
-    state.reload_config()
+    config.reload_config()
     debug("Reloaded config for recreation capture.")
+    from core import state
     path = state.debug_capture_recreation_region()
     info(f"[DEBUG] Recreation-region capture saved to {path}")
 
@@ -126,18 +139,20 @@ def trigger_recreation_capture():
 def trigger_region_adjuster():
   debug(f"Hotkey '{region_adjuster_hotkey}' pressed; opening OCR region adjuster.")
 
-  if not state.REGION_ADJUSTER_CONFIG.get("enabled"):
-    warning("Region adjuster is disabled in config. Enable debug.region_adjuster.enabled to use it.")
-    return
-
   def _open_adjuster():
-    state.reload_config()
+    config.reload_config()
     debug("Reloaded config before launching region adjuster.")
-    settings = dict(state.REGION_ADJUSTER_CONFIG)
+    focus_target_window()
+    settings = dict(config.REGION_ADJUSTER_CONFIG)
+    settings["enabled"] = True
     success = run_region_adjuster_session(settings)
     if success:
       debug("Region adjuster reported success; reloading config to apply overrides.")
-      state.reload_config()
+      config.reload_config()
+      constants.apply_region_overrides(
+        overrides_path=settings.get("overrides_path"),
+        force=True,
+      )
 
   threading.Thread(target=_open_adjuster, daemon=True).start()
 
@@ -150,8 +165,12 @@ def start_server():
       "ensure the streaming window is sized accordingly."
     )
     warning(warning_msg)
+  
   host = "127.0.0.1"
   port = 8000
+  
+  init_logging()
+  
   info(
     f"Press '{hotkey}' to start/stop the bot. "
     f"Press '{capture_hotkey}' for year/stat OCR snapshots. "
@@ -161,13 +180,15 @@ def start_server():
     f"Press '{region_adjuster_hotkey}' to open the OCR region adjuster."
   )
   print(f"[SERVER] Open http://{host}:{port} to configure the bot.")
-  config = uvicorn.Config(app, host=host, port=port, workers=1, log_level="warning")
-  server = uvicorn.Server(config)
+  
+  server_config = uvicorn.Config(app, host=host, port=port, workers=1, log_level="warning")
+  server = uvicorn.Server(server_config)
   server.run()
 
 if __name__ == "__main__":
   update_config()
-  state.reload_config()
+  config.reload_config(print_config=False)
+  
   listener = HotkeyListener(
     hotkey,
     toggle_bot,

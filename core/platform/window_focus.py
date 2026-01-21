@@ -10,7 +10,7 @@ try:
 except Exception:  # pragma: no cover - optional on macOS
   gw = None
 
-import core.state as state
+import core.config as config
 import utils.constants as constants
 from utils.log import info, error, debug
 from utils.tools import sleep
@@ -19,7 +19,7 @@ from utils.tools import sleep
 def focus_target_window() -> bool:
   """Focus the game window based on the configured platform profile."""
 
-  profile = getattr(state, "PLATFORM_PROFILE", "auto")
+  profile = getattr(config, "PLATFORM_PROFILE", "auto")
   system = platform.system().lower()
 
   if profile == "mac_bluestacks_air":
@@ -53,7 +53,7 @@ def _focus_default_windows() -> bool:
 
 
 def _focus_alternate_windows_window() -> bool:
-  if not state.WINDOW_NAME:
+  if not config.WINDOW_NAME:
     error("Window name cannot be empty! Please set window name in the config.")
     return False
 
@@ -61,11 +61,11 @@ def _focus_alternate_windows_window() -> bool:
     error("pygetwindow is not available; cannot control emulator window.")
     return False
 
-  info(f"Couldn't get the steam version window, trying {state.WINDOW_NAME}.")
-  win = gw.getWindowsWithTitle(state.WINDOW_NAME)
-  target_window = next((w for w in win if w.title.strip() == state.WINDOW_NAME), None)
+  info(f"Couldn't get the steam version window, trying {config.WINDOW_NAME}.")
+  win = gw.getWindowsWithTitle(config.WINDOW_NAME)
+  target_window = next((w for w in win if w.title.strip() == config.WINDOW_NAME), None)
   if not target_window:
-    error(f"Couldn't find target window named \"{state.WINDOW_NAME}\". Please double check your window name config.")
+    error(f"Couldn't find target window named \"{config.WINDOW_NAME}\". Please double check your window name config.")
     return False
 
   constants.adjust_constants_offsets(x_offset=405)
@@ -90,9 +90,9 @@ def _bring_window_to_front(window) -> None:
 
 
 def _focus_mac_bluestacks_air() -> bool:
-  settings = getattr(state, "MAC_AIR_SETTINGS", {}) or {}
+  settings = getattr(config, "MAC_AIR_SETTINGS", {}) or {}
 
-  configured_process_name = settings.get("process_name") or state.WINDOW_NAME or "BlueStacksX"
+  configured_process_name = settings.get("process_name") or config.WINDOW_NAME or "BlueStacksX"
   configured_window_name = settings.get("window_name")
   set_bounds = settings.get("set_bounds", True)
   bounds = settings.get("bounds", {"x": 0, "y": 0, "width": 659, "height": 1113})
@@ -184,6 +184,11 @@ def _focus_mac_bluestacks_air() -> bool:
     debug(
       f"Applied recognition offsets x={recognition_offset_x}, y={recognition_offset_y} to OCR regions."
     )
+
+  overrides_config = getattr(config, "REGION_ADJUSTER_CONFIG", {}) or {}
+  overrides_path = overrides_config.get("overrides_path")
+  if constants.apply_region_overrides(overrides_path=overrides_path):
+    debug("Applied region overrides from adjuster settings.")
 
   return True
 

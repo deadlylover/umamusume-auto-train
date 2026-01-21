@@ -9,11 +9,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-
-type Skill = {
-  name: string;
-  description: string;
-};
+import type { SkillData } from "@/types/skill.type";
 
 type Props = {
   list: string[];
@@ -30,9 +26,7 @@ export default function SkillList({
 
   const getSkillData = async () => {
     try {
-      const res = await fetch(
-        "https://raw.githubusercontent.com/samsulpanjul/umamusume-auto-train/refs/heads/emulator/data/skills.json"
-      );
+      const res = await fetch("/data/skills.json");
       if (!res.ok) throw new Error("Failed to fetch skills");
       return res.json();
     } catch (error) {
@@ -40,7 +34,7 @@ export default function SkillList({
     }
   };
 
-  const { data } = useQuery<Skill[]>({
+  const { data } = useQuery<SkillData[]>({
     queryKey: ["skills"],
     queryFn: getSkillData,
     staleTime: 10 * 60 * 1000,

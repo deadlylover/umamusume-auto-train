@@ -7,12 +7,19 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pyautogui
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 try:
   import pygetwindow as gw
 except Exception:  # pragma: no cover - optional dependency may be missing
   gw = None
+
+GRID_OVERLAYS = {
+  "FULL_STATS_APTITUDE_REGION": (4, 3),
+  "FULL_STATS_APTITUDE_BBOX": (4, 3),
+}
 
 
 def _load_context(path: Path) -> Dict:
@@ -37,6 +44,18 @@ class RegionAdjusterApp:
       int(offset_context.get("y", 0) or 0),
     )
     self._recognition_offset_respected = bool(offset_context.get("respected_by_overrides"))
+    self.base_dir = Path(context.get("base_dir") or ".")
+    self.template_map: Dict[str, List[str]] = {}
+    for name, templates in (context.get("templates") or {}).items():
+      if not isinstance(name, str):
+        continue
+      if isinstance(templates, (list, tuple)):
+        self.template_map[name] = [str(path) for path in templates if path]
+    self.all_templates = [str(path) for path in (context.get("all_templates") or []) if path]
+    self.training_positions: Dict[str, Tuple[int, int]] = {}
+    for name, pos in (context.get("training_positions") or {}).items():
+      if isinstance(name, str) and isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        self.training_positions[name] = (int(pos[0]), int(pos[1]))
 
     self.regions: Dict[str, Dict] = {}
     self.region_order: List[str] = []
@@ -59,8 +78,12 @@ class RegionAdjusterApp:
     self.screenshot = None
     self.overlay_image = None
     self.photo_image = None
+    self.template_photo = None
     self._dirty = False
     self._window_info: Optional[Dict[str, int]] = None
+    self._current_templates: List[str] = []
+    self._selected_template_path: Optional[str] = None
+    self._template_matches: List[Tuple[int, int, int, int]] = []
 
     self.root = tk.Tk()
     self.root.title("Uma OCR Region Adjuster")
@@ -87,8 +110,16 @@ class RegionAdjusterApp:
     self.h_scroll.grid(row=1, column=0, sticky="ew")
     self.canvas.configure(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
-    side_panel = tk.Frame(self.root, bg="#232323", padx=12, pady=12)
-    side_panel.grid(row=0, column=2, rowspan=2, sticky="ns")
+    self.side_canvas = tk.Canvas(self.root, background="#232323", highlightthickness=0, width=320)
+    self.side_canvas.grid(row=0, column=2, rowspan=2, sticky="ns")
+    self.side_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.side_canvas.yview)
+    self.side_scroll.grid(row=0, column=3, rowspan=2, sticky="ns")
+    self.side_canvas.configure(yscrollcommand=self.side_scroll.set)
+
+    side_panel = tk.Frame(self.side_canvas, bg="#232323", padx=12, pady=12)
+    self.side_window_id = self.side_canvas.create_window((0, 0), window=side_panel, anchor="nw")
+    side_panel.bind("<Configure>", self._on_side_panel_configure)
+    self.side_canvas.bind("<Configure>", self._on_side_canvas_configure)
 
     tk.Label(side_panel, text="OCR Regions", fg="white", bg="#232323", font=("Helvetica", 12, "bold")).pack(anchor="w")
     offset_text = self._format_offset_text()
@@ -115,6 +146,36 @@ class RegionAdjusterApp:
     self.region_listbox.bind("<<ListboxSelect>>", self._on_region_select)
     self.region_listbox.pack(fill=tk.BOTH, expand=False, pady=(6, 10))
 
+    tk.Label(side_panel, text="Templates", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    self.show_all_templates_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(
+      side_panel,
+      text="Show all templates",
+      variable=self.show_all_templates_var,
+      command=self._refresh_template_list,
+      fg="white",
+      bg="#232323",
+      selectcolor="#1b1b1b",
+      activebackground="#232323",
+      activeforeground="white",
+    ).pack(anchor="w", pady=(0, 4))
+    self.template_listbox = tk.Listbox(
+      side_panel,
+      height=4,
+      width=28,
+      exportselection=False,
+      selectmode=tk.SINGLE,
+      bg="#1b1b1b",
+      fg="white",
+    )
+    self.template_listbox.bind("<<ListboxSelect>>", self._on_template_select)
+    self.template_listbox.pack(fill=tk.BOTH, expand=False)
+    self.template_preview_label = tk.Label(side_panel, bg="#1b1b1b", relief=tk.GROOVE)
+    self.template_preview_label.pack(fill=tk.BOTH, expand=False, pady=(6, 4))
+    self.template_info_var = tk.StringVar()
+    tk.Label(side_panel, textvariable=self.template_info_var, fg="#bbbbbb", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 8))
+    tk.Button(side_panel, text="Test Template (Space)", command=self.test_selected_template).pack(fill=tk.X, pady=(0, 10))
+
     self.coord_var = tk.StringVar()
     tk.Label(side_panel, textvariable=self.coord_var, fg="#9feaf9", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
 
@@ -122,8 +183,31 @@ class RegionAdjusterApp:
     step_container.pack(anchor="w", pady=(0, 10))
     tk.Label(step_container, text="Step (px)", fg="white", bg="#232323").pack(side=tk.LEFT)
     self.step_var = tk.IntVar(value=1)
-    step_entry = tk.Spinbox(step_container, from_=1, to=50, width=5, textvariable=self.step_var)
-    step_entry.pack(side=tk.LEFT, padx=(6, 0))
+    for value in (1, 5, 10, 25):
+      tk.Radiobutton(
+        step_container,
+        text=str(value),
+        variable=self.step_var,
+        value=value,
+        indicatoron=False,
+        width=3,
+        fg="white",
+        bg="#3a3a3a",
+        selectcolor="#5d5d5d",
+      ).pack(side=tk.LEFT, padx=2)
+
+    self.show_training_positions_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(
+      side_panel,
+      text="Show training positions",
+      variable=self.show_training_positions_var,
+      command=self._render_overlay,
+      fg="white",
+      bg="#232323",
+      selectcolor="#1b1b1b",
+      activebackground="#232323",
+      activeforeground="white",
+    ).pack(anchor="w", pady=(0, 10))
 
     move_frame = tk.Frame(side_panel, bg="#232323")
     move_frame.pack(anchor="center", pady=(5, 10))
@@ -185,6 +269,7 @@ class RegionAdjusterApp:
       justify="left",
     ).pack(fill=tk.X, pady=(0, 0))
     self._set_coord_text()
+    self._refresh_template_list()
     self._update_window_dimensions()
 
   def _format_offset_text(self) -> str:
@@ -201,7 +286,9 @@ class RegionAdjusterApp:
     self.root.bind("<Right>", lambda event: self._handle_arrow(event, 1, 0))
     self.root.bind("<Command-s>", lambda event: self.save_overrides())  # macOS shortcut
     self.root.bind("<Control-s>", lambda event: self.save_overrides())
-    self.root.bind("<space>", lambda event: self.capture_screenshot())
+    self.root.bind("<space>", lambda event: self.test_selected_template())
+    self.root.bind("<Shift-space>", lambda event: self.capture_screenshot())
+    self.root.bind("<r>", lambda event: self.capture_screenshot())
 
   def _handle_arrow(self, event, dx: int, dy: int):
     multiplier = self._step_size()
@@ -224,6 +311,7 @@ class RegionAdjusterApp:
       return
 
     self.screenshot = screenshot.convert("RGBA")
+    self._template_matches = []
     self.status_var.set("Captured a new screenshot. Adjust regions to highlight them on the image.")
     self._render_overlay()
     self._update_window_dimensions()
@@ -248,6 +336,22 @@ class RegionAdjusterApp:
           overlay.paste(crop, (x1, y1))
           draw = ImageDraw.Draw(overlay)
           draw.rectangle((x1, y1, x2, y2), outline=(255, 215, 0, 255), width=1)
+          grid = GRID_OVERLAYS.get(self.selected_name)
+          if grid:
+            cols, rows = grid
+            self._draw_grid_overlay(draw, (x1, y1, x2, y2), cols, rows)
+
+    if self._template_matches:
+      draw = ImageDraw.Draw(overlay)
+      for x1, y1, x2, y2 in self._template_matches:
+        draw.rectangle((x1, y1, x2, y2), outline=(255, 64, 64, 255), width=2)
+
+    if self.show_training_positions_var.get() and self.training_positions:
+      draw = ImageDraw.Draw(overlay)
+      for name, (x, y) in self.training_positions.items():
+        radius = 6
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(80, 220, 120, 255), width=2)
+        draw.text((x + radius + 2, y - radius - 2), name, fill=(80, 220, 120, 255))
 
     self.overlay_image = overlay
     self.photo_image = ImageTk.PhotoImage(overlay)
@@ -279,7 +383,157 @@ class RegionAdjusterApp:
       return
     self.selected_name = self.region_order[selection[0]]
     self._set_coord_text()
+    self._refresh_template_list()
     self._render_overlay()
+
+  def _refresh_template_list(self):
+    if self.show_all_templates_var.get():
+      templates = self.all_templates
+    else:
+      templates = self.template_map.get(self.selected_name, [])
+    self._current_templates = list(templates)
+    self.template_listbox.configure(state=tk.NORMAL)
+    self.template_listbox.delete(0, tk.END)
+    if not templates:
+      self.template_listbox.insert(0, "(no templates)")
+      self.template_listbox.configure(state=tk.DISABLED)
+      self._set_template_preview(None, "No template for this region.")
+      return
+
+    for idx, path in enumerate(templates):
+      self.template_listbox.insert(idx, path)
+    self.template_listbox.selection_set(0)
+    self._set_template_preview(templates[0])
+
+  def _on_template_select(self, _event):
+    selection = self.template_listbox.curselection()
+    if not selection:
+      return
+    templates = self._current_templates
+    if not templates:
+      return
+    index = selection[0]
+    if index >= len(templates):
+      return
+    self._set_template_preview(templates[index])
+
+  def _set_template_preview(self, template_path: Optional[str], message: Optional[str] = None):
+    self._selected_template_path = template_path
+    if not template_path:
+      self.template_photo = None
+      self.template_preview_label.configure(image="")
+      self.template_info_var.set(message or "No template available.")
+      return
+
+    template_file = Path(template_path)
+    if not template_file.is_absolute():
+      template_file = self.base_dir / template_file
+
+    if not template_file.exists():
+      self.template_photo = None
+      self.template_preview_label.configure(image="")
+      self.template_info_var.set(f"Missing template: {template_path}")
+      return
+
+    try:
+      img = Image.open(template_file).convert("RGBA")
+    except Exception as exc:
+      self.template_photo = None
+      self.template_preview_label.configure(image="")
+      self.template_info_var.set(f"Failed to load template: {exc}")
+      return
+
+    max_width = 220
+    max_height = 160
+    img.thumbnail((max_width, max_height), Image.LANCZOS)
+    self.template_photo = ImageTk.PhotoImage(img)
+    self.template_preview_label.configure(image=self.template_photo)
+    self.template_info_var.set(str(Path(template_path)))
+
+  def _draw_grid_overlay(self, draw: ImageDraw.ImageDraw, box: Tuple[int, int, int, int], cols: int, rows: int):
+    x1, y1, x2, y2 = box
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    grid_color = (80, 200, 255, 200)
+    for col in range(1, cols):
+      x = x1 + int(width * col / cols)
+      draw.line((x, y1, x, y2), fill=grid_color, width=1)
+    for row in range(1, rows):
+      y = y1 + int(height * row / rows)
+      draw.line((x1, y, x2, y), fill=grid_color, width=1)
+
+  def _dedupe_boxes(self, boxes: List[Tuple[int, int, int, int]], min_dist: int = 5) -> List[Tuple[int, int, int, int]]:
+    filtered: List[Tuple[int, int, int, int]] = []
+    for x, y, w, h in boxes:
+      cx, cy = x + w // 2, y + h // 2
+      if all(
+        abs(cx - (fx + fw // 2)) > min_dist or abs(cy - (fy + fh // 2)) > min_dist
+        for fx, fy, fw, fh in filtered
+      ):
+        filtered.append((x, y, w, h))
+    return filtered
+
+  def test_selected_template(self):
+    if not self.screenshot:
+      self.status_var.set("Capture a screenshot before testing templates.")
+      return
+    if not self._selected_template_path:
+      self.status_var.set("Select a template to test.")
+      return
+
+    template_file = Path(self._selected_template_path)
+    if not template_file.is_absolute():
+      template_file = self.base_dir / template_file
+
+    template = cv2.imread(str(template_file), cv2.IMREAD_COLOR)
+    if template is None:
+      self.status_var.set(f"Template could not be loaded: {self._selected_template_path}")
+      return
+
+    screenshot_np = np.array(self.screenshot)
+    if screenshot_np.ndim == 3 and screenshot_np.shape[2] == 4:
+      screenshot_np = cv2.cvtColor(screenshot_np, cv2.COLOR_RGBA2BGR)
+    else:
+      screenshot_np = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2BGR)
+
+    search_box = self._current_box(self.selected_name)
+    if search_box:
+      x1, y1, x2, y2 = search_box
+      x1, y1 = max(0, x1), max(0, y1)
+      x2 = min(screenshot_np.shape[1], x2)
+      y2 = min(screenshot_np.shape[0], y2)
+    else:
+      x1, y1, x2, y2 = (0, 0, screenshot_np.shape[1], screenshot_np.shape[0])
+
+    if x2 <= x1 or y2 <= y1:
+      self.status_var.set("Selected region is empty; adjust the region first.")
+      return
+
+    crop = screenshot_np[y1:y2, x1:x2]
+    if crop.shape[0] < template.shape[0] or crop.shape[1] < template.shape[1]:
+      self.status_var.set("Template is larger than the selected region.")
+      return
+
+    result = cv2.matchTemplate(crop, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(result)
+    threshold = 0.8
+    loc = np.where(result >= threshold)
+    h, w = template.shape[:2]
+    raw_matches = [(x, y, w, h) for (x, y) in zip(*loc[::-1])]
+    matches = self._dedupe_boxes(raw_matches, min_dist=max(4, min(w, h) // 3))
+    matches = [(x1 + x, y1 + y, x1 + x + w, y1 + y + h) for (x, y, w, h) in matches]
+    self._template_matches = matches
+    if matches:
+      self.status_var.set(f"Template match: {len(matches)} hit(s), best={max_val:.3f}.")
+    else:
+      self.status_var.set(f"No match (best={max_val:.3f}).")
+    self._render_overlay()
+
+  def _on_side_panel_configure(self, _event):
+    self.side_canvas.configure(scrollregion=self.side_canvas.bbox("all"))
+
+  def _on_side_canvas_configure(self, event):
+    self.side_canvas.itemconfigure(self.side_window_id, width=event.width)
 
   def move_selected(self, dx: int, dy: int):
     if not self.selected_name:
