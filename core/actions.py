@@ -108,18 +108,20 @@ def do_recreation(options=None):
         debug(f"{name} not found")
 
     available_recreation = None
+    window_left, window_top = constants.GAME_WINDOW_BBOX[0], constants.GAME_WINDOW_BBOX[1]
     for name, box in matches.items():
       debug(f"{name}, {box}")
       x, y, w, h = box
-      x = x + constants.GAME_WINDOW_BBOX[0]
-      region_xywh = (x, y, 550, 85)
+      abs_x = x + window_left
+      abs_y = y + window_top
+      region_xywh = (abs_x, abs_y, 550, 85)
       # for later, use event_progress_templates to loop through and find our progress
       pal_screenshot = device_action.screenshot(region_xywh=region_xywh)
       match = device_action.match_template(event_progress_templates[4], pal_screenshot)
       if len(match) > 0:
         debug(f"{name} is NOT available for recreation.")
       else:
-        available_recreation = (x + w // 2, y + h // 2)
+        available_recreation = (abs_x + w // 2, abs_y + h // 2)
         debug(f"{name} is available for recreation.")
         break
       
