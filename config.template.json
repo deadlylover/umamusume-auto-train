@@ -1723,6 +1723,32 @@
       }
     }
   },
+  "platform": {
+    "profile": "auto",
+    "mac_bluestacks_air": {
+      "process_name": "BlueStacks",
+      "window_name": "BlueStacks Air",
+      "set_bounds": true,
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 640,
+        "height": 1113
+      },
+      "bounds_delay": 0.2,
+      "window_excludes": [
+        "Keymap Overlay"
+      ],
+      "post_focus_delay": 2.0,
+      "apply_offset_x": true,
+      "offset_x": 405,
+      "apply_offset_y": false,
+      "offset_y": 0,
+      "apply_recognition_offset": false,
+      "recognition_offset_x": 0,
+      "recognition_offset_y": 0
+    }
+  },
   "debug": {
     "verbose_logging": false,
     "verbose_actions": false,

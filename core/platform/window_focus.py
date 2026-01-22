@@ -92,10 +92,14 @@ def _bring_window_to_front(window) -> None:
 def _focus_mac_bluestacks_air() -> bool:
   settings = getattr(config, "MAC_AIR_SETTINGS", {}) or {}
 
-  configured_process_name = settings.get("process_name") or config.WINDOW_NAME or "BlueStacksX"
-  configured_window_name = settings.get("window_name")
+  configured_process_name = settings.get("process_name") or "BlueStacks"
+  configured_window_name = settings.get("window_name") or config.WINDOW_NAME
   set_bounds = settings.get("set_bounds", True)
-  bounds = settings.get("bounds", {"x": 0, "y": 0, "width": 659, "height": 1113})
+  bounds = settings.get("bounds", {"x": 0, "y": 0, "width": 640, "height": 1113})
+  # Give the window a moment to settle after focus before resizing.
+  bounds_delay = float(settings.get("bounds_delay", 0.2))
+  # Ignore overlay/helper windows when choosing which window to resize.
+  window_excludes = settings.get("window_excludes") or ["Keymap Overlay"]
   post_focus_delay = float(settings.get("post_focus_delay", 2.0))
   apply_offset_x = settings.get("apply_offset_x")
   offset_x = settings.get("offset_x")
@@ -122,6 +126,9 @@ def _focus_mac_bluestacks_air() -> bool:
   else:
     process_candidates = [configured_process_name]
 
+  if config.WINDOW_NAME and config.WINDOW_NAME not in process_candidates:
+    process_candidates.append(config.WINDOW_NAME)
+
   for fallback_name in ("BlueStacksX", "BlueStacks"):
     if fallback_name not in process_candidates:
       process_candidates.append(fallback_name)
@@ -138,14 +145,14 @@ def _focus_mac_bluestacks_air() -> bool:
   last_failure_output = ""
   active_process_name = None
 
-  for process_name in process_candidates:
-    window_name = configured_window_name or process_name
+  debug(f"macOS: focusing BlueStacks Air (set_bounds={set_bounds}, bounds={bounds}).")
 
+  for process_name in process_candidates:
     script = _build_mac_bluestacks_script(
       process_name=process_name,
-      window_name=window_name,
       set_bounds=set_bounds,
       bounds=bounds,
+      bounds_delay=bounds_delay,
     )
 
     try:
@@ -172,6 +179,13 @@ def _focus_mac_bluestacks_air() -> bool:
 
   debug(f'macOS: Focused BlueStacks Air window via AppleScript (process "{active_process_name}").')
   time.sleep(post_focus_delay)
+  if set_bounds:
+    _apply_mac_bluestacks_bounds(
+      active_process_name,
+      bounds,
+      configured_window_name,
+      window_excludes,
+    )
 
   x_shift = offset_x if apply_offset_x else 0
   y_shift = offset_y if apply_offset_y else 0
@@ -193,39 +207,182 @@ def _focus_mac_bluestacks_air() -> bool:
   return True
 
 
-def _build_mac_bluestacks_script(process_name, window_name, set_bounds, bounds) -> str:
+def _apply_mac_bluestacks_bounds(
+  process_name: str,
+  bounds: dict,
+  window_name: str,
+  window_excludes: list,
+) -> None:
+  """Resize the main BlueStacks window while skipping overlay helpers."""
+  x = bounds.get("x", 0)
+  y = bounds.get("y", 0)
+  width = bounds.get("width", 640)
+  height = bounds.get("height", 1113)
+  right = x + width
+  bottom = y + height
+  window_hint = (window_name or "").replace('"', r'\"')
+  excludes_list = window_excludes if isinstance(window_excludes, (list, tuple)) else []
+  escaped_excludes = [str(item).replace('"', r'\"') for item in excludes_list]
+  excludes_literal = ", ".join(f'"{item}"' for item in escaped_excludes)
+
+  # Prefer an exact window-name match, then a contains-match, then the largest
+  # non-excluded window. This avoids resizing the keymap overlay window.
+  script = textwrap.dedent(
+    "\n".join(
+      [
+        'tell application "System Events"',
+        f'  if exists (process "{process_name}") then',
+        f'    tell process "{process_name}"',
+        "      set windowCount to count of windows",
+        "      if windowCount > 0 then",
+        "        set targetWindow to missing value",
+        f'        set targetName to "{window_hint}"',
+        f"        set excludes to {{{excludes_literal}}}",
+        "        if targetName is not \"\" then",
+        "          repeat with i from 1 to windowCount",
+        "            set win to window i",
+        "            set isExcluded to false",
+        "            try",
+        "              set winName to name of win as text",
+        "            on error",
+        '              set winName to ""',
+        "            end try",
+        "            repeat with ex in excludes",
+        "              if winName contains ex then set isExcluded to true",
+        "            end repeat",
+        "            if isExcluded is false and winName is targetName then",
+        "              set targetWindow to win",
+        "              exit repeat",
+        "            end if",
+        "          end repeat",
+        "        end if",
+        "        if targetWindow is missing value and targetName is not \"\" then",
+        "          repeat with i from 1 to windowCount",
+        "            set win to window i",
+        "            set isExcluded to false",
+        "            try",
+        "              set winName to name of win as text",
+        "            on error",
+        '              set winName to ""',
+        "            end try",
+        "            repeat with ex in excludes",
+        "              if winName contains ex then set isExcluded to true",
+        "            end repeat",
+        "            if isExcluded is false and winName contains targetName then",
+        "              set targetWindow to win",
+        "              exit repeat",
+        "            end if",
+        "          end repeat",
+        "        end if",
+        "        if targetWindow is missing value then",
+        "          set bestArea to -1",
+        "          repeat with i from 1 to windowCount",
+        "            set win to window i",
+        "            set isExcluded to false",
+        "            try",
+        "              set winName to name of win as text",
+        "            on error",
+        '              set winName to ""',
+        "            end try",
+        "            repeat with ex in excludes",
+        "              if winName contains ex then set isExcluded to true",
+        "            end repeat",
+        "            if isExcluded is false then",
+        "              try",
+        "                set winSize to size of win",
+        "              on error",
+        "                set winSize to {0, 0}",
+        "              end try",
+        "              set area to (item 1 of winSize) * (item 2 of winSize)",
+        "              if area > bestArea then",
+        "                set bestArea to area",
+        "                set targetWindow to win",
+        "              end if",
+        "            end if",
+        "          end repeat",
+        "        end if",
+        "        if targetWindow is missing value then",
+        "          set targetWindow to window 1",
+        "        end if",
+        f'        set targetPos to {{{x}, {y}}}',
+        f'        set targetSize to {{{width}, {height}}}',
+        "        set position of targetWindow to targetPos",
+        "        set size of targetWindow to targetSize",
+        "        delay 0.1",
+        "        set actualSize to size of targetWindow",
+        "        if actualSize is not targetSize then",
+        f'          set bounds of targetWindow to {{{x}, {y}, {right}, {bottom}}}',
+        "          delay 0.1",
+        "        end if",
+        "        set actualPos to position of targetWindow",
+        "        set actualSize to size of targetWindow",
+        "        try",
+        "          set actualName to name of targetWindow as text",
+        "        on error",
+        '          set actualName to ""',
+        "        end try",
+        "        return actualName & \"|\" & (item 1 of actualPos as string) & \",\" & (item 2 of actualPos as string) & \"|\" & (item 1 of actualSize as string) & \",\" & (item 2 of actualSize as string)",
+        "      end if",
+        "    end tell",
+        "  end if",
+        "end tell",
+        "return \"no window\"",
+      ]
+    )
+  )
+
+  try:
+    result = subprocess.run(
+      ["osascript", "-e", script],
+      capture_output=True,
+      text=True,
+      check=False,
+    )
+  except FileNotFoundError:
+    error("osascript command is not available on this system.")
+    return
+
+  if result.returncode != 0:
+    failure_output = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+    debug(f"macOS: Failed to resize BlueStacks window: {failure_output}")
+    return
+
+  output = (result.stdout or "").strip()
+  if output:
+    debug(f"macOS: Resize result: {output}")
+
+
+def _build_mac_bluestacks_script(process_name, set_bounds, bounds, bounds_delay) -> str:
   script_lines = [
     'tell application "System Events"',
     f'  if exists (process "{process_name}") then',
     f'    tell process "{process_name}"',
     "      set frontmost to true",
+    f"      delay {bounds_delay}",
+    "      if (count of windows) > 0 then",
   ]
-
-  escaped_window_name = window_name.replace('"', r'\"')
-  script_lines.append(f'      if (count of (windows whose title contains "{escaped_window_name}")) is 0 then')
-  script_lines.append(f'        error "Window {escaped_window_name} was not found."')
-  script_lines.append("      end if")
-  script_lines.append(f'      set targetWindow to (first window whose title contains "{escaped_window_name}")')
 
   if set_bounds:
     script_lines.extend(
       [
-        "      tell targetWindow",
-        f'        set size to {{{bounds.get("width", 659)}, {bounds.get("height", 1113)}}}',
-        f'        set position to {{{bounds.get("x", 0)}, {bounds.get("y", 0)}}}',
-        "      end tell",
+        f'        set position of window 1 to {{{bounds.get("x", 0)}, {bounds.get("y", 0)}}}',
+        f'        set size of window 1 to {{{bounds.get("width", 640)}, {bounds.get("height", 1113)}}}',
       ]
     )
 
   script_lines.extend(
     [
+      "        return 0",
+      "      else",
+      "        error \"No windows found.\"",
+      "      end if",
       "    end tell",
       "  else",
       f'    error "Process {process_name} is not running."',
       "  end if",
       "end tell",
+      "return 1",
     ]
   )
 
-  script = textwrap.dedent("\n".join(script_lines))
-  return script
+  return textwrap.dedent("\n".join(script_lines))

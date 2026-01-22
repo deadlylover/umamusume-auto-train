@@ -88,7 +88,15 @@ class RegionAdjusterApp:
     self.root = tk.Tk()
     self.root.title("Uma OCR Region Adjuster")
     self.root.configure(background="#1f1f1f")
-    self.root.geometry("1400x900")
+    window_width = 1400
+    window_height = 900
+    self.root.geometry(f"{window_width}x{window_height}")
+    screen_width = self.root.winfo_screenwidth()
+    screen_height = self.root.winfo_screenheight()
+    margin = 20
+    x = max(0, screen_width - window_width - margin)
+    y = max(0, min(margin, screen_height - window_height - margin))
+    self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
     self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     self.root.columnconfigure(0, weight=1)
