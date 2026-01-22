@@ -26,6 +26,17 @@ def find_best_match(matchups):
       best_match_score = matchup["score"]
   return best_match
 
+def click_zenith_race_button():
+  # Try both templates; the button can flash between variants.
+  button_region = constants.SCREEN_BOTTOM_BBOX
+  for _ in range(5):
+    if device_action.locate_and_click("assets/unity/zenith_race.png", min_search_time=get_secs(1), region_ltrb=button_region):
+      return True
+    if device_action.locate_and_click("assets/unity/zenith_race2.png", min_search_time=get_secs(1), region_ltrb=button_region):
+      return True
+    sleep(0.5)
+  return False
+
 def unity_cup_function():
   tries = 0
   while True:
@@ -47,10 +58,13 @@ def unity_cup_function():
   elif select_opponent_btn:
     select_opponent_mouse_pos = (select_opponent_btn[0], select_opponent_btn[1])
   elif s_rank_opponent:
+    info(f"Zenith indicator detected (S rank opponent) at {s_rank_opponent}, looking for Zenith Race button.")
     sleep(1)
-    device_action.click(target=(constants.SKILL_SCROLL_BOTTOM_MOUSE_POS))
-    unity_race_start()
-    return True
+    if click_zenith_race_button():
+      unity_race_start()
+      return True
+    warning("Zenith Race button not found; skipping Unity race start.")
+    return False
   if len(rank_matches) == 0:
     raise ValueError("Team rank not found, please report this.")
   matchups = []
