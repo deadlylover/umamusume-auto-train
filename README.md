@@ -1,3 +1,11 @@
+Confirmed unity works on a macbook air m2 w/ bluestacks air emulator, have to set display resolution to native (things will look small).
+
+Press F6 to open the OCR region adjuster if fine adjustments are needed for the matching templates.
+
+It's really hacky i'm sorry, just needed something to bang out the aptitude test event shop lol.
+
+
+
 # Umamusume Auto Train
 
 Like the title says, this is a simple auto training for Umamusume.
