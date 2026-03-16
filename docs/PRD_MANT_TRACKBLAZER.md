@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft TODO PRD for implementing support for the new MANT / Trackblazer scenario in the new architecture.
+In progress. Initial Trackblazer detection scaffolding and scenario-specific placeholder regions are in the branch, but scoring and exclusive flow handling are still incomplete.
 
 ## Current Progress
 
@@ -10,6 +10,16 @@ Implemented in support of Trackblazer bring-up:
 
 - Operator/debug console now exists and can be used while tuning a new scenario.
 - OCR region adjuster can be launched directly from that console.
+- Scenario banner asset was added at `assets/scenario_banner/trackblazer.png`.
+- `core/skeleton.py` now treats banner filenames as scenario keys and uses `trackblazer` as the canonical internal name, with `mant` retained only as a legacy alias in some branches/comments.
+- Operator console/runtime state now supports execution intents:
+  - `check_only`
+  - `preview_clicks`
+  - `execute`
+- Operator console now includes:
+  - sub-phase display
+  - OCR debug pane
+  - copy-to-clipboard actions for summary/trainings/OCR debug
 - Separate placeholder MANT/Trackblazer region entries were added so the scenario can be tuned independently from default/Unity:
   - energy
   - turn
@@ -20,11 +30,22 @@ Implemented in support of Trackblazer bring-up:
   - support card icon region
   - initial grade point / shop coin / shop button placeholders
 - `core/state.py` now recognizes `mant` / `trackblazer` as a separate scenario branch for those placeholder regions.
+- Scenario detection is now wired through the main loop and logs the detected scenario before main state collection begins.
+- Trackblazer placeholder OCR provenance now appears in the console snapshot for:
+  - grade points
+  - shop coins
+  - shop button region
+- Planned-click preview payloads now exist for race actions and skill-buy flow, so the console can show intended clicks without committing them in non-execute intents.
+- Skill purchase review is now a distinct inspectable console path with sub-phases such as:
+  - `evaluate_skill_purchase`
+  - `scan_skill_list`
+  - `preview_skill_purchase`
+  - `confirm_skill_purchase`
 
 Not implemented yet:
 
-- scenario banner asset/detection
 - real Trackblazer OCR extraction for grade points / shop coins / shop state
+- real Trackblazer inventory extraction
 - Trackblazer scoring
 - Trackblazer shop/item logic
 - Trackblazer-specific action routing
@@ -183,6 +204,10 @@ Operator console must show:
 - proposed next action
 - Trackblazer-specific fields used in scoring
 - current error / recovery state if blocked
+- current execution intent: `check_only`, `preview_clicks`, or `execute`
+- the current Trackblazer sub-phase, especially for shop, inventory, skill, and race handling
+- the OCR region/constants used for the current Trackblazer read
+- the intended click target(s) before any skill/shop/race commit happens
 
 The console should be considered part of the acceptance path for Trackblazer debugging, not a stretch goal.
 
@@ -195,8 +220,46 @@ Trackblazer implementation should assume a shared operator/debug console exists 
 - a ranked training panel
 - a phase/state visualization
 - a visible blocked/error state when recognition fails
+- an OCR/debug panel that shows active region keys, adjusted bounds, parsed values, and crop paths
+- copy-to-clipboard controls so console output can be pasted back into debugging threads
 
 This prevents the scenario bring-up loop from relying on terminal log scraping.
+
+### Required Trackblazer Sub-Flows In The Console
+
+The console flow should be expanded beyond generic "collect state" and "execute action" labels. Based on the Trackblazer brief, the operator needs to see explicit scenario sub-flows for:
+
+- `check_grade_points`
+  read current Grade Points, checkpoint target, and whether current points carry meaningful progression value for this window
+- `check_shop_coins`
+  read current Shop Coins and expose the OCR/debug source for that value
+- `check_shop_state`
+  determine whether the Special Shop is available on this screen/turn and whether a visit is recommended
+- `check_inventory`
+  inspect currently held items, especially training items, energy items, whistles, megaphones, and reserved finals resources
+- `check_rival_race_state`
+  detect whether a candidate race has a rival marker / hint value
+- `open_skill_menu`
+  enter the skill screen when appropriate
+- `scan_skill_list`
+  read visible skill entries and match them against configured targets
+- `preview_skill_purchase`
+  show the skill row(s) and `Learn` button click(s) the bot intends to use
+- `open_trackblazer_shop`
+  enter the shop when appropriate
+- `scan_trackblazer_shop`
+  read visible item entries, prices, and any inventory-related context
+- `preview_shop_purchase`
+  show which item slot and confirmation button the bot intends to click
+- `open_race_menu`
+  enter the race list
+- `scan_race_candidates`
+  read race cards and expose inputs relevant to Trackblazer scoring:
+  grade point value, coin value, rival marker, distance/terrain implications, and fatigue context
+- `preview_race_selection`
+  show the race entry the bot intends to click before committing
+
+For OCR tuning, each of these should be able to run in a non-committing path where the bot reads and evaluates but does not finalize the click sequence.
 
 ## Architecture Requirements
 
@@ -226,8 +289,8 @@ This prevents the scenario bring-up loop from relying on terminal log scraping.
 
 ### Phase 1: Detection and Safe Compatibility
 
-- [ ] Add scenario banner asset(s).
-- [ ] Extend scenario detection to return the new scenario name.
+- [x] Add scenario banner asset(s).
+- [x] Extend scenario detection to return the new scenario name.
 - [ ] Verify default runs and Unity runs still detect correctly.
 - [ ] Ensure unknown Trackblazer screens do not cause infinite `non_match_count` looping without logs.
 
@@ -242,6 +305,8 @@ Acceptance:
 - [x] Implement initial scenario branching in `core/state.py`.
 - [ ] Replace placeholder MANT regions with tuned scenario-specific values.
 - [ ] Implement real Trackblazer state extraction for grade points / shop coins / shop state.
+- [x] Surface placeholder Trackblazer OCR provenance in the operator/debug console snapshot.
+- [ ] Implement inventory/item-state extraction needed for Trackblazer debugging.
 - [ ] Save debug crops for each new recognition area.
 - [ ] Document every new state key and its expected range/meaning.
 - [ ] Feed those new state fields into the operator/debug console snapshot.
@@ -269,6 +334,8 @@ Acceptance:
 - [ ] Add routing from `core/skeleton.py`.
 - [ ] Handle mandatory confirmation / route-selection / checkpoint screens.
 - [ ] Add retry/escape behavior when the handler cannot confirm state.
+- [x] Add `check_only` and `preview_clicks` paths for skill buying and generic action/race selection review.
+- [ ] Add `check_only` and `preview_clicks` paths for Trackblazer shop interaction and inventory checks.
 
 Acceptance:
 
@@ -288,8 +355,8 @@ Acceptance:
 
 ## Technical TODOs
 
-- [ ] Decide canonical scenario key: `mant`, `trackblazer`, or `mant_trackblazer`.
-- [ ] Add `assets/scenario_banner/<name>.png`.
+- [x] Decide canonical scenario key: `trackblazer` with `mant` accepted as a legacy alias where needed.
+- [x] Add `assets/scenario_banner/<name>.png`.
 - [ ] Add any new scenario assets under a dedicated `assets/trackblazer/` directory.
 - [ ] Update `core/skeleton.py` detection/routing.
 - [ ] Update `utils/constants.py` with Trackblazer-specific regions if needed.
@@ -297,6 +364,11 @@ Acceptance:
 - [ ] Update `core/trainings.py` with scenario score function and debug fields.
 - [ ] Add `scenarios/trackblazer.py` if scenario actions exist.
 - [ ] Ensure Trackblazer fields are included in the operator/debug console snapshot.
+- [ ] Add Trackblazer console sub-phases for shop, inventory, and race selection.
+- [x] Add skill-buy console sub-phases and review flow.
+- [x] Add Trackblazer OCR provenance entries showing region key and adjusted bounds.
+- [ ] Add Trackblazer planned-click preview entries for shop actions.
+- [x] Add planned-click preview entries for race and skill actions.
 - [ ] Update `config.template.json` and `core/config.py` if new knobs are needed.
 - [ ] Update web UI types/components if new knobs should be user-editable.
 - [ ] Add logs/debug capture guidance to README or follow-up docs.

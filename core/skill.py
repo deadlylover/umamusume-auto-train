@@ -18,6 +18,53 @@ def init_skill_py():
   global previous_action_count
   previous_action_count = -1
 
+
+def get_skill_purchase_context(state, action_count, race_check=False):
+  global previous_action_count
+  current_sp = state.get("current_stats", {}).get("sp", 0)
+  result = {
+    "should_check": False,
+    "reason": "",
+    "shopping_list": list(config.SKILL_LIST),
+    "current_sp": current_sp,
+    "threshold_sp": config.SKILL_PTS_CHECK,
+    "race_check": race_check,
+    "last_skill_purchase_action_count": previous_action_count,
+    "skill_check_turns": config.SKILL_CHECK_TURNS,
+    "planned_clicks": [
+      {"label": "Open skills menu", "template": "assets/buttons/skills_btn.png", "region_key": "SCREEN_BOTTOM_BBOX"},
+      {"label": "Scan skill rows", "region_key": "SCROLLING_SKILL_SCREEN_BBOX", "source_type": "ocr_region"},
+      {"label": "Select matching skill rows", "template": "assets/icons/buy_skill.png", "region_key": "SCROLLING_SKILL_SCREEN_BBOX"},
+      {"label": "Confirm selected skills", "template": "assets/buttons/confirm_btn.png"},
+      {"label": "Learn selected skills", "template": "assets/buttons/learn_btn.png"},
+      {"label": "Exit skills screen", "template": "assets/buttons/back_btn.png", "region_key": "SCREEN_BOTTOM_BBOX"},
+    ],
+    "ocr_debug": [
+      {"field": "skill_points", "source_type": "state_value", "parsed_value": current_sp},
+      {"field": "skill_list_region", "source_type": "ocr_region", "region_key": "SCROLLING_SKILL_SCREEN_BBOX"},
+      {"field": "buy_skill_icon", "source_type": "template_match", "template": "assets/icons/buy_skill.png", "region_key": "SCROLLING_SKILL_SCREEN_BBOX"},
+      {"field": "skills_button", "source_type": "template_match", "template": "assets/buttons/skills_btn.png", "region_key": "SCREEN_BOTTOM_BBOX"},
+    ],
+  }
+
+  if not config.IS_AUTO_BUY_SKILL:
+    result["reason"] = "Auto-buy skill is disabled in config."
+    return result
+  if current_sp < config.SKILL_PTS_CHECK:
+    result["reason"] = f"Skill points {current_sp} below threshold {config.SKILL_PTS_CHECK}."
+    return result
+  if config.CHECK_SKILL_BEFORE_RACES and race_check and (action_count > previous_action_count):
+    result["should_check"] = True
+    result["reason"] = "Checking skills before race."
+    return result
+  if (action_count - previous_action_count) < config.SKILL_CHECK_TURNS:
+    result["reason"] = "Not enough turns since last skill check."
+    return result
+
+  result["should_check"] = True
+  result["reason"] = "Skill purchase check is due."
+  return result
+
 def buy_skill(state, action_count, race_check=False):
   global previous_action_count
   debug(f"Skill buy: {action_count}, {previous_action_count}, {race_check}")

@@ -37,6 +37,7 @@ review_waiting = False
 review_event = threading.Event()
 operator_console = None
 pause_requested = False
+execution_intent = "execute"
 control_callbacks = {}
 
 
@@ -60,6 +61,7 @@ def get_runtime_state():
       "updated_at": runtime_updated_at,
       "review_waiting": review_waiting,
       "pause_requested": pause_requested,
+      "execution_intent": execution_intent,
       "is_bot_running": is_bot_running,
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
     }
@@ -110,6 +112,19 @@ def clear_pause_request():
 def is_pause_requested():
   with runtime_lock:
     return pause_requested
+
+
+def set_execution_intent(intent):
+  global execution_intent, runtime_updated_at
+  normalized = intent if intent in ("check_only", "preview_clicks", "execute") else "execute"
+  with runtime_lock:
+    execution_intent = normalized
+    runtime_updated_at = time.time()
+
+
+def get_execution_intent():
+  with runtime_lock:
+    return execution_intent
 
 
 def register_control_callback(name, callback):

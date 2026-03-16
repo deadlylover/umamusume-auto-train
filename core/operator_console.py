@@ -38,11 +38,15 @@ class OperatorConsole:
     self._turn_value = None
     self._energy_value = None
     self._action_value = None
+    self._sub_phase_value = None
+    self._intent_value = None
     self._message_value = None
     self._error_value = None
+    self._execution_intent_var = None
     self._phase_labels = {}
     self._summary_text = None
     self._training_text = None
+    self._ocr_debug_text = None
     self._bot_button = None
     self._pause_button = None
     self._resume_button = None
@@ -113,6 +117,8 @@ class OperatorConsole:
     self._turn_value = self._make_stat(top, 3, "Turn")
     self._energy_value = self._make_stat(top, 4, "Energy")
     self._action_value = self._make_stat(top, 5, "Action")
+    self._sub_phase_value = self._make_stat(top, 6, "Sub-Phase")
+    self._intent_value = self._make_stat(top, 7, "Intent")
 
     actions = tk.Frame(root, bg="#101418", padx=14, pady=0)
     actions.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -125,6 +131,20 @@ class OperatorConsole:
     self._continue_button = tk.Button(actions, text="Continue (F2)", command=self._continue_review)
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(actions, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT)
+    self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
+    for intent in ("check_only", "preview_clicks", "execute"):
+      tk.Radiobutton(
+        actions,
+        text=intent.replace("_", " "),
+        value=intent,
+        variable=self._execution_intent_var,
+        command=self._set_execution_intent,
+        fg="white",
+        bg="#101418",
+        selectcolor="#192028",
+        activebackground="#101418",
+        activeforeground="white",
+      ).pack(side=tk.LEFT, padx=(12 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
       actions,
@@ -145,6 +165,7 @@ class OperatorConsole:
     right.columnconfigure(0, weight=1)
     right.rowconfigure(1, weight=1)
     right.rowconfigure(3, weight=1)
+    right.rowconfigure(5, weight=1)
 
     for phase in PHASES:
       label = tk.Label(
@@ -161,16 +182,32 @@ class OperatorConsole:
 
     self._message_value = tk.StringVar(value="")
     self._error_value = tk.StringVar(value="")
-    tk.Label(right, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="ew")
+    summary_header = tk.Frame(right, bg="#101418")
+    summary_header.grid(row=0, column=0, sticky="ew")
+    summary_header.columnconfigure(0, weight=1)
+    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=1, sticky="e")
     self._summary_text = scrolledtext.ScrolledText(right, height=14, bg="#192028", fg="#d6dde5", insertbackground="white")
     self._summary_text.grid(row=1, column=0, sticky="nsew", pady=(4, 10))
 
-    tk.Label(right, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=2, column=0, sticky="ew")
+    training_header = tk.Frame(right, bg="#101418")
+    training_header.grid(row=2, column=0, sticky="ew")
+    training_header.columnconfigure(0, weight=1)
+    tk.Label(training_header, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e")
     self._training_text = scrolledtext.ScrolledText(right, height=12, bg="#192028", fg="#d6dde5", insertbackground="white")
     self._training_text.grid(row=3, column=0, sticky="nsew", pady=(4, 10))
 
-    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=4, column=0, sticky="ew")
-    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=5, column=0, sticky="ew")
+    ocr_header = tk.Frame(right, bg="#101418")
+    ocr_header.grid(row=4, column=0, sticky="ew")
+    ocr_header.columnconfigure(0, weight=1)
+    tk.Label(ocr_header, text="OCR Debug", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    tk.Button(ocr_header, text="Copy OCR Debug", command=lambda: self._copy_widget(self._ocr_debug_text)).grid(row=0, column=1, sticky="e")
+    self._ocr_debug_text = scrolledtext.ScrolledText(right, height=10, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._ocr_debug_text.grid(row=5, column=0, sticky="nsew", pady=(4, 10))
+
+    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=6, column=0, sticky="ew")
+    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
 
   def _make_stat(self, parent, column, title):
     row = 0 if column < 4 else 1
@@ -212,6 +249,10 @@ class OperatorConsole:
     self._turn_value.set(snapshot.get("turn_label") or "-")
     self._energy_value.set(snapshot.get("energy_label") or "-")
     self._action_value.set(selected_action.get("func") or "-")
+    self._sub_phase_value.set(snapshot.get("sub_phase") or "-")
+    self._intent_value.set(runtime_state.get("execution_intent") or snapshot.get("execution_intent") or "-")
+    if self._execution_intent_var is not None:
+      self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
     self._bot_button.configure(text="Stop Bot" if runtime_state.get("is_bot_running") else "Start Bot")
@@ -238,9 +279,13 @@ class OperatorConsole:
       "selected_action": selected_action,
       "available_actions": snapshot.get("available_actions"),
       "reasoning_notes": snapshot.get("reasoning_notes"),
+      "sub_phase": snapshot.get("sub_phase"),
+      "execution_intent": snapshot.get("execution_intent") or runtime_state.get("execution_intent"),
+      "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
+    self._set_text(self._ocr_debug_text, json.dumps(snapshot.get("ocr_debug") or [], indent=2, ensure_ascii=True))
 
   def _set_text(self, widget, value):
     widget.configure(state=tk.NORMAL)
@@ -252,6 +297,20 @@ class OperatorConsole:
     if self._root is None or self._always_on_top_var is None:
       return
     self._root.attributes("-topmost", bool(self._always_on_top_var.get()))
+
+  def _copy_widget(self, widget):
+    if self._root is None or widget is None:
+      return
+    value = widget.get("1.0", tk.END).strip()
+    self._root.clipboard_clear()
+    self._root.clipboard_append(value)
+    self._message_value.set("Copied pane contents to clipboard.")
+
+  def _set_execution_intent(self):
+    if self._execution_intent_var is None:
+      return
+    bot.set_execution_intent(self._execution_intent_var.get())
+    self.publish()
 
   def _load_window_geometry(self):
     self._window_geometry = self.DEFAULT_GEOMETRY

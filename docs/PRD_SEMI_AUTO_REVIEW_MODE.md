@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft TODO PRD for a semi-auto mode where the bot scans the turn, decides what it wants to do, then pauses and waits for operator confirmation before executing, with a dedicated GUI operator console instead of terminal-only output.
+In progress. The pause/review workflow is now usable in the current branch, with remaining work focused on richer snapshot content, persistence, and polish.
 
 ## Current Progress
 
@@ -16,6 +16,10 @@ Implemented in the current branch:
   - resume
   - continue current review
   - open OCR region adjuster
+- Console now exposes execution intent controls:
+  - `check_only`
+  - `preview_clicks`
+  - `execute`
 - Bot runtime phase/state is exposed to the console.
 - A decision snapshot is shown in the console with:
   - scenario
@@ -24,15 +28,43 @@ Implemented in the current branch:
   - selected action
   - available actions
   - ranked trainings
+- Snapshot publishing is backed by shared runtime state in `core/bot.py`, not ad hoc log scraping.
+- Runtime phase tracking is wired through the main loop with explicit phases such as:
+  - idle
+  - focusing window
+  - scanning lobby
+  - collecting main state
+  - collecting training state
+  - evaluating strategy
+  - waiting for confirmation
+  - executing action
+  - recovering
+- Snapshot/runtime payloads now include:
+  - `sub_phase`
+  - `execution_intent`
+  - `ocr_debug`
+  - `planned_clicks`
 - Review gating is wired before action execution in `core/skeleton.py`.
+- Manual pause requests work even in `auto` mode; execution waits at the same review boundary.
+- `check_only` and `preview_clicks` now prevent action clicks from committing and keep the bot on the same turn for inspection.
+- Skill purchasing now has its own review path with dedicated sub-phases and planned-click/OCR-debug payloads.
+- The console now has a dedicated OCR Debug pane.
+- The console now has copy-to-clipboard buttons for:
+  - summary
+  - ranked trainings
+  - OCR debug
 - `F2` still works as continue while paused, but the GUI is now sufficient without hotkeys.
+- `execution_mode` is now in config and loaded by `core/config.py`.
 - macOS Tk crash was fixed by moving Tk window creation to the main thread and running the server in a background thread.
 
 Not implemented yet:
 
-- richer reasoning text beyond the current snapshot
+- richer reasoning text beyond the current snapshot payload
+- scenario-specific snapshot fields beyond the current generic/unity-focused training data
+- full Trackblazer-specific sub-phase coverage for shop/inventory/race flows
+- real action preview payloads for Trackblazer shop/item usage flows
 - screenshot preview inside the console
-- dedicated server/web endpoint for the latest decision snapshot
+- dedicated server/web endpoint or persisted JSON for the latest decision snapshot
 - operator override actions beyond pause/resume/continue
 - polished error taxonomy and full flowchart styling
 
@@ -210,6 +242,90 @@ Preferred presentation:
 
 This does not need to be fancy in v1, but it should be intentionally visual and easy to scan.
 
+### 8. Detailed Sub-Phases For Review And OCR Debugging
+
+The current coarse phases are enough for generic pause/resume, but not enough for scenario bring-up. The console should support a second level of detail so the operator can tell whether the bot is:
+
+- checking state only
+- preparing an action
+- previewing the next click target
+- actually performing the action
+
+Minimum detailed sub-phases to surface:
+
+- `detect_scenario_banner`
+- `collect_turn_header`
+- `collect_training_panel`
+- `collect_trackblazer_grade_points`
+- `collect_trackblazer_shop_coins`
+- `collect_trackblazer_shop_state`
+- `collect_trackblazer_inventory`
+- `evaluate_training_action`
+- `evaluate_race_action`
+- `evaluate_skill_purchase`
+- `evaluate_trackblazer_shop`
+- `evaluate_item_usage`
+- `open_skill_menu`
+- `scan_skill_list`
+- `match_skill_targets`
+- `preview_skill_purchase_clicks`
+- `confirm_skill_purchase`
+- `open_trackblazer_shop`
+- `scan_trackblazer_shop`
+- `preview_shop_clicks`
+- `confirm_shop_purchase`
+- `open_race_menu`
+- `scan_race_list`
+- `evaluate_race_candidates`
+- `preview_race_selection_clicks`
+- `confirm_race_entry`
+
+These sub-phases should appear in the summary text even if the left-hand flowchart keeps a shorter primary phase list.
+
+### 9. Check-Only Versus Do-Action Modes
+
+The console should support explicit intent for the current phase, not just a binary paused/running state.
+
+Required execution intents:
+
+- `check_only`: inspect the screen, OCR it, compute the recommendation, but do not click.
+- `preview_clicks`: compute the same action path and show each intended click target/region/template before committing.
+- `execute`: perform the action normally after review approval.
+
+Practical examples:
+
+- skill buying:
+  the bot can open the skill menu in `execute`, then switch to `check_only` or `preview_clicks` while scanning and matching skills so OCR can be reviewed before pressing `Learn`.
+- Trackblazer shop:
+  the bot can read shop coins, visible items, and current inventory in `check_only`, then show the exact item slot and confirm button it would press in `preview_clicks`.
+- race menu:
+  the bot can open the race list, score candidate races, and show which race card/button it would select before actually entering.
+
+The operator must be able to tell from the console which intent is active for the current sub-phase.
+
+### 10. OCR Region Debug Surface
+
+One text area in the operator console should be dedicated to OCR/template provenance so OCR tuning does not require terminal log scraping.
+
+For every screen-read or template match, the console should be able to show:
+
+- logical field name, for example `trackblazer_shop_coin`
+- source type: OCR region, template match, or pixel/color check
+- constant/region key, for example `MANT_SHOP_COIN_REGION`
+- active coordinates after offsets/overrides
+- scenario/profile used
+- last extracted raw text / parsed value / confidence if available
+- screenshot or crop path if a debug image was saved
+- intended click target if the next step would act on that field
+
+Clipboard actions should be built into the console:
+
+- `Copy Summary`: copies the operator summary pane
+- `Copy OCR Debug`: copies the OCR provenance/debug pane
+- `Copy Trainings`: copies the ranked training pane
+
+The copied text should be plain JSON or another paste-friendly text format so it can be dropped directly into an AI/code-review thread.
+
 ## Architecture Requirements
 
 ### Recommended Design
@@ -249,6 +365,10 @@ Suggested fields:
 - `ranked_trainings`
 - `min_scores`
 - `reasoning_notes`
+- `sub_phase`
+- `execution_intent`
+- `ocr_debug`
+- `planned_clicks`
 
 This should be serializable so the server/web UI can expose it later without rework.
 
@@ -258,6 +378,7 @@ Additional recommended fields:
 - `phase_history`
 - `error_state`
 - `last_screenshot_path`
+- `region_debug_entries`
 - `raw_state`
 
 ### Where To Hook
@@ -335,8 +456,10 @@ Acceptance:
 - [x] Add a helper that converts `state + action` into a structured decision snapshot.
 - [x] Include ranked trainings from `action["available_trainings"]` when present.
 - [ ] Include thresholds and scenario-specific score fields when present.
+- [x] Include sub-phase, execution intent, and planned click preview data.
+- [x] Include OCR region/debug provenance entries for fields used in the decision.
 - [x] Ensure non-training actions also produce useful snapshots.
-- [x] Add phase/error metadata to the snapshot.
+- [x] Add phase/error metadata to the runtime state used by the console.
 
 Acceptance:
 
@@ -351,6 +474,9 @@ Acceptance:
 - [x] Keep the window open across turns instead of recreating it each time.
 - [x] Add GUI controls for start/stop/pause/resume.
 - [x] Add a console button to launch the OCR region adjuster.
+- [x] Add a dedicated OCR/debug text pane with region provenance and parse details.
+- [x] Add copy-to-clipboard buttons for each text pane.
+- [x] Add visible execution-intent controls or indicators for `check_only`, `preview_clicks`, and `execute`.
 
 Acceptance:
 
@@ -375,6 +501,8 @@ Acceptance:
 - [x] Add a compact phase flowchart / stepper to the operator console.
 - [x] Highlight current phase and error phase distinctly.
 - [ ] Add short labels for common blocked states such as OCR failure, unknown screen, missing template, and waiting for user.
+- [x] Add detailed sub-phase display for skill flow.
+- [ ] Add detailed sub-phase display for Trackblazer shop flow, inventory checks, and race flow.
 
 Acceptance:
 
@@ -385,6 +513,8 @@ Acceptance:
 - [ ] Improve log formatting for decision snapshots.
 - [ ] Optionally persist the last paused snapshot to a JSON file or server endpoint.
 - [ ] Optionally attach screenshot/debug capture paths to the snapshot.
+- [x] Show active OCR region keys and adjusted coordinates in the console.
+- [x] Show planned click targets before commit in preview mode.
 
 Acceptance:
 
@@ -392,16 +522,21 @@ Acceptance:
 
 ## Technical TODOs
 
-- [ ] Add config field, e.g. `execution_mode`.
-- [ ] Update `config.template.json`.
-- [ ] Update `core/config.py`.
+- [x] Add config field, e.g. `execution_mode`.
+- [x] Update `config.template.json`.
+- [x] Update `core/config.py`.
 - [ ] Update web schema/types if config is user-editable there.
-- [ ] Add pause runtime state.
-- [ ] Add phase tracking runtime state.
-- [ ] Add decision snapshot builder.
-- [ ] Add operator console UI module.
-- [ ] Add pause/continue helper in `core/skeleton.py`.
-- [ ] Reassign hotkeys in `main.py`.
+- [x] Add pause runtime state.
+- [x] Add phase tracking runtime state.
+- [x] Add decision snapshot builder.
+- [x] Add operator console UI module.
+- [x] Add pause/continue helper in `core/skeleton.py`.
+- [x] Reassign hotkeys in `main.py`.
+- [x] Add sub-phase tracking separate from coarse bot phase.
+- [x] Add execution-intent state: `check_only`, `preview_clicks`, `execute`.
+- [x] Add OCR provenance/debug payloads to snapshots.
+- [x] Add planned-click preview payloads to snapshots.
+- [x] Add copy-to-clipboard actions in the Tk console.
 - [ ] Update README / CLAUDE hotkey docs after implementation.
 
 ## Proposed Hotkey Plan
