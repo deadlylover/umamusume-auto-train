@@ -36,10 +36,12 @@ def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: f
     return False
   elif len(target) == 2:
     x, y = target
-    if bot.use_adb:
+    if bot.is_adb_input_active():
       sleep(duration)
       for _ in range(clicks):
-        adb_actions.click(x, y)
+        if not adb_actions.click(x, y):
+          error(f"[INPUT][ADB] Click dispatch failed at ({x}, {y}).")
+          return False
         sleep(interval)
     else:
       pyautogui_actions.click(x_y=(x, y), clicks=clicks, interval=interval, duration=duration)
@@ -47,10 +49,12 @@ def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: f
     x, y, w, h = target
     cx = x + w // 2
     cy = y + h // 2
-    if bot.use_adb:
+    if bot.is_adb_input_active():
       sleep(duration)
       for _ in range(clicks):
-        adb_actions.click(cx, cy)
+        if not adb_actions.click(cx, cy):
+          error(f"[INPUT][ADB] Click dispatch failed at ({cx}, {cy}).")
+          return False
         sleep(interval)
     else:
       pyautogui_actions.click(x_y=(cx, cy), clicks=clicks, interval=interval, duration=duration)
@@ -68,8 +72,10 @@ def swipe(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.3, 
   # Swipe from start to end coordinates
   if not bot.is_bot_running:
     stop_bot()
-  if bot.use_adb:
-    adb_actions.swipe(start_x_y[0], start_x_y[1], end_x_y[0], end_x_y[1], duration)
+  if bot.is_adb_input_active():
+    if not adb_actions.swipe(start_x_y[0], start_x_y[1], end_x_y[0], end_x_y[1], duration):
+      error(f"[INPUT][ADB] Swipe dispatch failed from {start_x_y} to {end_x_y}.")
+      return False
   else:
     pyautogui_actions.swipe(start_x_y, end_x_y, duration)
   if args.device_debug:
@@ -293,7 +299,7 @@ def screenshot(region_xywh : tuple[int, int, int, int] = None, region_ltrb : tup
     if args.device_debug:
       debug(f"Screenshot: {constants.GAME_WINDOW_REGION}")
 
-  if bot.use_adb:
+  if bot.uses_adb_for_screenshots():
     if args.device_debug:
       debug(f"Using ADB screenshot")
     screenshot = adb_actions.screenshot(region_xywh=region_xywh)
@@ -370,7 +376,7 @@ def locate_and_click(img_path : str, confidence=0.8, min_search_time=0.5, region
   return False
 
 def flush_screenshot_cache():
-  if bot.use_adb:
+  if bot.uses_adb_for_screenshots():
     if args.device_debug:
       debug(f"Flushing ADB screenshot cache")
     adb_actions.cached_screenshot = []

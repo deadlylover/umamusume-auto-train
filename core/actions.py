@@ -327,7 +327,7 @@ def start_race():
 
 def find_skip_buttons(min_search_time):
   skip_btn = device_action.locate("assets/buttons/skip_btn.png", min_search_time=min_search_time, region_ltrb=constants.SCREEN_BOTTOM_BBOX)
-  if not skip_btn and not bot.use_adb:
+  if not skip_btn and not bot.is_adb_input_active():
     skip_btn_big = device_action.locate("assets/buttons/skip_btn_big.png", min_search_time=min_search_time, region_ltrb=constants.SKIP_BTN_BIG_BBOX_LANDSCAPE)
   else:
     skip_btn_big = None

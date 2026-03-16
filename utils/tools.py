@@ -36,7 +36,7 @@ def click(img: str = None, confidence: float = 0.8, minSearch:float = 2, click: 
       debug(text)
     x, y, w, h = box
     center = (x + w // 2, y + h // 2)
-    device_action.click(center[0], center[1], clicks=click, interval=interval)
+    device_action.click(target=center, clicks=click, interval=interval)
     return True
 
   if img is None:
@@ -49,7 +49,7 @@ def click(img: str = None, confidence: float = 0.8, minSearch:float = 2, click: 
   if btn:
     if text:
       debug(text)
-    device_action.click(btn[0], btn[1], clicks=click, interval=interval)
+    device_action.click(target=btn, clicks=click, interval=interval)
     return True
 
   return False

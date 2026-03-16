@@ -1746,6 +1746,8 @@
       "offset_x": 405,
       "apply_offset_y": false,
       "offset_y": 0,
+      "preferred_control_backend": "adb",
+      "allow_host_input_fallback": false,
       "apply_recognition_offset": false,
       "recognition_offset_x": 0,
       "recognition_offset_y": 0,

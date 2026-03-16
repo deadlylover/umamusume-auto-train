@@ -43,6 +43,8 @@ class OperatorConsole:
     self._action_value = None
     self._sub_phase_value = None
     self._intent_value = None
+    self._backend_value = None
+    self._device_value = None
     self._message_value = None
     self._error_value = None
     self._execution_intent_var = None
@@ -118,7 +120,7 @@ class OperatorConsole:
 
     top = tk.Frame(root, bg="#101418", padx=14, pady=12)
     top.grid(row=0, column=0, columnspan=2, sticky="ew")
-    for col in range(4):
+    for col in range(5):
       top.columnconfigure(col, weight=1)
 
     self._phase_value = self._make_stat(top, 0, "Phase")
@@ -129,6 +131,8 @@ class OperatorConsole:
     self._action_value = self._make_stat(top, 5, "Action")
     self._sub_phase_value = self._make_stat(top, 6, "Sub-Phase")
     self._intent_value = self._make_stat(top, 7, "Intent")
+    self._backend_value = self._make_stat(top, 8, "Backend")
+    self._device_value = self._make_stat(top, 9, "Device")
 
     actions = tk.Frame(root, bg="#101418", padx=14, pady=0)
     actions.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -252,8 +256,8 @@ class OperatorConsole:
     tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
 
   def _make_stat(self, parent, column, title):
-    row = 0 if column < 4 else 1
-    actual_column = column if column < 4 else column - 4
+    row = 0 if column < 5 else 1
+    actual_column = column if column < 5 else column - 5
     frame = tk.Frame(parent, bg="#151b22", padx=10, pady=8)
     frame.grid(row=row, column=actual_column, sticky="ew", padx=4, pady=4)
     tk.Label(frame, text=title, fg="#8a949e", bg="#151b22").pack(anchor="w")
@@ -284,6 +288,8 @@ class OperatorConsole:
     snapshot = runtime_state.get("snapshot") or {}
     state_summary = snapshot.get("state_summary") or {}
     selected_action = snapshot.get("selected_action") or {}
+    backend_state = snapshot.get("backend_state") or runtime_state.get("backend_state") or {}
+    adb_state = backend_state.get("adb") or {}
 
     self._phase_value.set(runtime_state.get("phase") or "-")
     self._status_value.set(runtime_state.get("status") or "-")
@@ -293,6 +299,8 @@ class OperatorConsole:
     self._action_value.set(selected_action.get("func") or "-")
     self._sub_phase_value.set(snapshot.get("sub_phase") or "-")
     self._intent_value.set(runtime_state.get("execution_intent") or snapshot.get("execution_intent") or "-")
+    self._backend_value.set(backend_state.get("active_backend") or "-")
+    self._device_value.set(backend_state.get("device_id") or "-")
     if self._execution_intent_var is not None:
       self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
     self._message_value.set(runtime_state.get("message") or "")
@@ -323,6 +331,14 @@ class OperatorConsole:
       "reasoning_notes": snapshot.get("reasoning_notes"),
       "sub_phase": snapshot.get("sub_phase"),
       "execution_intent": snapshot.get("execution_intent") or runtime_state.get("execution_intent"),
+      "backend_state": backend_state,
+      "adb_health": {
+        "available": adb_state.get("adb_available"),
+        "connected": adb_state.get("adb_connected"),
+        "device_ready": adb_state.get("device_ready"),
+        "healthy": adb_state.get("healthy"),
+        "last_error": adb_state.get("adb_last_error"),
+      },
       "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))

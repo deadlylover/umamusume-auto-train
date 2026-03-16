@@ -97,7 +97,10 @@ def reload_config(print_config=True):
     # macOS-specific platform settings (optional, with defaults)
     platform_config = config.get("platform", {})
     load_var('PLATFORM_PROFILE', platform_config.get("profile", "auto"))
-    load_var('MAC_AIR_SETTINGS', platform_config.get("mac_bluestacks_air", {}))
+    mac_air_settings = platform_config.get("mac_bluestacks_air", {})
+    load_var('MAC_AIR_SETTINGS', mac_air_settings)
+    load_var('PREFERRED_CONTROL_BACKEND', mac_air_settings.get("preferred_control_backend", "adb"))
+    load_var('ALLOW_HOST_INPUT_FALLBACK', bool(mac_air_settings.get("allow_host_input_fallback", False)))
     
     # Debug/region adjuster settings (optional)
     debug_config = config.get("debug", {})

@@ -136,7 +136,7 @@ def collect_training_state(state_object, training_function_name):
     # Hold/drag across training buttons to reveal info without confirming training.
     hold_active = False
     for name, mouse_pos in constants.TRAINING_BUTTON_POSITIONS.items():
-      if bot.use_adb:
+      if bot.is_adb_input_active():
         # Keep the original swipe behavior for ADB devices.
         device_action.swipe(mouse_pos, (mouse_pos[0], mouse_pos[1] + 150), duration=0.15)
       else:

@@ -9,7 +9,7 @@ import platform
 import pyautogui
 import uvicorn
 
-from utils.log import info, warning, error, debug, init_logging
+from utils.log import info, warning, error, debug, init_logging, args
 
 from core.skeleton import career_lobby
 from core.hotkeys import HotkeyListener
@@ -20,6 +20,7 @@ from core.region_adjuster.shared import resolve_region_adjuster_profiles
 import core.config as config
 import core.bot as bot
 import utils.constants as constants
+import utils.adb_actions as adb_actions
 from server.main import app
 from update_config import update_config
 
@@ -32,11 +33,86 @@ event_hotkey = "f4"
 recreation_hotkey = "f5"
 region_adjuster_hotkey = "f6"
 
+
+def _is_mac_bluestacks_profile():
+  profile = getattr(config, "PLATFORM_PROFILE", "auto")
+  return profile == "mac_bluestacks_air" or (profile == "auto" and SYSTEM == "darwin")
+
+
+def _resolve_requested_backend():
+  if args.use_adb:
+    return bot.CONTROL_BACKEND_ADB, "CLI --use-adb override."
+  if config.USE_ADB:
+    return bot.CONTROL_BACKEND_ADB, "config.use_adb=true."
+  if _is_mac_bluestacks_profile() and str(getattr(config, "PREFERRED_CONTROL_BACKEND", "adb")).lower() == bot.CONTROL_BACKEND_ADB:
+    return bot.CONTROL_BACKEND_ADB, "macOS BlueStacks Air preferred_control_backend=adb."
+  return bot.CONTROL_BACKEND_HOST_INPUT, "Host input requested by configuration."
+
+
+def resolve_control_backend():
+  requested_backend, resolution_reason = _resolve_requested_backend()
+  resolved_device_id = args.use_adb or config.DEVICE_ID or adb_actions.DEFAULT_DEVICE_ID
+  fallback_allowed = bool(getattr(config, "ALLOW_HOST_INPUT_FALLBACK", False))
+
+  bot.set_control_backend_state(
+    requested_backend=requested_backend,
+    active_backend=bot.CONTROL_BACKEND_HOST_INPUT,
+    screenshot_backend_name=bot.CONTROL_BACKEND_HOST_INPUT,
+    fallback_allowed=fallback_allowed,
+    resolved_device_id=resolved_device_id,
+    resolution_reason=resolution_reason,
+  )
+  bot.update_adb_status(
+    {
+      "requested_backend": requested_backend,
+      "active_backend": bot.CONTROL_BACKEND_HOST_INPUT,
+      "device_id": resolved_device_id,
+      "adb_available": adb_actions.adb is not None,
+      "adb_connected": False,
+      "device_ready": False,
+      "healthcheck_passed": False,
+      "healthy": False,
+      "adb_last_error": "",
+    }
+  )
+
+  info(
+    f"[BACKEND] requested={requested_backend} screenshot_backend={bot.CONTROL_BACKEND_HOST_INPUT} "
+    f"device_id={resolved_device_id} fallback_allowed={fallback_allowed} reason={resolution_reason}"
+  )
+
+  if requested_backend != bot.CONTROL_BACKEND_ADB:
+    bot.set_control_backend_state(active_backend=bot.CONTROL_BACKEND_HOST_INPUT)
+    return
+
+  adb_status = adb_actions.init_adb()
+  adb_ok = bool(adb_status.get("healthy"))
+  if adb_ok:
+    bot.set_control_backend_state(active_backend=bot.CONTROL_BACKEND_ADB)
+    bot.update_adb_status({**adb_status, "active_backend": bot.CONTROL_BACKEND_ADB})
+    info(f"[BACKEND] Active input backend: {bot.CONTROL_BACKEND_ADB} ({resolved_device_id})")
+    return
+
+  error(f"[ADB] Initialization failed for {resolved_device_id}: {adb_status.get('adb_last_error') or 'unknown error'}")
+  if fallback_allowed:
+    warning("[BACKEND] Falling back to host_input because allow_host_input_fallback=true.")
+    bot.set_control_backend_state(active_backend=bot.CONTROL_BACKEND_HOST_INPUT)
+    bot.update_adb_status({**adb_status, "active_backend": bot.CONTROL_BACKEND_HOST_INPUT})
+    return
+
+  bot.set_control_backend_state(active_backend=bot.CONTROL_BACKEND_HOST_INPUT)
+  bot.update_adb_status({**adb_status, "active_backend": bot.CONTROL_BACKEND_HOST_INPUT})
+  raise RuntimeError(
+    f"ADB was requested for device '{resolved_device_id}' but initialization failed: "
+    f"{adb_status.get('adb_last_error') or 'unknown error'}"
+  )
+
 def main():
   print("Uma Auto!")
   try:
     config.reload_config()
     bot.stop_event.clear()
+    resolve_control_backend()
     bot.set_phase("focusing_window", message="Focusing emulator window.")
     if config.EXECUTION_MODE == "semi_auto":
       ensure_operator_console()

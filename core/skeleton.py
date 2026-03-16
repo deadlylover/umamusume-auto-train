@@ -24,9 +24,9 @@ from utils.log import info, warning, error, debug, debug_window, log_encoded, ar
 from utils.device_action_wrapper import BotStopException
 import utils.device_action_wrapper as device_action
 import utils.pyautogui_actions as pyautogui_actions
+import utils.adb_actions as adb_actions
 
 from core.strategies import Strategy
-from utils.adb_actions import init_adb
 
 def cache_templates(templates):
   cache={}
@@ -287,7 +287,11 @@ def _region_debug_entry(field, region_key=None, bbox_key=None, parsed_value=None
 
 
 def _planned_click(label, template=None, target=None, region_key=None, note=None):
-  entry = {"label": label}
+  entry = {
+    "label": label,
+    "input_backend": bot.get_active_control_backend(),
+    "screenshot_backend": bot.get_screenshot_backend(),
+  }
   if template:
     entry["template"] = template
   if target is not None:
@@ -333,6 +337,7 @@ def _attempt_template_click_with_debug(field, template_path, region_ltrb, thresh
   match_location = None
   match_size = None
   verification_details = None
+  actual_click_mode = "not_attempted"
 
   if best_match is not None:
     best_score = round(best_match["score"], 4)
@@ -346,13 +351,35 @@ def _attempt_template_click_with_debug(field, template_path, region_ltrb, thresh
         region_ltrb[0] + x + w // 2,
         region_ltrb[1] + y + h // 2,
       )
-      if click_mode == "press_click" and not bot.use_adb:
+      if click_mode == "press_click" and not bot.is_adb_input_active():
+        actual_click_mode = "host_press_click"
         click_attempted = bool(pyautogui_actions.press_click(click_target, hold_duration=0.08, move_duration=duration))
       else:
+        actual_click_mode = "adb_tap" if bot.is_adb_input_active() else "host_click"
         click_attempted = bool(device_action.click(click_target, duration=duration))
       verification_details = {
-        "input_debug": dict(getattr(pyautogui_actions, "LAST_CLICK_DEBUG", {}) or {}),
-        "click_mode": click_mode,
+        "requested_click_mode": click_mode,
+        "actual_click_mode": actual_click_mode,
+        "input_backend": bot.get_active_control_backend(),
+        "input_debug": (
+          adb_actions.get_last_input_debug()
+          if bot.is_adb_input_active()
+          else dict(getattr(pyautogui_actions, "LAST_CLICK_DEBUG", {}) or {})
+        ),
+        "coordinate_diagnostics": {
+          "host_search_region_bbox": list(region_ltrb),
+          "host_match_location_in_region": list(match_location) if match_location is not None else None,
+          "host_match_size": list(match_size) if match_size is not None else None,
+          "host_click_target_absolute": list(click_target) if click_target is not None else None,
+          "game_window_region": list(constants.GAME_WINDOW_REGION) if getattr(constants, "GAME_WINDOW_REGION", None) is not None else None,
+          "game_window_bbox": list(constants.GAME_WINDOW_BBOX) if getattr(constants, "GAME_WINDOW_BBOX", None) is not None else None,
+          "macos_full_screen_meta": dict(getattr(pyautogui_actions, "_macos_full_screen_meta", {}) or {}),
+          "adb_display_info": (
+            (bot.get_backend_state().get("adb") or {}).get("display_info")
+            if bot.is_adb_input_active()
+            else None
+          ),
+        },
       }
       if click_attempted and verify_after_click is not None:
         sleep(0.5)
@@ -602,6 +629,7 @@ def _ocr_debug_for_action(state_obj, action):
 
 def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
   profile_info = _active_region_profile_info()
+  backend_state = bot.get_backend_state()
   debug_entries = ([ _profile_debug_entry() ] + ocr_debug) if ocr_debug is not None else ([ _profile_debug_entry() ] + _ocr_debug_for_action(state_obj, action))
   debug_entries = _enrich_ocr_debug_entries(debug_entries)
   state_summary = {
@@ -616,6 +644,9 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "aptitudes": state_obj.get("aptitudes"),
     "ocr_region_profile": profile_info["active_profile"],
     "ocr_overrides_path": profile_info["overrides_path"],
+    "control_backend": backend_state.get("active_backend"),
+    "screenshot_backend": backend_state.get("screenshot_backend"),
+    "device_id": backend_state.get("device_id"),
   }
   selected_action = {
     "func": getattr(action, "func", None),
@@ -651,6 +682,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "ranked_trainings": ranked_trainings,
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
+    "backend_state": backend_state,
     "ocr_debug": debug_entries,
     "planned_clicks": planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action),
   }
@@ -658,6 +690,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
 
 def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_notes=None, available_actions=None):
   profile_info = _active_region_profile_info()
+  backend_state = bot.get_backend_state()
   debug_entries = _enrich_ocr_debug_entries([_profile_debug_entry()] + (ocr_debug or []))
   return {
     "scenario_name": constants.SCENARIO_NAME or "unknown",
@@ -668,12 +701,16 @@ def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_no
     "state_summary": {
       "ocr_region_profile": profile_info["active_profile"],
       "ocr_overrides_path": profile_info["overrides_path"],
+      "control_backend": backend_state.get("active_backend"),
+      "screenshot_backend": backend_state.get("screenshot_backend"),
+      "device_id": backend_state.get("device_id"),
     },
     "selected_action": {},
     "available_actions": available_actions or [],
     "ranked_trainings": [],
     "reasoning_notes": reasoning_notes or message,
     "min_scores": None,
+    "backend_state": backend_state,
     "ocr_debug": debug_entries,
     "planned_clicks": [],
   }
@@ -867,7 +904,6 @@ def career_lobby(dry_run_turn=False):
   constants.SCENARIO_NAME = ""
   clear_aptitudes_cache()
   strategy = Strategy()
-  init_adb()
   init_skill_py()
   if config.EXECUTION_MODE == "semi_auto":
     ensure_operator_console()

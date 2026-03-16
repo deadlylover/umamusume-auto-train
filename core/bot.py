@@ -16,6 +16,24 @@ hotkey = "f1"
 # Device/platform configuration
 use_adb = False
 device_id = None
+CONTROL_BACKEND_HOST_INPUT = "host_input"
+CONTROL_BACKEND_ADB = "adb"
+requested_control_backend = CONTROL_BACKEND_HOST_INPUT
+active_control_backend = CONTROL_BACKEND_HOST_INPUT
+screenshot_backend = CONTROL_BACKEND_HOST_INPUT
+allow_host_input_fallback = False
+backend_resolution_reason = ""
+adb_status = {
+  "requested_backend": CONTROL_BACKEND_HOST_INPUT,
+  "active_backend": CONTROL_BACKEND_HOST_INPUT,
+  "device_id": None,
+  "adb_available": False,
+  "adb_connected": False,
+  "device_ready": False,
+  "healthcheck_passed": False,
+  "healthy": False,
+  "adb_last_error": "",
+}
 
 # Window reference (platform-specific)
 # - On Windows: pygetwindow Window object
@@ -26,7 +44,7 @@ windows_window = None
 PREFERRED_POSITION_SET = False
 
 # Operator console / semi-auto runtime state
-runtime_lock = threading.Lock()
+runtime_lock = threading.RLock()
 runtime_phase = "idle"
 runtime_phase_status = "idle"
 runtime_phase_message = ""
@@ -63,6 +81,7 @@ def get_runtime_state():
       "pause_requested": pause_requested,
       "execution_intent": execution_intent,
       "is_bot_running": is_bot_running,
+      "backend_state": get_backend_state(),
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
     }
 
@@ -125,6 +144,85 @@ def set_execution_intent(intent):
 def get_execution_intent():
   with runtime_lock:
     return execution_intent
+
+
+def set_control_backend_state(
+  requested_backend=None,
+  active_backend=None,
+  screenshot_backend_name=None,
+  fallback_allowed=None,
+  resolved_device_id=None,
+  resolution_reason=None,
+):
+  global requested_control_backend, active_control_backend, screenshot_backend
+  global allow_host_input_fallback, device_id, use_adb, backend_resolution_reason, runtime_updated_at
+  with runtime_lock:
+    if requested_backend is not None:
+      requested_control_backend = requested_backend
+    if active_backend is not None:
+      active_control_backend = active_backend
+      use_adb = active_control_backend == CONTROL_BACKEND_ADB
+    if screenshot_backend_name is not None:
+      screenshot_backend = screenshot_backend_name
+    if fallback_allowed is not None:
+      allow_host_input_fallback = bool(fallback_allowed)
+    if resolved_device_id is not None:
+      device_id = resolved_device_id
+    if resolution_reason is not None:
+      backend_resolution_reason = resolution_reason
+    runtime_updated_at = time.time()
+
+
+def update_adb_status(status):
+  global adb_status, runtime_updated_at
+  with runtime_lock:
+    adb_status = dict(status or {})
+    runtime_updated_at = time.time()
+
+
+def get_backend_state():
+  with runtime_lock:
+    backend_snapshot = {
+      "requested_backend": requested_control_backend,
+      "active_backend": active_control_backend,
+      "screenshot_backend": screenshot_backend,
+      "device_id": device_id,
+      "allow_host_input_fallback": allow_host_input_fallback,
+      "resolution_reason": backend_resolution_reason,
+      "use_adb_legacy_flag": use_adb,
+      "adb": dict(adb_status or {}),
+    }
+  return backend_snapshot
+
+
+def get_requested_control_backend():
+  with runtime_lock:
+    return requested_control_backend
+
+
+def get_active_control_backend():
+  with runtime_lock:
+    return active_control_backend
+
+
+def get_screenshot_backend():
+  with runtime_lock:
+    return screenshot_backend
+
+
+def is_adb_requested():
+  with runtime_lock:
+    return requested_control_backend == CONTROL_BACKEND_ADB
+
+
+def is_adb_input_active():
+  with runtime_lock:
+    return active_control_backend == CONTROL_BACKEND_ADB
+
+
+def uses_adb_for_screenshots():
+  with runtime_lock:
+    return screenshot_backend == CONTROL_BACKEND_ADB
 
 
 def register_control_callback(name, callback):
