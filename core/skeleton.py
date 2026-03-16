@@ -1,6 +1,7 @@
 import pyautogui
 import os
 import cv2
+from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
 from core.state import collect_main_state, collect_training_state, clear_aptitudes_cache
@@ -14,11 +15,12 @@ from core.events import select_event
 from core.claw_machine import play_claw_machine
 from core.skill import buy_skill, init_skill_py, get_skill_purchase_context
 from core.operator_console import ensure_operator_console, publish_runtime_state
+from core.region_adjuster.shared import resolve_region_adjuster_profiles
 
 pyautogui.useImageNotFoundException(False)
 
 import core.bot as bot
-from utils.log import info, warning, error, debug, log_encoded, args, record_turn, VERSION
+from utils.log import info, warning, error, debug, debug_window, log_encoded, args, record_turn, VERSION
 from utils.device_action_wrapper import BotStopException
 import utils.device_action_wrapper as device_action
 
@@ -60,9 +62,72 @@ unity_templates = {
 
 cached_unity_templates = cache_templates(unity_templates)
 
+STABLE_CAREER_SCREEN_ANCHORS = {
+  "tazuna_hint": ("assets/ui/tazuna_hint.png", "GAME_WINDOW_BBOX"),
+  "training_button": ("assets/buttons/training_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "rest_button": ("assets/buttons/rest_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "recreation_button": ("assets/buttons/recreation_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "races_button": ("assets/buttons/races_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "details_button": ("assets/buttons/details_btn.png", "SCREEN_TOP_BBOX"),
+  "details_button_alt": ("assets/buttons/details_btn_2.png", "SCREEN_TOP_BBOX"),
+}
+
+SCENARIO_NAME_ALIASES = {
+  "ura": "default",
+  "unity": "unity",
+  "trackblazer": "trackblazer",
+  "mant": "trackblazer",
+}
+MAX_SCENARIO_DETECTION_ATTEMPTS = 5
+runtime_debug_counter = 0
+
+
+def _canonicalize_scenario_name(name):
+  if not name:
+    return ""
+  return SCENARIO_NAME_ALIASES.get(name, name)
+
+
+def _scenario_banner_templates():
+  return {
+    os.path.splitext(filename)[0]: f"assets/scenario_banner/{filename}"
+    for filename in sorted(os.listdir("assets/scenario_banner"))
+    if filename.endswith(".png")
+  }
+
+
+def _match_scenario_banners(screenshot, threshold=0.8):
+  match_counts = {}
+  first_match = ""
+  for raw_name, template_path in _scenario_banner_templates().items():
+    matches = device_action.match_template(template_path, screenshot, threshold=threshold)
+    match_counts[raw_name] = len(matches)
+    if not first_match and matches:
+      first_match = raw_name
+  return first_match, match_counts
+
+
+def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
+  anchor_counts = {}
+  for name, (template_path, _bbox_key) in STABLE_CAREER_SCREEN_ANCHORS.items():
+    anchor_counts[name] = len(device_action.match_template(template_path, screenshot, threshold=threshold))
+  return anchor_counts
+
+
+def _has_stable_career_screen(anchor_counts):
+  return any(count > 0 for count in anchor_counts.values())
+
 
 def detect_scenario():
-  screenshot = device_action.screenshot()
+  update_startup_scan_snapshot(
+    message="Opening details screen to confirm scenario.",
+    sub_phase="detect_scenario_open_details",
+    ocr_debug=[
+      _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX"),
+      _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX"),
+    ],
+    reasoning_notes="Scenario detection requires opening the Details panel and matching a scenario banner.",
+  )
   details_templates = [
     "assets/buttons/details_btn.png",
     "assets/buttons/details_btn_2.png",
@@ -78,25 +143,59 @@ def detect_scenario():
       found_details = True
       break
   if not found_details:
-    warning("Details button not found; skipping scenario detection.")
-    return "default"
+    update_startup_scan_snapshot(
+      message="Scenario detection deferred: details button not found.",
+      sub_phase="detect_scenario_waiting_for_details",
+      ocr_debug=[
+        _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX", parsed_value="not_found"),
+        _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX", parsed_value="not_found"),
+      ],
+      reasoning_notes="The bot cannot confirm the scenario until the Details panel is visible.",
+    )
+    warning("Details button not found; scenario detection deferred.")
+    return ""
   sleep(0.5)
   screenshot = device_action.screenshot()
-  # Banner filenames are the scenario keys. Use "trackblazer" as the canonical name;
-  # "MANT" is only legacy shorthand in some code/comments.
-  scenario_banners = {
-    os.path.splitext(filename)[0]: f"assets/scenario_banner/{filename}"
-    for filename in sorted(os.listdir("assets/scenario_banner"))
-    if filename.endswith(".png")
-  }
-  matches = device_action.multi_match_templates(scenario_banners, screenshot=screenshot, stop_after_first_match=True)
+  debug_window(screenshot, save_name="scenario_detection_details")
+  raw_name, match_counts = _match_scenario_banners(screenshot)
+  update_startup_scan_snapshot(
+    message="Scenario banner scan complete.",
+    sub_phase="detect_scenario_match_banner",
+    ocr_debug=[
+      _template_debug_entry(
+        f"scenario_banner_{name}",
+        f"assets/scenario_banner/{name}.png",
+        parsed_value=count,
+      )
+      for name, count in match_counts.items()
+    ],
+    reasoning_notes=f"Raw banner match counts: {match_counts}",
+  )
   device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(1))
   sleep(0.5)
-  for name, match in matches.items():
-    if match:
-      return name
-  warning("No scenario banner matched; defaulting to standard scenario.")
-  return "default"
+  if raw_name:
+    scenario_name = _canonicalize_scenario_name(raw_name)
+    update_startup_scan_snapshot(
+      message=f"Scenario confirmed: {scenario_name}",
+      sub_phase="detect_scenario_confirmed",
+      ocr_debug=[
+        _template_debug_entry(
+          f"scenario_banner_{name}",
+          f"assets/scenario_banner/{name}.png",
+          parsed_value=count,
+          extra={"canonical_name": _canonicalize_scenario_name(name)},
+        )
+        for name, count in match_counts.items()
+      ],
+      reasoning_notes=f"Scenario confirmed from details banner. raw='{raw_name}' canonical='{scenario_name}'",
+    )
+    info(
+      f"Scenario detected from banner: raw='{raw_name}', canonical='{scenario_name}', "
+      f"match_counts={match_counts}"
+    )
+    return scenario_name
+  warning(f"No scenario banner matched; detection deferred. match_counts={match_counts}")
+  return ""
 
 LIMIT_TURNS = args.limit_turns
 if LIMIT_TURNS is None:
@@ -105,6 +204,7 @@ if LIMIT_TURNS is None:
 non_match_count = 0
 action_count=0
 last_state = CleanDefaultDict()
+scenario_detection_attempts = 0
 
 
 def _truncate(value, limit=180):
@@ -116,6 +216,16 @@ def _truncate(value, limit=180):
 
 def _get_constant(name, default=None):
   return getattr(constants, name, default)
+
+
+def _active_region_profile_info():
+  settings = getattr(config, "REGION_ADJUSTER_CONFIG", {}) or {}
+  profiles, active_profile, active_path = resolve_region_adjuster_profiles(settings)
+  return {
+    "active_profile": active_profile,
+    "overrides_path": active_path,
+    "available_profiles": sorted(profiles.keys()),
+  }
 
 
 def _region_debug_entry(field, region_key=None, bbox_key=None, parsed_value=None, source_type="ocr_region", extra=None):
@@ -151,6 +261,116 @@ def _planned_click(label, template=None, target=None, region_key=None, note=None
   if note:
     entry["note"] = note
   return entry
+
+
+def _template_debug_entry(field, template, bbox_key=None, parsed_value=None, extra=None):
+  entry = {
+    "field": field,
+    "source_type": "template_match",
+    "scenario_name": constants.SCENARIO_NAME or "unknown",
+    "platform_profile": getattr(config, "PLATFORM_PROFILE", "auto"),
+    "template": template,
+  }
+  if bbox_key:
+    entry["bbox_key"] = bbox_key
+    entry["bbox_xyxy"] = _get_constant(bbox_key)
+  if parsed_value is not None:
+    entry["parsed_value"] = parsed_value
+  if extra:
+    entry.update(extra)
+  return entry
+
+
+def _profile_debug_entry():
+  profile_info = _active_region_profile_info()
+  return {
+    "field": "ocr_region_profile",
+    "source_type": "region_profile",
+    "scenario_name": constants.SCENARIO_NAME or "unknown",
+    "platform_profile": getattr(config, "PLATFORM_PROFILE", "auto"),
+    "parsed_value": profile_info["active_profile"],
+    "active_profile": profile_info["active_profile"],
+    "overrides_path": profile_info["overrides_path"],
+    "available_profiles": profile_info["available_profiles"],
+  }
+
+
+def _save_runtime_debug_image(image, stem):
+  global runtime_debug_counter
+  runtime_debug_dir = Path("logs/runtime_debug")
+  runtime_debug_dir.mkdir(parents=True, exist_ok=True)
+  safe_stem = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in stem)
+  filename = runtime_debug_dir / f"{runtime_debug_counter:04d}_{safe_stem}.png"
+  runtime_debug_counter += 1
+  cv2.imwrite(str(filename), image)
+  return str(filename)
+
+
+def _resolve_template_path(template):
+  if not template or template == "cached_templates":
+    return ""
+  candidate = Path(template)
+  if candidate.exists():
+    return str(candidate)
+  rooted = Path.cwd() / template
+  if rooted.exists():
+    return str(rooted)
+  return ""
+
+
+def _best_template_score(template_path, crop):
+  if not template_path:
+    return None
+  template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+  if template is None:
+    return None
+  if crop is None or crop.size == 0:
+    return None
+  if crop.shape[0] < template.shape[0] or crop.shape[1] < template.shape[1]:
+    return None
+  result = cv2.matchTemplate(crop, template, cv2.TM_CCOEFF_NORMED)
+  _, max_val, _, _ = cv2.minMaxLoc(result)
+  return float(max_val)
+
+
+def _capture_debug_crop(entry):
+  bbox = entry.get("bbox_xyxy")
+  region = entry.get("region_xywh")
+  try:
+    if bbox and len(bbox) == 4:
+      crop = device_action.screenshot(region_ltrb=tuple(int(v) for v in bbox))
+    elif region and len(region) == 4:
+      crop = device_action.screenshot(region_xywh=tuple(int(v) for v in region))
+    else:
+      return entry
+  except Exception:
+    return entry
+
+  if crop is None or getattr(crop, "size", 0) == 0:
+    return entry
+
+  crop_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+  crop_path = _save_runtime_debug_image(crop_bgr, entry.get("field", "ocr_region"))
+  entry["search_image_path"] = crop_path
+
+  template_path = _resolve_template_path(entry.get("template"))
+  if template_path:
+    entry["template_image_path"] = template_path
+    best_score = _best_template_score(template_path, crop_bgr)
+    if best_score is not None:
+      entry["best_match_score"] = round(best_score, 4)
+
+  return entry
+
+
+def _enrich_ocr_debug_entries(entries):
+  enriched = []
+  for raw_entry in entries or []:
+    entry = dict(raw_entry)
+    if entry.get("source_type") in ("template_match", "ocr_region", "screen_region", "template_region"):
+      entry = _capture_debug_crop(entry)
+    enriched.append(entry)
+  return enriched
 
 
 def _base_ocr_debug_entries(state_obj):
@@ -243,6 +463,9 @@ def _ocr_debug_for_action(state_obj, action):
 
 
 def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  profile_info = _active_region_profile_info()
+  debug_entries = ([ _profile_debug_entry() ] + ocr_debug) if ocr_debug is not None else ([ _profile_debug_entry() ] + _ocr_debug_for_action(state_obj, action))
+  debug_entries = _enrich_ocr_debug_entries(debug_entries)
   state_summary = {
     "year": state_obj.get("year"),
     "turn": state_obj.get("turn"),
@@ -252,6 +475,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "current_mood": state_obj.get("current_mood"),
     "date_event_available": state_obj.get("date_event_available"),
     "race_mission_available": state_obj.get("race_mission_available"),
+    "ocr_region_profile": profile_info["active_profile"],
+    "ocr_overrides_path": profile_info["overrides_path"],
   }
   selected_action = {
     "func": getattr(action, "func", None),
@@ -287,9 +512,46 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "ranked_trainings": ranked_trainings,
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
-    "ocr_debug": ocr_debug if ocr_debug is not None else _ocr_debug_for_action(state_obj, action),
+    "ocr_debug": debug_entries,
     "planned_clicks": planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action),
   }
+
+
+def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_notes=None, available_actions=None):
+  profile_info = _active_region_profile_info()
+  debug_entries = _enrich_ocr_debug_entries([_profile_debug_entry()] + (ocr_debug or []))
+  return {
+    "scenario_name": constants.SCENARIO_NAME or "unknown",
+    "turn_label": "",
+    "energy_label": "",
+    "sub_phase": sub_phase or "scan_lobby_templates",
+    "execution_intent": bot.get_execution_intent(),
+    "state_summary": {
+      "ocr_region_profile": profile_info["active_profile"],
+      "ocr_overrides_path": profile_info["overrides_path"],
+    },
+    "selected_action": {},
+    "available_actions": available_actions or [],
+    "ranked_trainings": [],
+    "reasoning_notes": reasoning_notes or message,
+    "min_scores": None,
+    "ocr_debug": debug_entries,
+    "planned_clicks": [],
+  }
+
+
+def update_startup_scan_snapshot(message, sub_phase, ocr_debug=None, reasoning_notes=None, available_actions=None):
+  bot.set_phase("scanning_lobby", status="active", message=message)
+  bot.set_snapshot(
+    build_startup_scan_snapshot(
+      sub_phase=sub_phase,
+      message=message,
+      ocr_debug=ocr_debug,
+      reasoning_notes=reasoning_notes,
+      available_actions=available_actions,
+    )
+  )
+  publish_runtime_state()
 
 
 def update_operator_snapshot(
@@ -457,9 +719,10 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
   return "executed"
 
 def career_lobby(dry_run_turn=False):
-  global last_state, action_count, non_match_count
+  global last_state, action_count, non_match_count, scenario_detection_attempts
   non_match_count = 0
   action_count=0
+  scenario_detection_attempts = 0
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
   constants.SCENARIO_NAME = ""
@@ -469,13 +732,30 @@ def career_lobby(dry_run_turn=False):
   init_skill_py()
   if config.EXECUTION_MODE == "semi_auto":
     ensure_operator_console()
-  update_operator_snapshot(phase="scanning_lobby", message="Career loop started.")
+  update_startup_scan_snapshot(
+    message="Career loop started.",
+    sub_phase="scan_lobby_init",
+    ocr_debug=[
+      _template_debug_entry("career_screen_scan", "cached_templates", bbox_key="GAME_WINDOW_BBOX"),
+      _template_debug_entry("tazuna_hint", "assets/ui/tazuna_hint.png", bbox_key="GAME_WINDOW_BBOX"),
+    ],
+    reasoning_notes="Waiting for a stable career screen before collecting state.",
+  )
   try:
     while bot.is_bot_running:
-      update_operator_snapshot(phase="scanning_lobby", message="Scanning career lobby for next state.")
+      update_startup_scan_snapshot(
+        message="Scanning career lobby for next state.",
+        sub_phase="scan_lobby_templates",
+        ocr_debug=[
+          _template_debug_entry("career_screen_scan", "cached_templates", bbox_key="GAME_WINDOW_BBOX"),
+          _template_debug_entry("tazuna_hint", "assets/ui/tazuna_hint.png", bbox_key="GAME_WINDOW_BBOX"),
+        ],
+        reasoning_notes="The bot is scanning generic lobby templates while waiting for a stable training screen.",
+      )
       sleep(1)
       device_action.flush_screenshot_cache()
       screenshot = device_action.screenshot()
+      stable_anchor_counts = _detect_stable_career_screen_anchors(screenshot, threshold=0.8)
 
       if non_match_count > 20:
         info("Career lobby stuck, quitting.")
@@ -560,16 +840,46 @@ def career_lobby(dry_run_turn=False):
           non_match_count = 0
           continue
 
-      if not matches.get("tazuna"):
+      if not _has_stable_career_screen(stable_anchor_counts):
+        update_startup_scan_snapshot(
+          message="Stable career screen not confirmed yet.",
+          sub_phase="scan_lobby_waiting_for_tazuna",
+          ocr_debug=[
+            _template_debug_entry("tazuna_hint", "assets/ui/tazuna_hint.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=stable_anchor_counts.get("tazuna_hint", 0)),
+            _template_debug_entry("training_button", "assets/buttons/training_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("training_button", 0)),
+            _template_debug_entry("rest_button", "assets/buttons/rest_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("rest_button", 0)),
+            _template_debug_entry("recreation_button", "assets/buttons/recreation_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("recreation_button", 0)),
+            _template_debug_entry("races_button", "assets/buttons/races_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("races_button", 0)),
+            _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX", parsed_value=stable_anchor_counts.get("details_button", 0)),
+            _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX", parsed_value=stable_anchor_counts.get("details_button_alt", 0)),
+            _template_debug_entry("next_button", "assets/buttons/next_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("next", []))),
+            _template_debug_entry("next_button_alt", "assets/buttons/next2_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("next2", []))),
+            _template_debug_entry("event_choice", "assets/icons/event_choice_1.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("event", []))),
+            _template_debug_entry("cancel_button", "assets/buttons/cancel_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("cancel", []))),
+          ],
+          reasoning_notes=f"Stable screen anchors were not found yet. anchor_counts={stable_anchor_counts}",
+        )
         print(".", end="")
         non_match_count += 1
         continue
       else:
-        info("Tazuna matched, moving to state collection.")
+        info(f"Stable career screen matched, moving to state collection. anchor_counts={stable_anchor_counts}")
         if constants.SCENARIO_NAME == "":
+          scenario_detection_attempts += 1
           scenario_name = detect_scenario()
-          info(f"Scenario detected: {scenario_name}, if this is not correct, please report this.")
-          constants.SCENARIO_NAME = scenario_name
+          if scenario_name:
+            constants.SCENARIO_NAME = scenario_name
+            info(f"Scenario confirmed at startup checkpoint: {scenario_name}")
+          elif scenario_detection_attempts >= MAX_SCENARIO_DETECTION_ATTEMPTS:
+            warning(
+              "Scenario detection failed repeatedly; continuing with generic/default logic for now. "
+              "Trackblazer-specific logic will stay inactive until a banner match succeeds."
+            )
+          else:
+            warning(
+              f"Scenario detection not confirmed yet (attempt {scenario_detection_attempts}/{MAX_SCENARIO_DETECTION_ATTEMPTS}). "
+              "Continuing with generic/default logic and will retry on the next stable turn."
+            )
         non_match_count = 0
 
       info(f"Bot version: {VERSION}")

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import pyautogui
 import cv2
 import numpy as np
+import mss
 from PIL import Image, ImageDraw, ImageTk
 
 try:
@@ -113,20 +114,19 @@ class RegionAdjusterApp:
       self.regions[name] = {"kind": kind, "value": norm_value}
       self.region_order.append(name)
 
-    self.hidden_region_names = {
-      name
-      for name, entry in self.regions.items()
-      if entry["kind"] == "bbox" and _counterpart_name(name) in self.regions
-    }
+    self.hidden_region_names = set()
 
     if not self.region_order:
       raise RuntimeError("No OCR regions are available for adjustment.")
+
+    self._sync_layout_regions_from_game_window()
 
     self.selected_name = self.region_order[0]
     self.screenshot = None
     self.overlay_image = None
     self.photo_image = None
     self.template_photo = None
+    self.region_preview_photo = None
     self._dirty = False
     self._window_info: Optional[Dict[str, int]] = None
     self._current_templates: List[str] = []
@@ -290,6 +290,11 @@ class RegionAdjusterApp:
     tk.Button(side_panel, text="Test Template (Space)", command=self.test_selected_template).pack(fill=tk.X, pady=(0, 10))
 
     tk.Label(side_panel, textvariable=self.coord_var, fg="#9feaf9", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
+    tk.Label(side_panel, text="Selected Region Preview", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    self.region_preview_label = tk.Label(side_panel, bg="#1b1b1b", relief=tk.GROOVE, text="No region preview", fg="#9aa4ad")
+    self.region_preview_label.pack(fill=tk.BOTH, expand=False, pady=(0, 4))
+    self.region_preview_info_var = tk.StringVar(value="")
+    tk.Label(side_panel, textvariable=self.region_preview_info_var, fg="#bbbbbb", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
 
     step_container = tk.Frame(side_panel, bg="#232323")
     step_container.pack(anchor="w", pady=(0, 10))
@@ -382,6 +387,7 @@ class RegionAdjusterApp:
       justify="left",
     ).pack(fill=tk.X, pady=(0, 0))
     self._set_coord_text()
+    self._update_region_preview()
     self._refresh_template_list()
     self._update_window_dimensions()
     self.profile_region_snapshots[self.active_profile] = self._clone_regions(self.regions)
@@ -448,6 +454,7 @@ class RegionAdjusterApp:
     self.active_profile = profile_name
     self.overrides_path = path
     self.regions = self._clone_regions(next_regions)
+    self._sync_layout_regions_from_game_window()
     self._persist_active_profile()
     self._set_coord_text()
     self._refresh_template_list()
@@ -552,7 +559,13 @@ class RegionAdjusterApp:
 
   def capture_screenshot(self):
     try:
-      screenshot = pyautogui.screenshot()
+      if platform.system() == "Darwin":
+        with mss.mss() as sct:
+          monitor = dict(sct.monitors[0])
+          raw = np.array(sct.grab(monitor))
+          screenshot = Image.fromarray(cv2.cvtColor(raw, cv2.COLOR_BGRA2RGBA), mode="RGBA")
+      else:
+        screenshot = pyautogui.screenshot()
     except Exception as exc:
       messagebox.showerror("Screenshot Failed", f"Unable to capture the screen: {exc}")
       return
@@ -625,6 +638,41 @@ class RegionAdjusterApp:
     value = entry["value"]
     self.coord_var.set(f"{self.selected_name} ({entry['kind']}): {tuple(value)}")
 
+  def _update_region_preview(self):
+    if not hasattr(self, "region_preview_label"):
+      return
+    if not self.screenshot or not self.selected_name:
+      self.region_preview_photo = None
+      self.region_preview_label.configure(image="", text="No region preview")
+      self.region_preview_info_var.set("")
+      return
+
+    box = self._current_box(self.selected_name)
+    if not box:
+      self.region_preview_photo = None
+      self.region_preview_label.configure(image="", text="No region preview")
+      self.region_preview_info_var.set("")
+      return
+
+    x1, y1, x2, y2 = box
+    x1, y1 = max(0, x1), max(0, y1)
+    x2 = min(self.screenshot.width, x2)
+    y2 = min(self.screenshot.height, y2)
+    if x2 <= x1 or y2 <= y1:
+      self.region_preview_photo = None
+      self.region_preview_label.configure(image="", text="Empty region")
+      self.region_preview_info_var.set("")
+      return
+
+    crop = self.screenshot.crop((x1, y1, x2, y2))
+    preview = crop.copy()
+    preview.thumbnail((220, 180), Image.LANCZOS)
+    self.region_preview_photo = ImageTk.PhotoImage(preview)
+    self.region_preview_label.configure(image=self.region_preview_photo, text="")
+    self.region_preview_info_var.set(
+      f"Crop: {x2 - x1}x{y2 - y1}px at ({x1}, {y1}) -> ({x2}, {y2})"
+    )
+
   def _matches_scenario_filter(self, name: str) -> bool:
     mode = SCENARIO_FILTERS_REVERSE.get(self.scenario_filter_var.get(), "generic_mant")
     is_unity = name.startswith("UNITY_")
@@ -672,6 +720,30 @@ class RegionAdjusterApp:
       x, y, w, h = source_value
       counterpart["value"] = [x, y, x + w, y + h]
 
+    if name in ("GAME_WINDOW_BBOX", "GAME_WINDOW_REGION"):
+      self._sync_layout_regions_from_game_window()
+
+  def _sync_layout_regions_from_game_window(self):
+    game_window = self.regions.get("GAME_WINDOW_BBOX")
+    if not game_window:
+      return
+
+    x1, y1, x2, y2 = game_window["value"]
+    layout_offsets = {
+      "SCREEN_TOP_BBOX": (0, 0, 0, -780),
+      "SCREEN_MIDDLE_BBOX": (0, 300, 0, -280),
+      "SCREEN_BOTTOM_BBOX": (0, 800, 0, 0),
+      "SCROLLING_SKILL_SCREEN_BBOX": (0, 390, 0, -200),
+    }
+    for bbox_name, offset in layout_offsets.items():
+      bbox_entry = self.regions.get(bbox_name)
+      region_entry = self.regions.get(bbox_name.replace("_BBOX", "_REGION"))
+      if not bbox_entry or not region_entry:
+        continue
+      next_bbox = [x1 + offset[0], y1 + offset[1], x2 + offset[2], y2 + offset[3]]
+      bbox_entry["value"] = next_bbox
+      region_entry["value"] = [next_bbox[0], next_bbox[1], next_bbox[2] - next_bbox[0], next_bbox[3] - next_bbox[1]]
+
   def _refresh_region_list(self):
     current_selection = self.selected_name
     self.visible_region_order = [
@@ -698,6 +770,7 @@ class RegionAdjusterApp:
     self.region_listbox.selection_set(selected_index)
     self.region_listbox.see(selected_index)
     self._set_coord_text()
+    self._update_region_preview()
     self._refresh_template_list()
     self._render_overlay()
 
@@ -707,6 +780,7 @@ class RegionAdjusterApp:
       return
     self.selected_name = self.visible_region_order[selection[0]]
     self._set_coord_text()
+    self._update_region_preview()
     self._refresh_template_list()
     self._render_overlay()
 
@@ -954,6 +1028,7 @@ class RegionAdjusterApp:
     self._sync_counterpart_region(self.selected_name)
     self._mark_dirty(True)
     self._set_coord_text()
+    self._update_region_preview()
     self._render_overlay()
 
   def _dedupe_boxes(self, boxes: List[Tuple[int, int, int, int]], min_dist: int = 5) -> List[Tuple[int, int, int, int]]:
@@ -1049,6 +1124,7 @@ class RegionAdjusterApp:
     self._sync_counterpart_region(self.selected_name)
     self._mark_dirty(True)
     self._set_coord_text()
+    self._update_region_preview()
     self._render_overlay()
 
   def resize_selected(self, dw: int = 0, dh: int = 0):
@@ -1090,6 +1166,7 @@ class RegionAdjusterApp:
       self._sync_counterpart_region(self.selected_name)
       self._mark_dirty(True)
       self._set_coord_text()
+      self._update_region_preview()
       self._render_overlay()
 
   def save_overrides(self):

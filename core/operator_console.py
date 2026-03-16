@@ -3,6 +3,9 @@ import queue
 import tkinter as tk
 from tkinter import scrolledtext
 import threading
+from pathlib import Path
+
+from PIL import Image, ImageTk
 
 import core.bot as bot
 import core.config as config
@@ -46,7 +49,14 @@ class OperatorConsole:
     self._phase_labels = {}
     self._summary_text = None
     self._training_text = None
-    self._ocr_debug_text = None
+    self._ocr_debug_entries = []
+    self._ocr_debug_listbox = None
+    self._ocr_debug_meta = None
+    self._ocr_debug_asset_label = None
+    self._ocr_debug_region_label = None
+    self._ocr_debug_asset_photo = None
+    self._ocr_debug_region_photo = None
+    self._preview_windows = {}
     self._bot_button = None
     self._pause_button = None
     self._resume_button = None
@@ -164,8 +174,8 @@ class OperatorConsole:
     right.grid(row=2, column=1, sticky="nsew", padx=(8, 14), pady=12)
     right.columnconfigure(0, weight=1)
     right.rowconfigure(1, weight=1)
-    right.rowconfigure(3, weight=1)
-    right.rowconfigure(5, weight=1)
+    right.rowconfigure(3, weight=0)
+    right.rowconfigure(5, weight=3)
 
     for phase in PHASES:
       label = tk.Label(
@@ -187,7 +197,7 @@ class OperatorConsole:
     summary_header.columnconfigure(0, weight=1)
     tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=1, sticky="e")
-    self._summary_text = scrolledtext.ScrolledText(right, height=14, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._summary_text = scrolledtext.ScrolledText(right, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
     self._summary_text.grid(row=1, column=0, sticky="nsew", pady=(4, 10))
 
     training_header = tk.Frame(right, bg="#101418")
@@ -195,16 +205,48 @@ class OperatorConsole:
     training_header.columnconfigure(0, weight=1)
     tk.Label(training_header, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e")
-    self._training_text = scrolledtext.ScrolledText(right, height=12, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._training_text = scrolledtext.ScrolledText(right, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
     self._training_text.grid(row=3, column=0, sticky="nsew", pady=(4, 10))
 
     ocr_header = tk.Frame(right, bg="#101418")
     ocr_header.grid(row=4, column=0, sticky="ew")
     ocr_header.columnconfigure(0, weight=1)
     tk.Label(ocr_header, text="OCR Debug", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Button(ocr_header, text="Copy OCR Debug", command=lambda: self._copy_widget(self._ocr_debug_text)).grid(row=0, column=1, sticky="e")
-    self._ocr_debug_text = scrolledtext.ScrolledText(right, height=10, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._ocr_debug_text.grid(row=5, column=0, sticky="nsew", pady=(4, 10))
+    tk.Button(ocr_header, text="Copy OCR Debug", command=self._copy_ocr_debug).grid(row=0, column=1, sticky="e")
+    ocr_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
+    ocr_panel.grid(row=5, column=0, sticky="nsew", pady=(4, 10))
+
+    ocr_list_frame = tk.Frame(ocr_panel, bg="#101418")
+    self._ocr_debug_listbox = tk.Listbox(
+      ocr_list_frame,
+      height=14,
+      width=26,
+      exportselection=False,
+      selectmode=tk.SINGLE,
+      bg="#192028",
+      fg="#d6dde5",
+    )
+    self._ocr_debug_listbox.pack(fill=tk.BOTH, expand=True)
+    self._ocr_debug_listbox.bind("<<ListboxSelect>>", self._on_ocr_debug_select)
+    ocr_panel.add(ocr_list_frame, minsize=190)
+
+    ocr_detail_frame = tk.Frame(ocr_panel, bg="#101418")
+    ocr_detail_frame.columnconfigure(0, weight=1)
+    ocr_detail_frame.columnconfigure(1, weight=1)
+    ocr_detail_frame.rowconfigure(1, weight=1)
+    tk.Label(ocr_detail_frame, text="Asset", fg="white", bg="#101418").grid(row=0, column=0, sticky="w")
+    tk.Label(ocr_detail_frame, text="Search Region", fg="white", bg="#101418").grid(row=0, column=1, sticky="w")
+    self._ocr_debug_asset_label = tk.Label(ocr_detail_frame, bg="#192028", fg="#9aa4ad", anchor="center", justify="center", text="No asset", cursor="hand2")
+    self._ocr_debug_asset_label.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+    self._ocr_debug_region_asset_path = None
+    self._ocr_debug_asset_label.bind("<Button-1>", lambda _event: self._open_preview_window(self._ocr_debug_region_asset_path, "OCR Asset Preview"))
+    self._ocr_debug_region_label = tk.Label(ocr_detail_frame, bg="#192028", fg="#9aa4ad", anchor="center", justify="center", text="No region image", cursor="hand2")
+    self._ocr_debug_region_label.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+    self._ocr_debug_region_search_path = None
+    self._ocr_debug_region_label.bind("<Button-1>", lambda _event: self._open_preview_window(self._ocr_debug_region_search_path, "OCR Search Region Preview"))
+    self._ocr_debug_meta = scrolledtext.ScrolledText(ocr_detail_frame, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._ocr_debug_meta.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+    ocr_panel.add(ocr_detail_frame, minsize=260)
 
     tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=6, column=0, sticky="ew")
     tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
@@ -285,13 +327,156 @@ class OperatorConsole:
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
-    self._set_text(self._ocr_debug_text, json.dumps(snapshot.get("ocr_debug") or [], indent=2, ensure_ascii=True))
+    self._ocr_debug_entries = snapshot.get("ocr_debug") or []
+    self._render_ocr_debug_entries()
 
   def _set_text(self, widget, value):
     widget.configure(state=tk.NORMAL)
     widget.delete("1.0", tk.END)
     widget.insert("1.0", value)
     widget.configure(state=tk.DISABLED)
+
+  def _copy_ocr_debug(self):
+    if self._root is None:
+      return
+    value = json.dumps(self._ocr_debug_entries or [], indent=2, ensure_ascii=True)
+    self._root.clipboard_clear()
+    self._root.clipboard_append(value)
+    self._message_value.set("Copied OCR debug to clipboard.")
+
+  def _render_ocr_debug_entries(self):
+    if self._ocr_debug_listbox is None:
+      return
+    current_selection = self._ocr_debug_listbox.curselection()
+    selected_index = current_selection[0] if current_selection else 0
+    self._ocr_debug_listbox.delete(0, tk.END)
+    for idx, entry in enumerate(self._ocr_debug_entries):
+      field = entry.get("field", f"entry_{idx}")
+      score = entry.get("best_match_score")
+      parsed = entry.get("parsed_value")
+      label = field
+      if score is not None:
+        label = f"{field} [{score:.3f}]"
+      elif parsed not in (None, "", []):
+        label = f"{field} [{parsed}]"
+      self._ocr_debug_listbox.insert(tk.END, label)
+
+    if self._ocr_debug_entries:
+      selected_index = min(selected_index, len(self._ocr_debug_entries) - 1)
+      self._ocr_debug_listbox.selection_set(selected_index)
+      self._ocr_debug_listbox.see(selected_index)
+      self._render_ocr_debug_detail(self._ocr_debug_entries[selected_index])
+    else:
+      self._render_ocr_debug_detail({})
+
+  def _on_ocr_debug_select(self, _event):
+    if self._ocr_debug_listbox is None:
+      return
+    selection = self._ocr_debug_listbox.curselection()
+    if not selection:
+      return
+    index = selection[0]
+    if 0 <= index < len(self._ocr_debug_entries):
+      self._render_ocr_debug_detail(self._ocr_debug_entries[index])
+
+  def _render_ocr_debug_detail(self, entry):
+    self._ocr_debug_region_asset_path = entry.get("template_image_path")
+    self._ocr_debug_region_search_path = entry.get("search_image_path")
+    self._set_preview_image(self._ocr_debug_asset_label, entry.get("template_image_path"), "No asset")
+    self._set_preview_image(self._ocr_debug_region_label, entry.get("search_image_path"), "No region image", is_region=True)
+    metadata = json.dumps(entry or {}, indent=2, ensure_ascii=True)
+    self._set_text(self._ocr_debug_meta, metadata)
+
+  def _set_preview_image(self, label, image_path, empty_text, is_region=False):
+    if label is None:
+      return
+    photo_attr = "_ocr_debug_region_photo" if is_region else "_ocr_debug_asset_photo"
+    if not image_path:
+      setattr(self, photo_attr, None)
+      label.configure(image="", text=empty_text)
+      return
+
+    file_path = Path(image_path)
+    if not file_path.is_absolute():
+      file_path = Path.cwd() / file_path
+    if not file_path.exists():
+      setattr(self, photo_attr, None)
+      label.configure(image="", text=f"Missing:\n{image_path}")
+      return
+
+    try:
+      image = Image.open(file_path).convert("RGBA")
+      image.thumbnail((320, 260), Image.LANCZOS)
+      photo = ImageTk.PhotoImage(image)
+    except Exception:
+      setattr(self, photo_attr, None)
+      label.configure(image="", text=f"Failed to load:\n{image_path}")
+      return
+
+    setattr(self, photo_attr, photo)
+    label.configure(image=photo, text="")
+
+  def _open_preview_window(self, image_path, title):
+    if self._root is None or not image_path:
+      return
+
+    file_path = Path(image_path)
+    if not file_path.is_absolute():
+      file_path = Path.cwd() / file_path
+    if not file_path.exists():
+      self._message_value.set(f"Missing preview image: {image_path}")
+      return
+
+    existing = self._preview_windows.get(title)
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    try:
+      image = Image.open(file_path).convert("RGBA")
+    except Exception:
+      self._message_value.set(f"Failed to open preview image: {image_path}")
+      return
+
+    window = tk.Toplevel(self._root)
+    window.title(title)
+    window.configure(bg="#101418")
+    window.geometry("960x720")
+
+    frame = tk.Frame(window, bg="#101418")
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    canvas = tk.Canvas(frame, bg="#101418", highlightthickness=0)
+    h_scroll = tk.Scrollbar(frame, orient=tk.HORIZONTAL, command=canvas.xview)
+    v_scroll = tk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    v_scroll.grid(row=0, column=1, sticky="ns")
+    h_scroll.grid(row=1, column=0, sticky="ew")
+    frame.rowconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
+
+    photo = ImageTk.PhotoImage(image)
+    canvas.create_image(0, 0, anchor="nw", image=photo)
+    canvas.configure(scrollregion=(0, 0, image.width, image.height))
+    window._preview_photo = photo
+
+    info_label = tk.Label(
+      window,
+      text=f"{file_path.name}  {image.width}x{image.height}",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+    )
+    info_label.pack(fill=tk.X, padx=8, pady=(4, 8))
+
+    self._preview_windows[title] = window
+    window.bind("<Destroy>", lambda _event, key=title: self._preview_windows.pop(key, None))
 
   def _toggle_always_on_top(self):
     if self._root is None or self._always_on_top_var is None:

@@ -265,6 +265,25 @@ SCALE_APPLIED = False
 
 DEFAULT_REGION_OVERRIDES_PATH = Path(__file__).resolve().parents[1] / "data" / "region_overrides.json"
 
+LAYOUT_REGION_OFFSETS = {
+  "SCREEN_TOP_BBOX": (0, 0, 0, -780),
+  "SCREEN_MIDDLE_BBOX": (0, 300, 0, -280),
+  "SCREEN_BOTTOM_BBOX": (0, 800, 0, 0),
+  "SCROLLING_SKILL_SCREEN_BBOX": (0, 390, 0, -200),
+}
+
+
+def sync_layout_regions_from_game_window():
+  global GAME_WINDOW_REGION
+  GAME_WINDOW_REGION = convert_xyxy_to_xywh(GAME_WINDOW_BBOX)
+
+  for bbox_name, offset in LAYOUT_REGION_OFFSETS.items():
+    bbox_value = add_tuple_elements(GAME_WINDOW_BBOX, offset)
+    globals()[bbox_name] = bbox_value
+    globals()[bbox_name.replace("_BBOX", "_REGION")] = convert_xyxy_to_xywh(bbox_value)
+
+  update_action_positions()
+
 ADJUSTABLE_COORDINATE_ORDER = (
   "GAME_WINDOW_BBOX",
   "GAME_WINDOW_REGION",
@@ -486,6 +505,7 @@ def apply_region_overrides(overrides_path=None, force=False):
       continue
     g[name] = tuple(int(round(v)) for v in value[:4])
 
+  sync_layout_regions_from_game_window()
   update_action_positions()
   OVERRIDES_APPLIED = True
   return True

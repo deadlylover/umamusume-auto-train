@@ -46,6 +46,7 @@ def scale_screenshot(screenshot, scaling_factor):
   # scale screenshot by scaling_factor
   return cv2.resize(screenshot, (int(screenshot.shape[1] * scaling_factor), int(screenshot.shape[0] * scaling_factor)), interpolation=cv2.INTER_AREA)
 
+
 def resize_screenshot_as_1080p(screenshot):
   scaling_factor = 1
   pixel_crop_amount = 0
@@ -63,24 +64,52 @@ expected_window_size = (1080, 1920)
 cached_screenshot = []
 cached_region = None
 
+# macOS full-screen cache: capture once, crop many sub-regions.
+# This matches the OCR adjuster's capture path (sct.grab(monitors[0])),
+# guaranteeing identical coordinate-space behavior.
+_macos_full_screen_cache = None
+_macos_full_screen_meta = None  # diagnostic info from last capture
+
+
+def _capture_macos_full_screen():
+  """Grab the full virtual screen via mss, matching OCR adjuster behavior."""
+  global _macos_full_screen_cache, _macos_full_screen_meta
+  with mss.mss() as sct:
+    monitor = dict(sct.monitors[0])
+    raw = np.array(sct.grab(monitor))
+    full = cv2.cvtColor(raw, cv2.COLOR_BGRA2RGB)
+    _macos_full_screen_cache = full
+    _macos_full_screen_meta = {
+      "monitor": monitor,
+      "image_size": f"{full.shape[1]}x{full.shape[0]}",
+    }
+    if args.device_debug:
+      debug(
+        f"[macOS] Full screen capture: monitor={monitor}, "
+        f"image_size={full.shape[1]}x{full.shape[0]}"
+      )
+  return _macos_full_screen_cache
+
+
 def screenshot(region_xywh : tuple[int, int, int, int] = None):
   """
   Take a screenshot of the game window.
-  
-  On macOS, we use mss to capture the screen region directly since
-  pygetwindow doesn't work well with BlueStacks Air.
-  
+
+  On macOS, we capture the full screen (same as OCR adjuster) and crop
+  the requested region. This avoids coordinate-space mismatches between
+  the adjuster's calibration and runtime capture.
+
   On Windows, we use the windows_window bounds from bot module.
   """
   global cached_screenshot, cached_region
   screenshot_data = None
-  
+
   if not region_xywh:
     region_xywh = constants.GAME_WINDOW_REGION
-  
+
   if args.device_debug:
     debug(f"Screenshot region: {region_xywh}")
-  
+
   if len(cached_screenshot) > 0 and cached_region == region_xywh:
     if args.device_debug:
       debug(f"Using cached screenshot")
@@ -88,25 +117,32 @@ def screenshot(region_xywh : tuple[int, int, int, int] = None):
     return screenshot_data
   else:
     if IS_MACOS:
-      # On macOS, use mss to grab the specified region directly
-      # The region coordinates should already be absolute screen coordinates
       x, y, w, h = region_xywh if region_xywh else constants.GAME_WINDOW_REGION
+
+      # Grab full screen (cached) and crop — identical to OCR adjuster path.
+      full = _macos_full_screen_cache
+      if full is None:
+        full = _capture_macos_full_screen()
+
+      # Clamp crop bounds to the full image dimensions.
+      fh, fw = full.shape[:2]
+      x1 = max(0, x)
+      y1 = max(0, y)
+      x2 = min(fw, x + w)
+      y2 = min(fh, y + h)
+
       if args.device_debug:
-        debug(f"[DEBUG] macOS screenshot region_xywh: {region_xywh}, x={x}, y={y}, w={w}, h={h}")
-      window_region = {
-        "left": x,
-        "top": y,
-        "width": w,
-        "height": h
-      }
-      with mss.mss() as sct:
-        if args.device_debug:
-          debug(f"Taking new macOS screenshot")
-        # take screenshot as BGRA
-        screenshot_data = np.array(sct.grab(window_region))
-        screenshot_data = cv2.cvtColor(screenshot_data, cv2.COLOR_BGRA2RGB)
-      
-      # Cache only for this exact region to avoid cross-region mismatches.
+        debug(
+          f"[macOS] Cropping region ({x}, {y}, {w}, {h}) "
+          f"-> clamped ({x1}, {y1}, {x2}, {y2}) from {fw}x{fh} full screen"
+        )
+
+      if x2 > x1 and y2 > y1:
+        screenshot_data = full[y1:y2, x1:x2].copy()
+      else:
+        warning(f"Empty crop region after clamping: ({x1}, {y1}, {x2}, {y2})")
+        screenshot_data = np.zeros((max(1, h), max(1, w), 3), dtype=np.uint8)
+
       cached_screenshot = screenshot_data
       cached_region = region_xywh
       return screenshot_data

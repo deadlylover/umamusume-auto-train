@@ -295,3 +295,4 @@ def flush_screenshot_cache():
       debug(f"Flushing PyAutoGUI screenshot cache")
     pyautogui_actions.cached_screenshot = []
     pyautogui_actions.cached_region = None
+    pyautogui_actions._macos_full_screen_cache = None

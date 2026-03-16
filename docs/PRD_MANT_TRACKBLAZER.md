@@ -126,6 +126,7 @@ Implement MANT / Trackblazer support with a staged rollout:
 - Ensure `detect_scenario()` returns a stable identifier such as `mant` or `trackblazer`.
 - Decide on one canonical internal name and use it everywhere.
 - If detection fails, continue to fall back to `default`, but log enough context to diagnose.
+- Note for later recovery work: startup checkpoint detection should prefer a confirmed/stable career screen, but the bot should eventually also support starting from arbitrary in-run screens and wandering back to the main training screen on its own, such as race progress/result flows or other interrupted states.
 
 ### 2. Scenario State Model
 
