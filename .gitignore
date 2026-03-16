@@ -33,6 +33,7 @@ data/region_overrides.json
 
 # Reference copies and agent docs
 ref/
+ref_upstream_emulator_last/
 AGENTS.md
 CLAUDE.md
 docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md

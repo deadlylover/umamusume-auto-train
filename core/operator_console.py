@@ -352,7 +352,9 @@ class OperatorConsole:
     self._ocr_debug_listbox.delete(0, tk.END)
     for idx, entry in enumerate(self._ocr_debug_entries):
       field = entry.get("field", f"entry_{idx}")
-      score = entry.get("best_match_score")
+      score = entry.get("best_live_score")
+      if score is None:
+        score = entry.get("best_match_score")
       parsed = entry.get("parsed_value")
       label = field
       if score is not None:

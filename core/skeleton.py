@@ -23,6 +23,7 @@ import core.bot as bot
 from utils.log import info, warning, error, debug, debug_window, log_encoded, args, record_turn, VERSION
 from utils.device_action_wrapper import BotStopException
 import utils.device_action_wrapper as device_action
+import utils.pyautogui_actions as pyautogui_actions
 
 from core.strategies import Strategy
 from utils.adb_actions import init_adb
@@ -124,34 +125,68 @@ def detect_scenario():
     message="Opening details screen to confirm scenario.",
     sub_phase="detect_scenario_open_details",
     ocr_debug=[
-      _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX"),
-      _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX"),
+      _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX", extra={"threshold": 0.75}),
+      _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX", extra={"threshold": 0.75}),
     ],
     reasoning_notes="Scenario detection requires opening the Details panel and matching a scenario banner.",
   )
   details_templates = [
-    "assets/buttons/details_btn.png",
-    "assets/buttons/details_btn_2.png",
+    ("details_button", "assets/buttons/details_btn.png"),
+    ("details_button_alt", "assets/buttons/details_btn_2.png"),
   ]
   found_details = False
-  for template_path in details_templates:
-    if device_action.locate_and_click(
+  detail_attempt_entries = []
+
+  def verify_details_opened():
+    screenshot = device_action.screenshot()
+    close_btn = device_action.best_template_match("assets/buttons/close_btn.png", screenshot)
+    banner_name, banner_counts = _match_scenario_banners(screenshot)
+    close_btn_score = round(close_btn["score"], 4) if close_btn is not None else None
+    close_btn_passed = bool(close_btn is not None and close_btn["score"] >= 0.8)
+    verified = close_btn_passed or any(count > 0 for count in banner_counts.values())
+    verification_details = {
+      "close_btn_score": close_btn_score,
+      "close_btn_passed_threshold": close_btn_passed,
+      "close_btn_location": close_btn["location"] if close_btn is not None else None,
+      "close_btn_size": close_btn["size"] if close_btn is not None else None,
+      "banner_first_match": banner_name,
+      "banner_counts": banner_counts,
+    }
+    return verified, verification_details
+
+  for field, template_path in details_templates:
+    clicked, detail_entry = _attempt_template_click_with_debug(
+      field,
       template_path,
-      confidence=0.75,
-      min_search_time=get_secs(2),
-      region_ltrb=constants.SCREEN_TOP_BBOX,
-    ):
+      constants.SCREEN_TOP_BBOX,
+      threshold=0.75,
+      verify_after_click=verify_details_opened,
+      click_mode="press_click",
+    )
+    detail_attempt_entries.append(detail_entry)
+    update_startup_scan_snapshot(
+      message=f"Scenario detection details attempt: {field}",
+      sub_phase="detect_scenario_open_details",
+      ocr_debug=detail_attempt_entries.copy(),
+      reasoning_notes=(
+        "Trying Details button templates for scenario detection. "
+        f"latest_attempt={field} score={detail_entry.get('best_live_score')} "
+        f"threshold={detail_entry.get('threshold')} passed={detail_entry.get('passed_threshold')} "
+        f"attempted={detail_entry.get('click_attempted')} verified={detail_entry.get('click_verified')}"
+      ),
+    )
+    if clicked:
       found_details = True
       break
   if not found_details:
     update_startup_scan_snapshot(
       message="Scenario detection deferred: details button not found.",
       sub_phase="detect_scenario_waiting_for_details",
-      ocr_debug=[
-        _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX", parsed_value="not_found"),
-        _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX", parsed_value="not_found"),
-      ],
-      reasoning_notes="The bot cannot confirm the scenario until the Details panel is visible.",
+      ocr_debug=detail_attempt_entries,
+      reasoning_notes=(
+        "The bot cannot confirm the scenario until the Details panel is visible. "
+        f"detail_attempts={[(entry.get('field'), entry.get('best_live_score'), entry.get('threshold'), entry.get('click_attempted'), entry.get('click_verified')) for entry in detail_attempt_entries]}"
+      ),
     )
     warning("Details button not found; scenario detection deferred.")
     return ""
@@ -162,7 +197,7 @@ def detect_scenario():
   update_startup_scan_snapshot(
     message="Scenario banner scan complete.",
     sub_phase="detect_scenario_match_banner",
-    ocr_debug=[
+    ocr_debug=detail_attempt_entries + [
       _template_debug_entry(
         f"scenario_banner_{name}",
         f"assets/scenario_banner/{name}.png",
@@ -179,7 +214,7 @@ def detect_scenario():
     update_startup_scan_snapshot(
       message=f"Scenario confirmed: {scenario_name}",
       sub_phase="detect_scenario_confirmed",
-      ocr_debug=[
+      ocr_debug=detail_attempt_entries + [
         _template_debug_entry(
           f"scenario_banner_{name}",
           f"assets/scenario_banner/{name}.png",
@@ -280,6 +315,78 @@ def _template_debug_entry(field, template, bbox_key=None, parsed_value=None, ext
   if extra:
     entry.update(extra)
   return entry
+
+
+def _attempt_template_click_with_debug(field, template_path, region_ltrb, threshold=0.8, template_scaling=1.0, duration=0.225, verify_after_click=None, click_mode="default"):
+  screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+  best_match = device_action.best_template_match(
+    template_path,
+    screenshot,
+    template_scales=[device_action._effective_template_scale(template_scaling)],
+  )
+
+  best_score = None
+  passed_threshold = False
+  click_attempted = False
+  click_verified = False
+  click_target = None
+  match_location = None
+  match_size = None
+  verification_details = None
+
+  if best_match is not None:
+    best_score = round(best_match["score"], 4)
+    passed_threshold = best_match["score"] >= threshold
+    match_location = best_match["location"]
+    match_size = best_match["size"]
+    if passed_threshold:
+      x, y = best_match["location"]
+      w, h = best_match["size"]
+      click_target = (
+        region_ltrb[0] + x + w // 2,
+        region_ltrb[1] + y + h // 2,
+      )
+      if click_mode == "press_click" and not bot.use_adb:
+        click_attempted = bool(pyautogui_actions.press_click(click_target, hold_duration=0.08, move_duration=duration))
+      else:
+        click_attempted = bool(device_action.click(click_target, duration=duration))
+      verification_details = {
+        "input_debug": dict(getattr(pyautogui_actions, "LAST_CLICK_DEBUG", {}) or {}),
+        "click_mode": click_mode,
+      }
+      if click_attempted and verify_after_click is not None:
+        sleep(0.5)
+        click_verified, post_click_details = verify_after_click()
+        verification_details.update(post_click_details or {})
+
+  entry = _template_debug_entry(
+    field,
+    template_path,
+    parsed_value=(
+      "verified_open"
+      if click_verified else
+      "click_unverified"
+      if click_attempted else
+      "matched"
+      if passed_threshold else
+      "below_threshold"
+      if best_score is not None else
+      "not_found"
+    ),
+    extra={
+      "threshold": threshold,
+      "best_live_score": best_score,
+      "passed_threshold": passed_threshold,
+      "click_attempted": click_attempted,
+      "click_verified": click_verified,
+      "match_location": match_location,
+      "match_size": match_size,
+      "click_target": click_target,
+      "verification_details": verification_details,
+    },
+  )
+  entry["bbox_xyxy"] = region_ltrb
+  return click_verified, entry
 
 
 def _profile_debug_entry():

@@ -13,9 +13,43 @@ import platform
 
 # Detect if running on macOS
 IS_MACOS = platform.system() == "Darwin"
+LAST_CLICK_DEBUG = {}
 
 def click(x_y : tuple[int, int], clicks: int = 1, interval: float = 0.1, duration: float = 0.225):
+  global LAST_CLICK_DEBUG
+  before = pyautogui.position()
   pyautogui.click(x_y[0], x_y[1], clicks=clicks, interval=interval, duration=duration)
+  after = pyautogui.position()
+  LAST_CLICK_DEBUG = {
+    "target": [int(x_y[0]), int(x_y[1])],
+    "before": [int(before.x), int(before.y)],
+    "after": [int(after.x), int(after.y)],
+    "clicks": int(clicks),
+    "interval": float(interval),
+    "duration": float(duration),
+    "moved": (int(before.x), int(before.y)) != (int(after.x), int(after.y)),
+    "reached_target": abs(int(after.x) - int(x_y[0])) <= 2 and abs(int(after.y) - int(x_y[1])) <= 2,
+  }
+  return True
+
+def press_click(x_y: tuple[int, int], hold_duration: float = 0.08, move_duration: float = 0.225):
+  global LAST_CLICK_DEBUG
+  before = pyautogui.position()
+  pyautogui.moveTo(x_y[0], x_y[1], duration=move_duration)
+  pyautogui.mouseDown()
+  pyautogui.sleep(hold_duration)
+  pyautogui.mouseUp()
+  after = pyautogui.position()
+  LAST_CLICK_DEBUG = {
+    "target": [int(x_y[0]), int(x_y[1])],
+    "before": [int(before.x), int(before.y)],
+    "after": [int(after.x), int(after.y)],
+    "move_duration": float(move_duration),
+    "hold_duration": float(hold_duration),
+    "moved": (int(before.x), int(before.y)) != (int(after.x), int(after.y)),
+    "reached_target": abs(int(after.x) - int(x_y[0])) <= 2 and abs(int(after.y) - int(x_y[1])) <= 2,
+    "click_mode": "press_click",
+  }
   return True
 
 def swipe(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.3):
