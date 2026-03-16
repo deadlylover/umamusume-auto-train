@@ -18,7 +18,13 @@ def deep_merge(template: dict, user_config: dict) -> dict:
     if key in user_config:
       # recursive merge if value is dict
       if isinstance(value, dict) and isinstance(user_config[key], dict):
-        updated_config[key] = deep_merge(value, user_config[key])
+        merged_value = deep_merge(value, user_config[key])
+        # Preserve user-defined profile entries for region adjuster profile maps.
+        if key == "profiles":
+          for extra_key, extra_value in user_config[key].items():
+            if extra_key not in merged_value:
+              merged_value[extra_key] = extra_value
+        updated_config[key] = merged_value
       else:
         updated_config[key] = user_config[key]
     else:

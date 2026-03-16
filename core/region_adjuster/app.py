@@ -36,6 +36,8 @@ def _load_context(path: Path) -> Dict:
 
 
 class RegionAdjusterApp:
+  HOTKEY_BINDTAG = "RegionAdjusterHotkeys"
+
   def __init__(self, context: Dict):
     self.context = context
     self.overlay_opacity = int(context.get("overlay_dim_opacity", 196))
@@ -135,6 +137,7 @@ class RegionAdjusterApp:
     self.root.rowconfigure(1, weight=1)
 
     self._build_layout()
+    self._install_hotkey_bindtags_recursive(self.root)
     self._bind_hotkeys()
     self.capture_screenshot()
 
@@ -143,10 +146,12 @@ class RegionAdjusterApp:
     self._profile_tab_names: List[str] = []
     if self.profile_paths:
       self.profile_notebook = ttk.Notebook(self.root)
+      self._install_hotkey_bindtag(self.profile_notebook)
       self.profile_notebook.grid(row=0, column=0, columnspan=4, sticky="ew")
       active_index = 0
       for idx, name in enumerate(self.profile_paths.keys()):
         frame = ttk.Frame(self.profile_notebook, height=1)
+        self._install_hotkey_bindtag(frame)
         self.profile_notebook.add(frame, text=name)
         self._profile_tab_names.append(name)
         if name == self.active_profile:
@@ -155,23 +160,29 @@ class RegionAdjusterApp:
       self.profile_notebook.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
 
     self.canvas = tk.Canvas(self.root, background="black", highlightthickness=0)
+    self._install_hotkey_bindtag(self.canvas)
     self.canvas.grid(row=1, column=0, sticky="nsew")
 
     self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw")
 
     self.v_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
+    self._install_hotkey_bindtag(self.v_scroll)
     self.v_scroll.grid(row=1, column=1, sticky="ns")
     self.h_scroll = tk.Scrollbar(self.root, orient="horizontal", command=self.canvas.xview)
+    self._install_hotkey_bindtag(self.h_scroll)
     self.h_scroll.grid(row=2, column=0, sticky="ew")
     self.canvas.configure(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
     self.side_canvas = tk.Canvas(self.root, background="#232323", highlightthickness=0, width=320)
+    self._install_hotkey_bindtag(self.side_canvas)
     self.side_canvas.grid(row=1, column=2, rowspan=2, sticky="ns")
     self.side_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.side_canvas.yview)
+    self._install_hotkey_bindtag(self.side_scroll)
     self.side_scroll.grid(row=1, column=3, rowspan=2, sticky="ns")
     self.side_canvas.configure(yscrollcommand=self.side_scroll.set)
 
     side_panel = tk.Frame(self.side_canvas, bg="#232323", padx=12, pady=12)
+    self._install_hotkey_bindtag(side_panel)
     self.side_window_id = self.side_canvas.create_window((0, 0), window=side_panel, anchor="nw")
     side_panel.bind("<Configure>", self._on_side_panel_configure)
     self.side_canvas.bind("<Configure>", self._on_side_canvas_configure)
@@ -216,6 +227,7 @@ class RegionAdjusterApp:
       bg="#1b1b1b",
       fg="white",
     )
+    self._install_hotkey_bindtag(self.region_listbox)
     self.region_listbox.bind("<<ListboxSelect>>", self._on_region_select)
     self.region_listbox.pack(fill=tk.BOTH, expand=False, pady=(6, 10))
     self._refresh_region_list()
@@ -242,6 +254,7 @@ class RegionAdjusterApp:
       bg="#1b1b1b",
       fg="white",
     )
+    self._install_hotkey_bindtag(self.template_listbox)
     self.template_listbox.bind("<<ListboxSelect>>", self._on_template_select)
     self.template_listbox.pack(fill=tk.BOTH, expand=False)
     self.template_preview_label = tk.Label(side_panel, bg="#1b1b1b", relief=tk.GROOVE)
@@ -308,6 +321,7 @@ class RegionAdjusterApp:
       value = self.bounds_default.get(key, 0)
       var = tk.StringVar(value=str(value))
       entry = tk.Entry(bounds_frame, textvariable=var, width=8)
+      self._install_hotkey_bindtag(entry)
       entry.grid(row=idx, column=1, sticky="e", padx=4, pady=2)
       self.bound_vars[key] = var
 
@@ -438,29 +452,70 @@ class RegionAdjusterApp:
       return
 
   def _bind_hotkeys(self):
-    self.root.bind("<Up>", lambda event: self._handle_arrow(event, 0, -1))
-    self.root.bind("<Down>", lambda event: self._handle_arrow(event, 0, 1))
-    self.root.bind("<Left>", lambda event: self._handle_arrow(event, -1, 0))
-    self.root.bind("<Right>", lambda event: self._handle_arrow(event, 1, 0))
-    self.root.bind("<Shift-Up>", lambda event: self._handle_resize_arrow(event, 0, -1))
-    self.root.bind("<Shift-Down>", lambda event: self._handle_resize_arrow(event, 0, 1))
-    self.root.bind("<Shift-Left>", lambda event: self._handle_resize_arrow(event, -1, 0))
-    self.root.bind("<Shift-Right>", lambda event: self._handle_resize_arrow(event, 1, 0))
-    self.root.bind("<Command-s>", lambda event: self.save_overrides())  # macOS shortcut
-    self.root.bind("<Control-s>", lambda event: self.save_overrides())
-    self.root.bind("<space>", lambda event: self.test_selected_template())
-    self.root.bind("<Shift-space>", lambda event: self.capture_screenshot())
-    self.root.bind("<r>", lambda event: self.capture_screenshot())
+    hotkey_target = self.HOTKEY_BINDTAG
+    self.root.bind_class(hotkey_target, "<Up>", lambda event: self._handle_arrow(event, 0, -1))
+    self.root.bind_class(hotkey_target, "<Down>", lambda event: self._handle_arrow(event, 0, 1))
+    self.root.bind_class(hotkey_target, "<Left>", lambda event: self._handle_arrow(event, -1, 0))
+    self.root.bind_class(hotkey_target, "<Right>", lambda event: self._handle_arrow(event, 1, 0))
+    self.root.bind_class(hotkey_target, "<Shift-Up>", lambda event: self._handle_resize_arrow(event, 0, -1))
+    self.root.bind_class(hotkey_target, "<Shift-Down>", lambda event: self._handle_resize_arrow(event, 0, 1))
+    self.root.bind_class(hotkey_target, "<Shift-Left>", lambda event: self._handle_resize_arrow(event, -1, 0))
+    self.root.bind_class(hotkey_target, "<Shift-Right>", lambda event: self._handle_resize_arrow(event, 1, 0))
+    self.root.bind_class(hotkey_target, "<Command-s>", lambda event: self._save_hotkey(event))  # macOS shortcut
+    self.root.bind_class(hotkey_target, "<Control-s>", lambda event: self._save_hotkey(event))
+    self.root.bind_class(hotkey_target, "<space>", lambda event: self._test_template_hotkey(event))
+    self.root.bind_class(hotkey_target, "<Shift-space>", lambda event: self._capture_hotkey(event))
+    self.root.bind_class(hotkey_target, "<r>", lambda event: self._capture_hotkey(event))
+
+  def _install_hotkey_bindtag(self, widget):
+    bindtags = list(widget.bindtags())
+    if self.HOTKEY_BINDTAG in bindtags:
+      return
+    bindtags.insert(0, self.HOTKEY_BINDTAG)
+    widget.bindtags(tuple(bindtags))
+
+  def _install_hotkey_bindtags_recursive(self, widget):
+    self._install_hotkey_bindtag(widget)
+    for child in widget.winfo_children():
+      self._install_hotkey_bindtags_recursive(child)
+
+  def _should_capture_hotkey(self, event) -> bool:
+    widget = event.widget
+    if isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox, ttk.Entry, ttk.Combobox)):
+      return False
+    return True
 
   def _handle_arrow(self, event, dx: int, dy: int):
-    del event
+    if not self._should_capture_hotkey(event):
+      return None
     multiplier = self._step_size()
     self.move_selected(dx * multiplier, dy * multiplier)
+    return "break"
 
   def _handle_resize_arrow(self, event, dx: int, dy: int):
-    del event
+    if not self._should_capture_hotkey(event):
+      return None
     multiplier = self._step_size()
     self.resize_selected(dw=dx * multiplier, dh=dy * multiplier)
+    return "break"
+
+  def _save_hotkey(self, event):
+    if not self._should_capture_hotkey(event):
+      return None
+    self.save_overrides()
+    return "break"
+
+  def _test_template_hotkey(self, event):
+    if not self._should_capture_hotkey(event):
+      return None
+    self.test_selected_template()
+    return "break"
+
+  def _capture_hotkey(self, event):
+    if not self._should_capture_hotkey(event):
+      return None
+    self.capture_screenshot()
+    return "break"
 
   def _step_size(self) -> int:
     try:
