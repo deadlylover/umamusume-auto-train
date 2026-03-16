@@ -13,6 +13,7 @@ from scenarios.unity import unity_cup_function
 from core.events import select_event
 from core.claw_machine import play_claw_machine
 from core.skill import buy_skill, init_skill_py
+from core.operator_console import ensure_operator_console, publish_runtime_state
 
 pyautogui.useImageNotFoundException(False)
 
@@ -99,6 +100,119 @@ non_match_count = 0
 action_count=0
 last_state = CleanDefaultDict()
 
+
+def _truncate(value, limit=180):
+  text = str(value)
+  if len(text) <= limit:
+    return text
+  return text[: limit - 3] + "..."
+
+
+def build_review_snapshot(state_obj, action, reasoning_notes=None):
+  state_summary = {
+    "year": state_obj.get("year"),
+    "turn": state_obj.get("turn"),
+    "criteria": _truncate(state_obj.get("criteria", "")),
+    "energy_level": state_obj.get("energy_level"),
+    "max_energy": state_obj.get("max_energy"),
+    "current_mood": state_obj.get("current_mood"),
+    "date_event_available": state_obj.get("date_event_available"),
+    "race_mission_available": state_obj.get("race_mission_available"),
+  }
+  selected_action = {
+    "func": getattr(action, "func", None),
+    "training_name": action.get("training_name") if hasattr(action, "get") else None,
+    "race_name": action.get("race_name") if hasattr(action, "get") else None,
+    "score_tuple": action.get("training_data", {}).get("score_tuple") if hasattr(action, "get") else None,
+  }
+  ranked_trainings = []
+  available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
+  for training_name, training_data in available_trainings.items():
+    ranked_trainings.append(
+      {
+        "name": training_name,
+        "score_tuple": training_data.get("score_tuple"),
+        "failure": training_data.get("failure"),
+        "total_supports": training_data.get("total_supports"),
+        "total_rainbow_friends": training_data.get("total_rainbow_friends"),
+        "total_friendship_increases": training_data.get("total_friendship_increases"),
+        "stat_gains": training_data.get("stat_gains"),
+        "unity_gauge_fills": training_data.get("unity_gauge_fills"),
+        "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+      }
+    )
+  return {
+    "scenario_name": constants.SCENARIO_NAME or "default",
+    "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+    "energy_label": f"{state_obj.get('energy_level', '?')}/{state_obj.get('max_energy', '?')}",
+    "state_summary": state_summary,
+    "selected_action": selected_action,
+    "available_actions": list(getattr(action, "available_actions", [])),
+    "ranked_trainings": ranked_trainings,
+    "reasoning_notes": reasoning_notes or "",
+    "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
+  }
+
+
+def update_operator_snapshot(state_obj=None, action=None, phase=None, status="active", message="", error_text="", reasoning_notes=None):
+  if phase:
+    bot.set_phase(phase, status=status, message=message, error=error_text)
+  elif message or error_text:
+    current = bot.get_runtime_state()
+    bot.set_phase(current["phase"], status=status, message=message, error=error_text)
+  if state_obj is not None and action is not None:
+    bot.set_snapshot(build_review_snapshot(state_obj, action, reasoning_notes=reasoning_notes))
+  publish_runtime_state()
+
+
+def review_action_before_execution(state_obj, action, message="Review action before execution."):
+  should_wait = config.EXECUTION_MODE == "semi_auto" or bot.is_pause_requested()
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="waiting_for_confirmation",
+    message=message,
+  )
+  if not should_wait:
+    return True
+  ensure_operator_console()
+  bot.begin_review_wait()
+  publish_runtime_state()
+  while bot.is_bot_running and not bot.stop_event.is_set():
+    if bot.review_event.wait(timeout=0.1):
+      break
+  waiting_interrupted = not bot.is_bot_running or bot.stop_event.is_set()
+  if waiting_interrupted:
+    bot.cancel_review_wait()
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text="Review wait interrupted by stop request.",
+    )
+    return False
+  bot.clear_pause_request()
+  update_operator_snapshot(state_obj, action, phase="executing_action", message="Executing approved action.")
+  return True
+
+
+def run_action_with_review(state_obj, action, review_message, pre_run_hook=None):
+  if not review_action_before_execution(state_obj, action, review_message):
+    return False
+  if pre_run_hook is not None:
+    pre_run_hook()
+  result = action.run()
+  if not result:
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Action failed: {action.func}",
+    )
+  return result
+
 def career_lobby(dry_run_turn=False):
   global last_state, action_count, non_match_count
   non_match_count = 0
@@ -110,8 +224,12 @@ def career_lobby(dry_run_turn=False):
   strategy = Strategy()
   init_adb()
   init_skill_py()
+  if config.EXECUTION_MODE == "semi_auto":
+    ensure_operator_console()
+  update_operator_snapshot(phase="scanning_lobby", message="Career loop started.")
   try:
     while bot.is_bot_running:
+      update_operator_snapshot(phase="scanning_lobby", message="Scanning career lobby for next state.")
       sleep(1)
       device_action.flush_screenshot_cache()
       screenshot = device_action.screenshot()
@@ -214,6 +332,7 @@ def career_lobby(dry_run_turn=False):
       info(f"Bot version: {VERSION}")
 
       action = Action()
+      update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
       state_obj = collect_main_state()
 
       if state_obj["turn"] == "Race Day":
@@ -221,7 +340,7 @@ def career_lobby(dry_run_turn=False):
         action["is_race_day"] = True
         action["year"] = state_obj["year"]
         info(f"Race Day")
-        if action.run():
+        if run_action_with_review(state_obj, action, "Race day detected. Review before entering race."):
           record_and_finalize_turn(state_obj, action)
           continue
         else:
@@ -235,8 +354,12 @@ def career_lobby(dry_run_turn=False):
         action["race_name"] = "any"
         action["race_image_path"] = "assets/ui/match_track.png"
         action["race_mission_available"] = True
-        buy_skill(state_obj, action_count, race_check=True)
-        if action.run():
+        if run_action_with_review(
+          state_obj,
+          action,
+          "Mission race selected. Review before race entry.",
+          pre_run_hook=lambda: buy_skill(state_obj, action_count, race_check=True),
+        ):
           record_and_finalize_turn(state_obj, action)
           continue
         else:
@@ -250,8 +373,12 @@ def career_lobby(dry_run_turn=False):
       if "race_name" in action.options:
         action.func = "do_race"
         info(f"Taking action: {action.func}")
-        buy_skill(state_obj, action_count, race_check=True)
-        if action.run():
+        if run_action_with_review(
+          state_obj,
+          action,
+          "Scheduled race selected. Review before race entry.",
+          pre_run_hook=lambda: buy_skill(state_obj, action_count, race_check=True),
+        ):
           record_and_finalize_turn(state_obj, action)
           continue
         else:
@@ -266,8 +393,12 @@ def career_lobby(dry_run_turn=False):
         action["race_image_path"] = "assets/ui/match_track.png"
         action["prioritize_missions_over_g1"] = config.PRIORITIZE_MISSIONS_OVER_G1
         action["race_mission_available"] = True
-        buy_skill(state_obj, action_count, race_check=True)
-        if action.run():
+        if run_action_with_review(
+          state_obj,
+          action,
+          "Mission race selected. Review before race entry.",
+          pre_run_hook=lambda: buy_skill(state_obj, action_count, race_check=True),
+        ):
           record_and_finalize_turn(state_obj, action)
           continue
         else:
@@ -281,8 +412,12 @@ def career_lobby(dry_run_turn=False):
         action = strategy.decide_race_for_goal(state_obj, action)
         if action.func == "do_race":
           info(f"Taking action: {action.func}")
-          buy_skill(state_obj, action_count, race_check=True)
-          if action.run():
+          if run_action_with_review(
+            state_obj,
+            action,
+            "Goal race selected. Review before race entry.",
+            pre_run_hook=lambda: buy_skill(state_obj, action_count, race_check=True),
+          ):
             record_and_finalize_turn(state_obj, action)
             continue
           else:
@@ -290,6 +425,7 @@ def career_lobby(dry_run_turn=False):
 
       training_function_name = strategy.get_training_template(state_obj)['training_function']
 
+      update_operator_snapshot(phase="collecting_training_state", message="Scanning all trainings.")
       state_obj = collect_training_state(state_obj, training_function_name)
 
       # go to skill buy function every turn, conditions are handled inside the function.
@@ -298,25 +434,38 @@ def career_lobby(dry_run_turn=False):
       log_encoded(f"{state_obj}", "Encoded state: ")
       info(f"State: {state_obj}")
 
+      update_operator_snapshot(phase="evaluating_strategy", message="Evaluating strategy.")
       action = strategy.decide(state_obj, action)
+      update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
 
       if isinstance(action, dict):
+        update_operator_snapshot(
+          state_obj,
+          Action(),
+          phase="recovering",
+          status="error",
+          error_text="Strategy returned invalid action structure.",
+        )
         error(f"Strategy returned an invalid action. Please report this line. Returned structure: {action}")
       elif action.func == "no_action":
+        update_operator_snapshot(state_obj, action, phase="recovering", status="error", error_text="State invalid, retrying.")
         info("State is invalid, retrying...")
         debug(f"State: {state_obj}")
       elif action.func == "skip_turn":
+        update_operator_snapshot(state_obj, action, phase="recovering", message="Skipping turn, retrying.")
         info("Skipping turn, retrying...")
       else:
         info(f"Taking action: {action.func}")
 
         # go to skill buy function if we come across a do_race function, conditions are handled in buy_skill
-        if action.func == "do_race":
-          buy_skill(state_obj, action_count, race_check=True)
         if dry_run_turn:
+          update_operator_snapshot(state_obj, action, phase="recovering", message="Dry run turn requested; quitting.")
           info("Dry run turn, quitting.")
           quit()
-        elif not action.run():
+        pre_run_hook = None
+        if action.func == "do_race":
+          pre_run_hook = lambda: buy_skill(state_obj, action_count, race_check=True)
+        elif not run_action_with_review(state_obj, action, "Review proposed action before execution.", pre_run_hook=pre_run_hook):
           if action.available_actions:  # Check if the list is not empty
             action.available_actions.pop(0)
 
@@ -331,9 +480,10 @@ def career_lobby(dry_run_turn=False):
             info(f"Trying action: {function_name}")
             action.func = function_name
             # go to skill buy function if we come across a do_race function, conditions are handled in buy_skill
+            retry_hook = None
             if action.func == "do_race":
-              buy_skill(state_obj, action_count, race_check=True)
-            if action.run():
+              retry_hook = lambda: buy_skill(state_obj, action_count, race_check=True)
+            if run_action_with_review(state_obj, action, f"Retry action {function_name}.", pre_run_hook=retry_hook):
               break
             info(f"Action {function_name} failed, trying other actions.")
 
@@ -342,6 +492,7 @@ def career_lobby(dry_run_turn=False):
 
   except BotStopException:
     info("Bot stopped by user.")
+    update_operator_snapshot(phase="idle", message="Bot stopped by user.")
     return
 
 def record_and_finalize_turn(state_obj, action):
@@ -355,3 +506,4 @@ def record_and_finalize_turn(state_obj, action):
     if action_count >= LIMIT_TURNS:
       info(f"Completed {action_count} actions, stopping bot as requested.")
       quit()
+  update_operator_snapshot(state_obj, action, phase="scanning_lobby", message="Turn complete. Returning to lobby scan.")

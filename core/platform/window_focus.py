@@ -2,6 +2,7 @@ import platform
 import subprocess
 import textwrap
 import time
+from typing import Dict, Tuple
 
 import pyautogui
 
@@ -12,8 +13,128 @@ except Exception:  # pragma: no cover - optional on macOS
 
 import core.config as config
 import utils.constants as constants
+from core.region_adjuster.shared import resolve_region_adjuster_profiles
 from utils.log import info, error, debug
 from utils.tools import sleep
+
+
+def _coerce_int(value, default: int) -> int:
+  try:
+    return int(round(float(value)))
+  except (TypeError, ValueError):
+    return default
+
+
+def _get_macos_display_resolution() -> Tuple[int, int, str]:
+  script = textwrap.dedent(
+    """
+    tell application "Finder"
+      set desktopBounds to bounds of window of desktop
+      return (item 3 of desktopBounds as string) & "," & (item 4 of desktopBounds as string)
+    end tell
+    """
+  )
+
+  try:
+    result = subprocess.run(
+      ["osascript", "-e", script],
+      capture_output=True,
+      text=True,
+      check=False,
+    )
+    if result.returncode == 0:
+      output = (result.stdout or "").strip()
+      width_text, height_text = [part.strip() for part in output.split(",", 1)]
+      width = _coerce_int(width_text, 0)
+      height = _coerce_int(height_text, 0)
+      if width > 0 and height > 0:
+        return width, height, "osascript"
+  except Exception:
+    pass
+
+  resolution = pyautogui.resolution()
+  return int(resolution.width), int(resolution.height), "pyautogui"
+
+
+def _compute_display_scale(current_width: int, current_height: int, display_config: Dict) -> float:
+  reference = display_config.get("reference_display") or {}
+  reference_width = _coerce_int(reference.get("width"), 0)
+  reference_height = _coerce_int(reference.get("height"), 0)
+  if reference_width <= 0 or reference_height <= 0:
+    warning_message = (
+      "macOS display-aware bounds are enabled, but "
+      "platform.mac_bluestacks_air.display_aware_bounds.reference_display is invalid."
+    )
+    error(warning_message)
+    return 1.0
+
+  scale_x = current_width / reference_width
+  scale_y = current_height / reference_height
+  scale_mode = str(display_config.get("scale_mode", "contain")).lower()
+
+  if scale_mode == "width":
+    scale = scale_x
+  elif scale_mode == "height":
+    scale = scale_y
+  else:
+    scale = min(scale_x, scale_y)
+
+  min_scale = display_config.get("min_scale")
+  max_scale = display_config.get("max_scale")
+  if min_scale is not None:
+    scale = max(float(min_scale), scale)
+  if max_scale is not None:
+    scale = min(float(max_scale), scale)
+
+  return scale
+
+
+def _resolve_display_aware_mac_settings(
+  settings: Dict,
+  bounds: Dict,
+  offset_x: int,
+  offset_y: int,
+  recognition_offset_x: int,
+  recognition_offset_y: int,
+) -> Tuple[Dict, int, int, int, int, float]:
+  display_config = settings.get("display_aware_bounds") or {}
+  if not display_config.get("enabled"):
+    return bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, 1.0
+
+  current_width, current_height, source = _get_macos_display_resolution()
+  scale = _compute_display_scale(current_width, current_height, display_config)
+  scale_regions = bool(display_config.get("scale_regions", False))
+
+  scaled_bounds = dict(bounds)
+  if display_config.get("scale_bounds", True):
+    scaled_bounds = {
+      key: _coerce_int(bounds.get(key), 0 if key in ("x", "y") else 1)
+      for key in ("x", "y", "width", "height")
+    }
+    for key in ("x", "y", "width", "height"):
+      scaled_bounds[key] = max(
+        1 if key in ("width", "height") else 0,
+        int(round(scaled_bounds[key] * scale)),
+      )
+
+  if display_config.get("scale_general_offsets", True) and not scale_regions:
+    offset_x = int(round(offset_x * scale))
+    offset_y = int(round(offset_y * scale))
+
+  if display_config.get("scale_recognition_offsets", True) and not scale_regions:
+    recognition_offset_x = int(round(recognition_offset_x * scale))
+    recognition_offset_y = int(round(recognition_offset_y * scale))
+
+  reference = display_config.get("reference_display") or {}
+  info(
+    "macOS display-aware bounds: "
+    f"display={current_width}x{current_height} via {source}, "
+    f"reference={_coerce_int(reference.get('width'), 0)}x{_coerce_int(reference.get('height'), 0)}, "
+    f"scale={scale:.4f}, bounds={scaled_bounds}, offsets=({offset_x}, {offset_y}), "
+    f"recognition_offsets=({recognition_offset_x}, {recognition_offset_y})"
+  )
+
+  return scaled_bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, scale
 
 
 def focus_target_window() -> bool:
@@ -121,6 +242,15 @@ def _focus_mac_bluestacks_air() -> bool:
   if offset_y is None:
     offset_y = 0
 
+  bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, display_scale = _resolve_display_aware_mac_settings(
+    settings=settings,
+    bounds=bounds,
+    offset_x=_coerce_int(offset_x, 0),
+    offset_y=_coerce_int(offset_y, 0),
+    recognition_offset_x=_coerce_int(recognition_offset_x, 0),
+    recognition_offset_y=_coerce_int(recognition_offset_y, 0),
+  )
+
   if isinstance(configured_process_name, (list, tuple)):
     process_candidates = [name for name in configured_process_name if name]
   else:
@@ -200,9 +330,14 @@ def _focus_mac_bluestacks_air() -> bool:
     )
 
   overrides_config = getattr(config, "REGION_ADJUSTER_CONFIG", {}) or {}
-  overrides_path = overrides_config.get("overrides_path")
+  _, _, overrides_path = resolve_region_adjuster_profiles(overrides_config)
   if constants.apply_region_overrides(overrides_path=overrides_path):
     debug("Applied region overrides from adjuster settings.")
+
+  display_config = settings.get("display_aware_bounds") or {}
+  if display_config.get("enabled") and display_config.get("scale_regions", False):
+    constants.scale_coordinate_constants(display_scale)
+    debug(f"Applied display-aware coordinate scaling factor {display_scale:.4f}.")
 
   return True
 

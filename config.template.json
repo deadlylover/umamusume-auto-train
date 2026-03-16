@@ -22,6 +22,7 @@
     "wit": 900
   },
   "sleep_time_multiplier": 1.1,
+  "execution_mode": "auto",
   "skip_training_energy": 40,
   "never_rest_energy": 70,
   "skip_infirmary_unless_missing_energy": 20,
@@ -1747,7 +1748,21 @@
       "offset_y": 0,
       "apply_recognition_offset": false,
       "recognition_offset_x": 0,
-      "recognition_offset_y": 0
+      "recognition_offset_y": 0,
+      "display_aware_bounds": {
+        "enabled": false,
+        "reference_display": {
+          "width": 2560,
+          "height": 1664
+        },
+        "scale_mode": "contain",
+        "scale_bounds": true,
+        "scale_regions": false,
+        "scale_general_offsets": true,
+        "scale_recognition_offsets": true,
+        "min_scale": 0.5,
+        "max_scale": 1.0
+      }
     }
   },
   "debug": {
@@ -1757,7 +1772,12 @@
     "device_debug": false,
     "save_debug_images": false,
     "region_adjuster": {
-      "enabled": false
+      "enabled": false,
+      "overrides_path": "data/region_overrides.json",
+      "active_profile": "default",
+      "profiles": {
+        "default": "data/region_overrides.json"
+      }
     }
   },
   "_comment_window_name": "macOS default: BlueStacks Air. Set to the exact emulator window title.",

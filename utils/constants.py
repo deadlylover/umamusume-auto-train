@@ -60,6 +60,11 @@ ENERGY_REGION = convert_xyxy_to_xywh(ENERGY_BBOX)
 UNITY_ENERGY_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (287, 120, -150, -920))
 UNITY_ENERGY_REGION = convert_xyxy_to_xywh(UNITY_ENERGY_BBOX)
 
+# Trackblazer / MANT placeholders start from the standard layout and can be tuned
+# independently in the region adjuster as scenario captures are gathered.
+MANT_ENERGY_BBOX = ENERGY_BBOX
+MANT_ENERGY_REGION = ENERGY_REGION
+
 MOOD_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (557, 125, -115, -930))
 MOOD_REGION = convert_xyxy_to_xywh(MOOD_BBOX)
 
@@ -69,11 +74,17 @@ TURN_REGION = convert_xyxy_to_xywh(TURN_BBOX)
 UNITY_TURN_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (110, 60, -630, -975))
 UNITY_TURN_REGION = convert_xyxy_to_xywh(UNITY_TURN_BBOX)
 
+MANT_TURN_BBOX = TURN_BBOX
+MANT_TURN_REGION = TURN_REGION
+
 UNITY_RACE_TURNS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (120, 114, -640, -947))
 UNITY_RACE_TURNS_REGION = convert_xyxy_to_xywh(UNITY_RACE_TURNS_BBOX)
 
 UNITY_TURN_FULL_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (110, 60, -570, -975))
 UNITY_TURN_FULL_REGION = convert_xyxy_to_xywh(UNITY_TURN_FULL_BBOX)
+
+MANT_TURN_FULL_BBOX = TURN_BBOX
+MANT_TURN_FULL_REGION = TURN_REGION
 
 FAILURE_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (152, 790, -140, -260))
 FAILURE_REGION = convert_xyxy_to_xywh(FAILURE_BBOX)
@@ -81,17 +92,26 @@ FAILURE_REGION = convert_xyxy_to_xywh(FAILURE_BBOX)
 UNITY_FAILURE_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (152, 780, -140, -265))
 UNITY_FAILURE_REGION = convert_xyxy_to_xywh(UNITY_FAILURE_BBOX)
 
+MANT_FAILURE_BBOX = FAILURE_BBOX
+MANT_FAILURE_REGION = FAILURE_REGION
+
 YEAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (107, 35, -530, -1020))
 YEAR_REGION = convert_xyxy_to_xywh(YEAR_BBOX)
 
 UNITY_YEAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (237, 35, -400, -1025))
 UNITY_YEAR_REGION = convert_xyxy_to_xywh(UNITY_YEAR_BBOX)
 
+MANT_YEAR_BBOX = YEAR_BBOX
+MANT_YEAR_REGION = YEAR_REGION
+
 CRITERIA_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (307, 60, -200, -965))
 CRITERIA_REGION = convert_xyxy_to_xywh(CRITERIA_BBOX)
 
 UNITY_CRITERIA_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (290, 60, -190, -965))
 UNITY_CRITERIA_REGION = convert_xyxy_to_xywh(UNITY_CRITERIA_BBOX)
+
+MANT_CRITERIA_BBOX = CRITERIA_BBOX
+MANT_CRITERIA_REGION = CRITERIA_REGION
 
 CURRENT_STATS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (120, 723, -122, -315))
 CURRENT_STATS_REGION = convert_xyxy_to_xywh(CURRENT_STATS_BBOX)
@@ -111,6 +131,11 @@ UNITY_STAT_GAINS_2_REGION = convert_xyxy_to_xywh(UNITY_STAT_GAINS_2_BBOX)
 UNITY_STAT_GAINS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (122, 673, -110, -378))
 UNITY_STAT_GAINS_REGION = convert_xyxy_to_xywh(UNITY_STAT_GAINS_BBOX)
 
+MANT_STAT_GAINS_BBOX = URA_STAT_GAINS_BBOX
+MANT_STAT_GAINS_REGION = URA_STAT_GAINS_REGION
+MANT_STAT_GAINS_2_BBOX = URA_STAT_GAINS_BBOX
+MANT_STAT_GAINS_2_REGION = URA_STAT_GAINS_REGION
+
 FULL_STATS_STATUS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (117, 575, -105, -140))
 FULL_STATS_STATUS_REGION = convert_xyxy_to_xywh(FULL_STATS_STATUS_BBOX)
 
@@ -122,6 +147,18 @@ SUPPORT_CARD_ICON_REGION = convert_xyxy_to_xywh(SUPPORT_CARD_ICON_BBOX)
 
 UNITY_SUPPORT_CARD_ICON_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (665, 130, 0, -380))
 UNITY_SUPPORT_CARD_ICON_REGION = convert_xyxy_to_xywh(UNITY_SUPPORT_CARD_ICON_BBOX)
+
+MANT_SUPPORT_CARD_ICON_BBOX = SUPPORT_CARD_ICON_BBOX
+MANT_SUPPORT_CARD_ICON_REGION = SUPPORT_CARD_ICON_REGION
+
+MANT_SHOP_COIN_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (560, 85, -130, -950))
+MANT_SHOP_COIN_REGION = convert_xyxy_to_xywh(MANT_SHOP_COIN_BBOX)
+
+MANT_GRADE_POINT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (150, 120, -500, -900))
+MANT_GRADE_POINT_REGION = convert_xyxy_to_xywh(MANT_GRADE_POINT_BBOX)
+
+MANT_SHOP_BUTTON_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (600, 785, -90, -190))
+MANT_SHOP_BUTTON_REGION = convert_xyxy_to_xywh(MANT_SHOP_BUTTON_BBOX)
 
 UNITY_TEAM_MATCHUP_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (130, 565, -130, -475))
 UNITY_TEAM_MATCHUP_REGION = convert_xyxy_to_xywh(UNITY_TEAM_MATCHUP_BBOX)
@@ -223,6 +260,7 @@ RACE_BUTTON_IN_RACE_REGION_LANDSCAPE = convert_xyxy_to_xywh(RACE_BUTTON_IN_RACE_
 SCENARIO_NAME = ""
 OFFSET_APPLIED = False
 OVERRIDES_APPLIED = False
+SCALE_APPLIED = False
 
 DEFAULT_REGION_OVERRIDES_PATH = Path(__file__).resolve().parents[1] / "data" / "region_overrides.json"
 
@@ -241,28 +279,40 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "ENERGY_REGION",
   "UNITY_ENERGY_BBOX",
   "UNITY_ENERGY_REGION",
+  "MANT_ENERGY_BBOX",
+  "MANT_ENERGY_REGION",
   "MOOD_BBOX",
   "MOOD_REGION",
   "TURN_BBOX",
   "TURN_REGION",
   "UNITY_TURN_BBOX",
   "UNITY_TURN_REGION",
+  "MANT_TURN_BBOX",
+  "MANT_TURN_REGION",
   "UNITY_TURN_FULL_BBOX",
   "UNITY_TURN_FULL_REGION",
+  "MANT_TURN_FULL_BBOX",
+  "MANT_TURN_FULL_REGION",
   "UNITY_RACE_TURNS_BBOX",
   "UNITY_RACE_TURNS_REGION",
   "FAILURE_BBOX",
   "FAILURE_REGION",
   "UNITY_FAILURE_BBOX",
   "UNITY_FAILURE_REGION",
+  "MANT_FAILURE_BBOX",
+  "MANT_FAILURE_REGION",
   "YEAR_BBOX",
   "YEAR_REGION",
   "UNITY_YEAR_BBOX",
   "UNITY_YEAR_REGION",
+  "MANT_YEAR_BBOX",
+  "MANT_YEAR_REGION",
   "CRITERIA_BBOX",
   "CRITERIA_REGION",
   "UNITY_CRITERIA_BBOX",
   "UNITY_CRITERIA_REGION",
+  "MANT_CRITERIA_BBOX",
+  "MANT_CRITERIA_REGION",
   "CURRENT_STATS_BBOX",
   "CURRENT_STATS_REGION",
   "RACE_INFO_TEXT_BBOX",
@@ -275,6 +325,10 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "UNITY_STAT_GAINS_REGION",
   "UNITY_STAT_GAINS_2_BBOX",
   "UNITY_STAT_GAINS_2_REGION",
+  "MANT_STAT_GAINS_BBOX",
+  "MANT_STAT_GAINS_REGION",
+  "MANT_STAT_GAINS_2_BBOX",
+  "MANT_STAT_GAINS_2_REGION",
   "FULL_STATS_STATUS_BBOX",
   "FULL_STATS_STATUS_REGION",
   "FULL_STATS_APTITUDE_BBOX",
@@ -283,8 +337,16 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "SUPPORT_CARD_ICON_REGION",
   "UNITY_SUPPORT_CARD_ICON_BBOX",
   "UNITY_SUPPORT_CARD_ICON_REGION",
+  "MANT_SUPPORT_CARD_ICON_BBOX",
+  "MANT_SUPPORT_CARD_ICON_REGION",
   "UNITY_TEAM_MATCHUP_BBOX",
   "UNITY_TEAM_MATCHUP_REGION",
+  "MANT_SHOP_COIN_BBOX",
+  "MANT_SHOP_COIN_REGION",
+  "MANT_GRADE_POINT_BBOX",
+  "MANT_GRADE_POINT_REGION",
+  "MANT_SHOP_BUTTON_BBOX",
+  "MANT_SHOP_BUTTON_REGION",
   "EVENT_NAME_BBOX",
   "EVENT_NAME_REGION",
   "CLAW_MACHINE_SPEED_BBOX",
@@ -426,6 +488,69 @@ def apply_region_overrides(overrides_path=None, force=False):
   update_action_positions()
   OVERRIDES_APPLIED = True
   return True
+
+
+def scale_coordinate_constants(scale=1.0):
+  """Scale all coordinate constants from the top-left origin.
+
+  This is intended for macOS display-aware calibration, where saved OCR
+  overrides were captured on one desktop size and need to be projected onto a
+  different current desktop size.
+  """
+  global SCALE_APPLIED
+  if SCALE_APPLIED:
+    return
+
+  try:
+    scale = float(scale)
+  except (TypeError, ValueError):
+    scale = 1.0
+
+  if scale <= 0 or abs(scale - 1.0) < 1e-6:
+    return
+
+  g = globals()
+  for name, value in list(g.items()):
+    if _is_region_name(name) and isinstance(value, tuple) and len(value) == 4:
+      x, y, w, h = value
+      g[name] = (
+        int(round(x * scale)),
+        int(round(y * scale)),
+        max(1, int(round(w * scale))),
+        max(1, int(round(h * scale))),
+      )
+
+    if (
+      name.endswith("_MOUSE_POS")
+      and isinstance(value, tuple)
+      and len(value) == 2
+    ):
+      x, y = value
+      g[name] = (
+        int(round(x * scale)),
+        int(round(y * scale)),
+      )
+
+    if _is_bbox_name(name) and isinstance(value, tuple) and len(value) == 4:
+      x1, y1, x2, y2 = value
+      scaled_x1 = int(round(x1 * scale))
+      scaled_y1 = int(round(y1 * scale))
+      scaled_x2 = int(round(x2 * scale))
+      scaled_y2 = int(round(y2 * scale))
+      if scaled_x2 <= scaled_x1:
+        scaled_x2 = scaled_x1 + 1
+      if scaled_y2 <= scaled_y1:
+        scaled_y2 = scaled_y1 + 1
+      g[name] = (
+        scaled_x1,
+        scaled_y1,
+        scaled_x2,
+        scaled_y2,
+      )
+
+  update_action_positions()
+  SCALE_APPLIED = True
+
 def adjust_constants_x_coords(offset=405):
   """Shift all region tuples' x-coordinates by `offset`."""
 

@@ -13,8 +13,10 @@ from utils.log import info, warning, error, debug, init_logging
 
 from core.skeleton import career_lobby
 from core.hotkeys import HotkeyListener
+from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.platform.window_focus import focus_target_window
 from core.region_adjuster import run_region_adjuster_session
+from core.region_adjuster.shared import resolve_region_adjuster_profiles
 import core.config as config
 import core.bot as bot
 import utils.constants as constants
@@ -35,16 +37,29 @@ def main():
   try:
     config.reload_config()
     bot.stop_event.clear()
+    bot.set_phase("focusing_window", message="Focusing emulator window.")
+    if config.EXECUTION_MODE == "semi_auto":
+      ensure_operator_console()
+      publish_runtime_state()
 
     if focus_target_window():
       info(f"Config: {config.CONFIG_NAME}")
+      bot.set_phase("scanning_lobby", message="Waiting in career lobby.")
+      publish_runtime_state()
       career_lobby()
     else:
+      bot.set_phase("recovering", status="error", error="Failed to focus Umamusume window.")
+      publish_runtime_state()
       error("Failed to focus Umamusume window")
   except Exception as e:
     error_message = traceback.format_exc()
+    bot.set_phase("recovering", status="error", error=str(e))
+    publish_runtime_state()
     error(f"Error in main thread: {error_message}")
   finally:
+    bot.cancel_review_wait()
+    bot.set_phase("idle", status="idle", message="Bot stopped.")
+    publish_runtime_state()
     debug("[BOT] Stopped.")
 
 def toggle_bot():
@@ -53,9 +68,11 @@ def toggle_bot():
       debug("[BOT] Stopping...")
       bot.stop_event.set()
       bot.is_bot_running = False
+      bot.clear_pause_request()
 
       if bot.bot_thread and bot.bot_thread.is_alive():
         debug("[BOT] Waiting for bot to stop...")
+        bot.cancel_review_wait()
         bot.bot_thread.join(timeout=3)
 
         if bot.bot_thread.is_alive():
@@ -66,9 +83,11 @@ def toggle_bot():
       bot.bot_thread = None
     else:
       debug("[BOT] Starting...")
+      bot.clear_pause_request()
       bot.is_bot_running = True
       bot.bot_thread = threading.Thread(target=main, daemon=True)
       bot.bot_thread.start()
+  publish_runtime_state()
 
 def trigger_debug_capture():
   debug(f"Hotkey '{capture_hotkey}' pressed; capturing OCR regions for calibration.")
@@ -95,6 +114,15 @@ def trigger_debug_capture():
       error(f"[DEBUG] Failed to read stats during capture: {exc}")
 
   threading.Thread(target=_capture, daemon=True).start()
+
+
+def trigger_continue_or_capture():
+  if bot.is_review_waiting():
+    debug(f"Hotkey '{capture_hotkey}' pressed; continuing paused action.")
+    bot.end_review_wait()
+    publish_runtime_state()
+    return
+  trigger_debug_capture()
 
 
 def trigger_support_capture():
@@ -149,8 +177,9 @@ def trigger_region_adjuster():
     if success:
       debug("Region adjuster reported success; reloading config to apply overrides.")
       config.reload_config()
+      _, _, overrides_path = resolve_region_adjuster_profiles(settings)
       constants.apply_region_overrides(
-        overrides_path=settings.get("overrides_path"),
+        overrides_path=overrides_path,
         force=True,
       )
 
@@ -173,7 +202,7 @@ def start_server():
   
   info(
     f"Press '{hotkey}' to start/stop the bot. "
-    f"Press '{capture_hotkey}' for year/stat OCR snapshots. "
+    f"Press '{capture_hotkey}' to continue paused semi-auto actions or capture year/stat OCR snapshots. "
     f"Press '{support_hotkey}' for support-region capture. "
     f"Press '{event_hotkey}' for event-region capture. "
     f"Press '{recreation_hotkey}' for recreation-region capture. "
@@ -185,15 +214,22 @@ def start_server():
   server = uvicorn.Server(server_config)
   server.run()
 
+
+def start_server_in_background():
+  threading.Thread(target=start_server, daemon=True).start()
+
 if __name__ == "__main__":
   update_config()
   config.reload_config(print_config=False)
+  bot.register_control_callback("toggle_bot", toggle_bot)
+  ensure_operator_console()
+  publish_runtime_state()
   
   listener = HotkeyListener(
     hotkey,
     toggle_bot,
     extra_hotkeys={
-      capture_hotkey: trigger_debug_capture,
+      capture_hotkey: trigger_continue_or_capture,
       support_hotkey: trigger_support_capture,
       event_hotkey: trigger_event_capture,
       recreation_hotkey: trigger_recreation_capture,
@@ -201,4 +237,5 @@ if __name__ == "__main__":
     },
   )
   listener.start()
-  start_server()
+  start_server_in_background()
+  ensure_operator_console().run_mainloop()

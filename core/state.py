@@ -242,6 +242,8 @@ def get_support_card_data(threshold=0.8):
   count_result = CleanDefaultDict()
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_SUPPORT_CARD_ICON_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_SUPPORT_CARD_ICON_REGION
   else:
     region_xywh = constants.SUPPORT_CARD_ICON_REGION
   screenshot = device_action.screenshot(region_xywh=region_xywh)
@@ -307,6 +309,10 @@ def get_training_data(year=None, check_stat_gains = False):
         if key in stat_gains2:
           stat_gains[key] += stat_gains2[key]
       results["stat_gains"] = stat_gains
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    results["failure"] = get_failure_chance(region_xywh=constants.MANT_FAILURE_REGION)
+    if check_stat_gains:
+      results["stat_gains"] = get_stat_gains(year=year, region_xywh=constants.MANT_STAT_GAINS_REGION)
   else:
     results["failure"] = get_failure_chance(region_xywh=constants.FAILURE_REGION)
     if check_stat_gains:
@@ -455,6 +461,8 @@ def get_turn():
     return "Race Day"
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_TURN_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_TURN_REGION
   else:
     region_xywh = constants.TURN_REGION
   # TODO: add template-matching fallback for digits "1" and "7" when OCR fails.
@@ -491,6 +499,8 @@ def get_turn():
 def get_current_year():
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_YEAR_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_YEAR_REGION
   else:
     region_xywh = constants.YEAR_REGION
   for i in range(10):
@@ -511,6 +521,8 @@ def get_current_year():
 def get_criteria():
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_CRITERIA_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_CRITERIA_REGION
   else:
     region_xywh = constants.CRITERIA_REGION
   img = enhanced_screenshot(region_xywh)
@@ -615,6 +627,8 @@ def get_energy_level(threshold=0.85):
   # find where the right side of the bar is on screen
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_ENERGY_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_ENERGY_REGION
   else:
     region_xywh = constants.ENERGY_REGION
   screenshot = device_action.screenshot(region_xywh=region_xywh)
@@ -701,6 +715,8 @@ def debug_capture_year_region():
   
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_YEAR_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_YEAR_REGION
   else:
     region_xywh = constants.YEAR_REGION
   
@@ -741,6 +757,8 @@ def debug_capture_support_region():
   
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_SUPPORT_CARD_ICON_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    region_xywh = constants.MANT_SUPPORT_CARD_ICON_REGION
   else:
     region_xywh = constants.SUPPORT_CARD_ICON_REGION
   

@@ -9,15 +9,17 @@ from typing import Any, Dict, List
 from utils import constants
 from utils.log import debug, error, info, warning
 from core import state as bot_state
+from core.region_adjuster.shared import build_profile_tabs, resolve_region_adjuster_profiles
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 def _build_context(settings: Dict[str, Any]) -> Dict[str, Any]:
-  constants.apply_region_overrides(overrides_path=settings.get("overrides_path"))
+  profiles, active_profile, active_path = resolve_region_adjuster_profiles(settings)
+  constants.apply_region_overrides(overrides_path=active_path)
   return {
     "overlay_dim_opacity": int(settings.get("overlay_dim_opacity", 196)),
-    "overrides_path": settings.get("overrides_path"),
+    "overrides_path": active_path,
     "regions": constants.export_adjustable_coordinates(),
     "templates": constants.export_adjuster_template_map(),
     "all_templates": constants.export_all_template_assets(),
@@ -27,6 +29,9 @@ def _build_context(settings: Dict[str, Any]) -> Dict[str, Any]:
     "process_names": _process_name_candidates(),
     "mac_bounds": _mac_bounds_settings(),
     "recognition_offset": _active_recognition_offset_snapshot(settings),
+    "display_scaling": _display_scaling_snapshot(),
+    "profiles": build_profile_tabs(profiles, active_profile),
+    "active_profile": active_profile,
   }
 
 
@@ -106,6 +111,18 @@ def _active_recognition_offset_snapshot(settings: Dict[str, Any]) -> Dict[str, A
     "y": int(y or 0),
     "enabled": enabled,
     "respected_by_overrides": bool(settings.get("respect_recognition_offset")),
+  }
+
+
+def _display_scaling_snapshot() -> Dict[str, Any]:
+  mac_settings = getattr(bot_state, "MAC_AIR_SETTINGS", {}) or {}
+  display_config = mac_settings.get("display_aware_bounds") or {}
+  reference = display_config.get("reference_display") or {}
+  return {
+    "enabled": bool(display_config.get("enabled")),
+    "scale_regions": bool(display_config.get("scale_regions", False)),
+    "reference_width": int(reference.get("width", 0) or 0),
+    "reference_height": int(reference.get("height", 0) or 0),
   }
 
 

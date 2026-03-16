@@ -60,6 +60,7 @@ def reload_config(print_config=True):
     load_var('HINT_HUNTING_WEIGHTS', config["hint_hunting_weights"])
     load_var('SCENARIO_GIMMICK_WEIGHT', config["scenario_gimmick_weight"])
     load_var('USE_SKIP_CLAW_MACHINE', config["use_skip_claw_machine"])
+    load_var('EXECUTION_MODE', config.get("execution_mode", "auto"))
     
     # macOS-specific platform settings (optional, with defaults)
     platform_config = config.get("platform", {})

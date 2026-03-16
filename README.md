@@ -80,6 +80,8 @@ Make sure these conditions are met:
    - `window_name` matches the BlueStacks Air window title exactly.
    - `platform.profile` is set to `mac_bluestacks_air` (leave as `auto` if you want macOS detection to happen automatically).
    - Adjust the `platform.mac_bluestacks_air` overrides (`process_name`, `window_name`, `bounds`, etc.) only if your BlueStacks Air window title or screen layout differs from the defaults.
+   - If you calibrated on one desktop size and now run through Screen Sharing or another virtual desktop, enable `platform.mac_bluestacks_air.display_aware_bounds`. Set `reference_display` to the desktop resolution you originally calibrated against; on startup the bot will read the current macOS desktop resolution and shrink the BlueStacks bounds proportionally.
+   - Set `display_aware_bounds.scale_regions` to `true` if your OCR regions or saved `region_overrides.json` were captured on that reference desktop size and now need to be scaled into the current desktop size too.
 4. Run `pip install -r requirements.txt` to ensure the optional `pynput` dependency needed for macOS hotkeys is installed.
 5. If you plan to use the web UI, install its dependencies once with:
 
@@ -91,6 +93,7 @@ Make sure these conditions are met:
 6. Create `config.json` in the project root (copy `config.template.json` if needed) so both the Python bot and the React app can read your settings without TypeScript errors on build.
 
 > The macOS flow relies on `osascript` to focus the BlueStacks Air window and may take a couple of seconds to resize the streaming canvas before the bot starts.
+> When `display_aware_bounds.enabled` is `true`, startup logs will also print the detected desktop resolution, the reference resolution, and the effective scaled values that were applied.
 
 ### Start
 

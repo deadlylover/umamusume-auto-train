@@ -2,7 +2,7 @@ import json
 import platform
 import subprocess
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +21,14 @@ GRID_OVERLAYS = {
   "FULL_STATS_APTITUDE_BBOX": (4, 3),
 }
 
+SCENARIO_FILTERS = {
+  "generic_mant": "Generic + MANT",
+  "generic_unity": "Generic + UNITY",
+  "generic_only": "Generic Only",
+  "all": "All Regions",
+}
+SCENARIO_FILTERS_REVERSE = {label: key for key, label in SCENARIO_FILTERS.items()}
+
 
 def _load_context(path: Path) -> Dict:
   with path.open("r", encoding="utf-8") as file:
@@ -33,6 +41,19 @@ class RegionAdjusterApp:
     self.overlay_opacity = int(context.get("overlay_dim_opacity", 196))
     overrides_path = context.get("overrides_path") or "data/region_overrides.json"
     self.overrides_path = Path(overrides_path)
+    self.profile_tabs = context.get("profiles") or []
+    self.active_profile = str(context.get("active_profile") or "default")
+    self.profile_paths: Dict[str, Path] = {}
+    self.profile_region_snapshots: Dict[str, Dict[str, Dict]] = {}
+    for tab in self.profile_tabs:
+      name = str(tab.get("name") or "").strip()
+      path = str(tab.get("path") or "").strip()
+      if name and path:
+        self.profile_paths[name] = Path(path)
+    if self.active_profile not in self.profile_paths and self.profile_paths:
+      self.active_profile = next(iter(self.profile_paths))
+    if self.active_profile in self.profile_paths:
+      self.overrides_path = self.profile_paths[self.active_profile]
     self.window_names: List[str] = context.get("window_names") or []
     self.process_names: List[str] = context.get("process_names") or []
     bounds_context = context.get("mac_bounds") or {}
@@ -44,7 +65,15 @@ class RegionAdjusterApp:
       int(offset_context.get("y", 0) or 0),
     )
     self._recognition_offset_respected = bool(offset_context.get("respected_by_overrides"))
+    display_scaling = context.get("display_scaling") or {}
+    self._display_scaling_enabled = bool(display_scaling.get("enabled"))
+    self._display_scaling_regions = bool(display_scaling.get("scale_regions"))
+    self._display_scaling_reference = (
+      int(display_scaling.get("reference_width", 0) or 0),
+      int(display_scaling.get("reference_height", 0) or 0),
+    )
     self.base_dir = Path(context.get("base_dir") or ".")
+    self.config_path = self.base_dir / "config.json"
     self.template_map: Dict[str, List[str]] = {}
     for name, templates in (context.get("templates") or {}).items():
       if not isinstance(name, str):
@@ -59,6 +88,7 @@ class RegionAdjusterApp:
 
     self.regions: Dict[str, Dict] = {}
     self.region_order: List[str] = []
+    self.visible_region_order: List[str] = []
     for entry in context.get("regions", []):
       name = entry.get("name")
       kind = entry.get("kind")
@@ -74,6 +104,7 @@ class RegionAdjusterApp:
     if not self.region_order:
       raise RuntimeError("No OCR regions are available for adjustment.")
 
+    self.scenario_filter_var = tk.StringVar(value=SCENARIO_FILTERS["generic_mant"])
     self.selected_name = self.region_order[0]
     self.screenshot = None
     self.overlay_image = None
@@ -100,28 +131,43 @@ class RegionAdjusterApp:
     self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     self.root.columnconfigure(0, weight=1)
-    self.root.rowconfigure(0, weight=1)
+    self.root.rowconfigure(1, weight=1)
 
     self._build_layout()
     self._bind_hotkeys()
     self.capture_screenshot()
 
   def _build_layout(self):
+    self.profile_notebook = None
+    self._profile_tab_names: List[str] = []
+    if self.profile_paths:
+      self.profile_notebook = ttk.Notebook(self.root)
+      self.profile_notebook.grid(row=0, column=0, columnspan=4, sticky="ew")
+      active_index = 0
+      for idx, name in enumerate(self.profile_paths.keys()):
+        frame = ttk.Frame(self.profile_notebook, height=1)
+        self.profile_notebook.add(frame, text=name)
+        self._profile_tab_names.append(name)
+        if name == self.active_profile:
+          active_index = idx
+      self.profile_notebook.select(active_index)
+      self.profile_notebook.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
+
     self.canvas = tk.Canvas(self.root, background="black", highlightthickness=0)
-    self.canvas.grid(row=0, column=0, sticky="nsew")
+    self.canvas.grid(row=1, column=0, sticky="nsew")
 
     self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw")
 
     self.v_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
-    self.v_scroll.grid(row=0, column=1, sticky="ns")
+    self.v_scroll.grid(row=1, column=1, sticky="ns")
     self.h_scroll = tk.Scrollbar(self.root, orient="horizontal", command=self.canvas.xview)
-    self.h_scroll.grid(row=1, column=0, sticky="ew")
+    self.h_scroll.grid(row=2, column=0, sticky="ew")
     self.canvas.configure(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
     self.side_canvas = tk.Canvas(self.root, background="#232323", highlightthickness=0, width=320)
-    self.side_canvas.grid(row=0, column=2, rowspan=2, sticky="ns")
+    self.side_canvas.grid(row=1, column=2, rowspan=2, sticky="ns")
     self.side_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.side_canvas.yview)
-    self.side_scroll.grid(row=0, column=3, rowspan=2, sticky="ns")
+    self.side_scroll.grid(row=1, column=3, rowspan=2, sticky="ns")
     self.side_canvas.configure(yscrollcommand=self.side_scroll.set)
 
     side_panel = tk.Frame(self.side_canvas, bg="#232323", padx=12, pady=12)
@@ -139,6 +185,26 @@ class RegionAdjusterApp:
       wraplength=220,
       justify="left",
     ).pack(anchor="w", pady=(2, 8))
+    tk.Label(
+      side_panel,
+      text=self._format_display_scaling_text(),
+      fg="#9feaf9",
+      bg="#232323",
+      wraplength=220,
+      justify="left",
+    ).pack(anchor="w", pady=(0, 8))
+    filter_row = tk.Frame(side_panel, bg="#232323")
+    filter_row.pack(fill=tk.X, pady=(0, 6))
+    tk.Label(filter_row, text="Scenario", fg="white", bg="#232323").pack(side=tk.LEFT)
+    filter_menu = tk.OptionMenu(
+      filter_row,
+      self.scenario_filter_var,
+      *SCENARIO_FILTERS.values(),
+      command=lambda _value: self._refresh_region_list(),
+    )
+    filter_menu.configure(bg="#3a3a3a", fg="white", highlightthickness=0, activebackground="#4a4a4a")
+    filter_menu["menu"].configure(bg="#3a3a3a", fg="white")
+    filter_menu.pack(side=tk.RIGHT, fill=tk.X, expand=True)
     self.region_listbox = tk.Listbox(
       side_panel,
       height=25,
@@ -148,11 +214,9 @@ class RegionAdjusterApp:
       bg="#1b1b1b",
       fg="white",
     )
-    for idx, name in enumerate(self.region_order):
-      self.region_listbox.insert(idx, name)
-    self.region_listbox.selection_set(0)
     self.region_listbox.bind("<<ListboxSelect>>", self._on_region_select)
     self.region_listbox.pack(fill=tk.BOTH, expand=False, pady=(6, 10))
+    self._refresh_region_list()
 
     tk.Label(side_panel, text="Templates", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
     self.show_all_templates_var = tk.BooleanVar(value=False)
@@ -279,6 +343,7 @@ class RegionAdjusterApp:
     self._set_coord_text()
     self._refresh_template_list()
     self._update_window_dimensions()
+    self.profile_region_snapshots[self.active_profile] = self._clone_regions(self.regions)
 
   def _format_offset_text(self) -> str:
     if not self._recognition_offset_enabled:
@@ -287,11 +352,99 @@ class RegionAdjusterApp:
     suffix = "applied to overrides" if self._recognition_offset_respected else "not applied to overrides"
     return f"Recognition offset: x={x}, y={y} ({suffix})"
 
+  def _format_display_scaling_text(self) -> str:
+    if not self._display_scaling_enabled:
+      return "Display scaling: disabled"
+    width, height = self._display_scaling_reference
+    scope = "regions scaled" if self._display_scaling_regions else "bounds only"
+    return f"Display scaling: enabled ({scope}, reference {width}x{height})"
+
+  def _clone_regions(self, regions: Dict[str, Dict]) -> Dict[str, Dict]:
+    cloned: Dict[str, Dict] = {}
+    for name, entry in regions.items():
+      cloned[name] = {
+        "kind": entry["kind"],
+        "value": list(entry["value"]),
+      }
+    return cloned
+
+  def _load_regions_from_file(self, path: Path) -> Optional[Dict[str, Dict]]:
+    if not path.exists():
+      return None
+    try:
+      with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    except Exception:
+      return None
+    if not isinstance(data, dict):
+      return None
+
+    loaded = self._clone_regions(self.regions)
+    for name, value in data.items():
+      if name not in loaded:
+        continue
+      if not isinstance(value, list) or len(value) < 4:
+        continue
+      loaded[name]["value"] = [int(round(v)) for v in value[:4]]
+    return loaded
+
+  def _switch_profile(self, profile_name: str):
+    if profile_name == self.active_profile:
+      return
+    if self.active_profile:
+      self.profile_region_snapshots[self.active_profile] = self._clone_regions(self.regions)
+
+    path = self.profile_paths.get(profile_name)
+    if path is None:
+      return
+
+    next_regions = self.profile_region_snapshots.get(profile_name)
+    if next_regions is None:
+      next_regions = self._load_regions_from_file(path)
+    if next_regions is None:
+      next_regions = self._clone_regions(self.regions)
+
+    self.active_profile = profile_name
+    self.overrides_path = path
+    self.regions = self._clone_regions(next_regions)
+    self._persist_active_profile()
+    self._set_coord_text()
+    self._refresh_template_list()
+    self._render_overlay()
+    if hasattr(self, "status_var"):
+      self.status_var.set(f"Switched to profile '{profile_name}' using {path}.")
+    self._mark_dirty(False)
+
+  def _on_profile_tab_changed(self, _event):
+    if self.profile_notebook is None:
+      return
+    current = self.profile_notebook.index(self.profile_notebook.select())
+    if current < 0 or current >= len(self._profile_tab_names):
+      return
+    self._switch_profile(self._profile_tab_names[current])
+
+  def _persist_active_profile(self):
+    try:
+      with self.config_path.open("r", encoding="utf-8") as file:
+        config_data = json.load(file)
+      debug_cfg = config_data.setdefault("debug", {})
+      adjuster_cfg = debug_cfg.setdefault("region_adjuster", {})
+      adjuster_cfg["active_profile"] = self.active_profile
+      adjuster_cfg["overrides_path"] = str(self.overrides_path)
+      with self.config_path.open("w", encoding="utf-8") as file:
+        json.dump(config_data, file, indent=2)
+    except Exception:
+      return
+
   def _bind_hotkeys(self):
     self.root.bind("<Up>", lambda event: self._handle_arrow(event, 0, -1))
     self.root.bind("<Down>", lambda event: self._handle_arrow(event, 0, 1))
     self.root.bind("<Left>", lambda event: self._handle_arrow(event, -1, 0))
     self.root.bind("<Right>", lambda event: self._handle_arrow(event, 1, 0))
+    self.root.bind("<Shift-Up>", lambda event: self._handle_resize_arrow(event, 0, -1))
+    self.root.bind("<Shift-Down>", lambda event: self._handle_resize_arrow(event, 0, 1))
+    self.root.bind("<Shift-Left>", lambda event: self._handle_resize_arrow(event, -1, 0))
+    self.root.bind("<Shift-Right>", lambda event: self._handle_resize_arrow(event, 1, 0))
     self.root.bind("<Command-s>", lambda event: self.save_overrides())  # macOS shortcut
     self.root.bind("<Control-s>", lambda event: self.save_overrides())
     self.root.bind("<space>", lambda event: self.test_selected_template())
@@ -299,10 +452,14 @@ class RegionAdjusterApp:
     self.root.bind("<r>", lambda event: self.capture_screenshot())
 
   def _handle_arrow(self, event, dx: int, dy: int):
+    del event
     multiplier = self._step_size()
-    if event.state & 0x0001:  # Shift key pressed
-      multiplier *= 5
     self.move_selected(dx * multiplier, dy * multiplier)
+
+  def _handle_resize_arrow(self, event, dx: int, dy: int):
+    del event
+    multiplier = self._step_size()
+    self.resize_selected(dw=dx * multiplier, dh=dy * multiplier)
 
   def _step_size(self) -> int:
     try:
@@ -385,11 +542,45 @@ class RegionAdjusterApp:
     value = entry["value"]
     self.coord_var.set(f"{self.selected_name} ({entry['kind']}): {tuple(value)}")
 
+  def _matches_scenario_filter(self, name: str) -> bool:
+    mode = SCENARIO_FILTERS_REVERSE.get(self.scenario_filter_var.get(), "generic_mant")
+    is_unity = name.startswith("UNITY_")
+    is_mant = name.startswith("MANT_")
+
+    if mode == "generic_mant":
+      return not is_unity
+    if mode == "generic_unity":
+      return not is_mant
+    if mode == "generic_only":
+      return not is_unity and not is_mant
+    return True
+
+  def _refresh_region_list(self):
+    current_selection = self.selected_name
+    self.visible_region_order = [name for name in self.region_order if self._matches_scenario_filter(name)]
+    if not self.visible_region_order:
+      self.visible_region_order = list(self.region_order)
+
+    self.region_listbox.delete(0, tk.END)
+    for idx, name in enumerate(self.visible_region_order):
+      self.region_listbox.insert(idx, name)
+
+    if current_selection not in self.visible_region_order:
+      current_selection = self.visible_region_order[0]
+    self.selected_name = current_selection
+    selected_index = self.visible_region_order.index(current_selection)
+    self.region_listbox.selection_clear(0, tk.END)
+    self.region_listbox.selection_set(selected_index)
+    self.region_listbox.see(selected_index)
+    self._set_coord_text()
+    self._refresh_template_list()
+    self._render_overlay()
+
   def _on_region_select(self, _event):
     selection = self.region_listbox.curselection()
     if not selection:
       return
-    self.selected_name = self.region_order[selection[0]]
+    self.selected_name = self.visible_region_order[selection[0]]
     self._set_coord_text()
     self._refresh_template_list()
     self._render_overlay()
@@ -615,7 +806,8 @@ class RegionAdjusterApp:
       return
 
     self._mark_dirty(False)
-    self.status_var.set(f"Saved overrides to {self.overrides_path}.")
+    self.profile_region_snapshots[self.active_profile] = self._clone_regions(self.regions)
+    self.status_var.set(f"Saved profile '{self.active_profile}' overrides to {self.overrides_path}.")
     self._update_window_dimensions()
 
   def _mark_dirty(self, dirty: bool):

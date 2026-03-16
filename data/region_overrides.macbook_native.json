@@ -1,0 +1,410 @@
+{
+  "GAME_WINDOW_BBOX": [
+    -8,
+    90,
+    602,
+    1170
+  ],
+  "GAME_WINDOW_REGION": [
+    0,
+    90,
+    600,
+    1080
+  ],
+  "SCREEN_TOP_BBOX": [
+    -40,
+    86,
+    606,
+    386
+  ],
+  "SCREEN_TOP_REGION": [
+    0,
+    87,
+    620,
+    300
+  ],
+  "SCREEN_MIDDLE_BBOX": [
+    0,
+    390,
+    610,
+    890
+  ],
+  "SCREEN_MIDDLE_REGION": [
+    0,
+    447,
+    620,
+    450
+  ],
+  "SCREEN_BOTTOM_BBOX": [
+    0,
+    875,
+    600,
+    1175
+  ],
+  "SCREEN_BOTTOM_REGION": [
+    0,
+    838,
+    620,
+    330
+  ],
+  "SCROLLING_SKILL_SCREEN_BBOX": [
+    0,
+    389,
+    620,
+    879
+  ],
+  "SCROLLING_SKILL_SCREEN_REGION": [
+    0,
+    390,
+    610,
+    490
+  ],
+  "ENERGY_BBOX": [
+    183,
+    206,
+    543,
+    246
+  ],
+  "ENERGY_REGION": [
+    132,
+    205,
+    358,
+    40
+  ],
+  "UNITY_ENERGY_BBOX": [
+    133,
+    206,
+    496,
+    246
+  ],
+  "UNITY_ENERGY_REGION": [
+    133,
+    206,
+    363,
+    40
+  ],
+  "MOOD_BBOX": [
+    435,
+    213,
+    563,
+    238
+  ],
+  "MOOD_REGION": [
+    449,
+    213,
+    130,
+    25
+  ],
+  "TURN_BBOX": [
+    13,
+    169,
+    118,
+    226
+  ],
+  "TURN_REGION": [
+    10,
+    169,
+    110,
+    58
+  ],
+  "UNITY_TURN_BBOX": [
+    14,
+    148,
+    74,
+    193
+  ],
+  "UNITY_TURN_REGION": [
+    15,
+    148,
+    60,
+    45
+  ],
+  "UNITY_TURN_FULL_BBOX": [
+    9,
+    148,
+    129,
+    193
+  ],
+  "UNITY_TURN_FULL_REGION": [
+    10,
+    150,
+    120,
+    45
+  ],
+  "UNITY_RACE_TURNS_BBOX": [
+    26,
+    204,
+    66,
+    223
+  ],
+  "UNITY_RACE_TURNS_REGION": [
+    25,
+    203,
+    40,
+    19
+  ],
+  "FAILURE_BBOX": [
+    22,
+    790,
+    530,
+    820
+  ],
+  "FAILURE_REGION": [
+    -1,
+    860,
+    560,
+    65
+  ],
+  "UNITY_FAILURE_BBOX": [
+    47,
+    870,
+    555,
+    905
+  ],
+  "UNITY_FAILURE_REGION": [
+    47,
+    870,
+    508,
+    35
+  ],
+  "YEAR_BBOX": [
+    9,
+    122,
+    172,
+    147
+  ],
+  "YEAR_REGION": [
+    4,
+    124,
+    165,
+    25
+  ],
+  "UNITY_YEAR_BBOX": [
+    134,
+    125,
+    297,
+    145
+  ],
+  "UNITY_YEAR_REGION": [
+    135,
+    125,
+    163,
+    20
+  ],
+  "CRITERIA_BBOX": [
+    203,
+    150,
+    496,
+    205
+  ],
+  "CRITERIA_REGION": [
+    204,
+    145,
+    310,
+    60
+  ],
+  "UNITY_CRITERIA_BBOX": [
+    190,
+    150,
+    510,
+    205
+  ],
+  "UNITY_CRITERIA_REGION": [
+    190,
+    150,
+    320,
+    55
+  ],
+  "CURRENT_STATS_BBOX": [
+    20,
+    811,
+    578,
+    853
+  ],
+  "CURRENT_STATS_REGION": [
+    19,
+    810,
+    558,
+    42
+  ],
+  "RACE_INFO_TEXT_BBOX": [
+    20,
+    335,
+    545,
+    370
+  ],
+  "RACE_INFO_TEXT_REGION": [
+    34,
+    425,
+    525,
+    35
+  ],
+  "RACE_LIST_BOX_BBOX": [
+    20,
+    670,
+    603,
+    960
+  ],
+  "RACE_LIST_BOX_REGION": [
+    9,
+    670,
+    585,
+    290
+  ],
+  "URA_STAT_GAINS_BBOX": [
+    682,
+    657,
+    1250,
+    690
+  ],
+  "URA_STAT_GAINS_REGION": [
+    682,
+    657,
+    568,
+    33
+  ],
+  "UNITY_STAT_GAINS_BBOX": [
+    22,
+    762,
+    590,
+    791
+  ],
+  "UNITY_STAT_GAINS_REGION": [
+    18,
+    762,
+    568,
+    29
+  ],
+  "UNITY_STAT_GAINS_2_BBOX": [
+    22,
+    724,
+    590,
+    761
+  ],
+  "UNITY_STAT_GAINS_2_REGION": [
+    17,
+    724,
+    568,
+    37
+  ],
+  "FULL_STATS_STATUS_BBOX": [
+    37,
+    575,
+    615,
+    940
+  ],
+  "FULL_STATS_STATUS_REGION": [
+    14,
+    665,
+    580,
+    365
+  ],
+  "FULL_STATS_APTITUDE_BBOX": [
+    145,
+    428,
+    568,
+    528
+  ],
+  "FULL_STATS_APTITUDE_REGION": [
+    144,
+    429,
+    425,
+    100
+  ],
+  "SUPPORT_CARD_ICON_BBOX": [
+    489,
+    200,
+    589,
+    745
+  ],
+  "SUPPORT_CARD_ICON_REGION": [
+    492,
+    225,
+    105,
+    545
+  ],
+  "UNITY_SUPPORT_CARD_ICON_BBOX": [
+    473,
+    240,
+    608,
+    810
+  ],
+  "UNITY_SUPPORT_CARD_ICON_REGION": [
+    473,
+    230,
+    135,
+    570
+  ],
+  "UNITY_TEAM_MATCHUP_BBOX": [
+    35,
+    655,
+    575,
+    695
+  ],
+  "UNITY_TEAM_MATCHUP_REGION": [
+    35,
+    655,
+    540,
+    40
+  ],
+  "EVENT_NAME_BBOX": [
+    92,
+    285,
+    460,
+    325
+  ],
+  "EVENT_NAME_REGION": [
+    -10,
+    295,
+    365,
+    30
+  ],
+  "CLAW_MACHINE_SPEED_BBOX": [
+    1250,
+    60,
+    1340,
+    90
+  ],
+  "CLAW_MACHINE_SPEED_REGION": [
+    1250,
+    60,
+    90,
+    30
+  ],
+  "CLAW_MACHINE_PLUSHIE_BBOX": [
+    235,
+    500,
+    425,
+    800
+  ],
+  "CLAW_MACHINE_PLUSHIE_REGION": [
+    210,
+    575,
+    190,
+    300
+  ],
+  "SKIP_BTN_BIG_BBOX_LANDSCAPE": [
+    0,
+    175,
+    620,
+    1005
+  ],
+  "SKIP_BTN_BIG_REGION_LANDSCAPE": [
+    0,
+    850,
+    620,
+    330
+  ],
+  "RACE_BUTTON_IN_RACE_BBOX_LANDSCAPE": [
+    0,
+    125,
+    625,
+    1050
+  ],
+  "RACE_BUTTON_IN_RACE_REGION_LANDSCAPE": [
+    125,
+    952,
+    350,
+    100
+  ]
+}
