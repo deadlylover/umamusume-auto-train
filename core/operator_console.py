@@ -26,6 +26,8 @@ PHASES = [
 
 
 class OperatorConsole:
+  DEFAULT_GEOMETRY = "960x760+40+40"
+
   def __init__(self):
     self._queue = queue.Queue()
     self._root = None
@@ -45,18 +47,24 @@ class OperatorConsole:
     self._pause_button = None
     self._resume_button = None
     self._continue_button = None
+    self._window_geometry = self.DEFAULT_GEOMETRY
+    self._last_saved_geometry = None
 
   def start(self):
     if self._root is not None:
       return
     try:
+      self._load_window_geometry()
       self._root = tk.Tk()
       self._root.title("Uma Operator Console")
       self._root.configure(bg="#101418")
-      self._root.geometry("960x760+40+40")
+      self._root.geometry(self._window_geometry)
       self._root.attributes("-topmost", False)
       self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
       self._build_layout()
+      self._root.update_idletasks()
+      self._apply_window_geometry()
+      self._root.bind("<Configure>", self._on_window_configure)
       self._poll_queue()
     except Exception as exc:  # pragma: no cover
       error(f"Operator console failed to start: {exc}")
@@ -76,13 +84,17 @@ class OperatorConsole:
 
   def _hide_window(self):
     if self._root is not None:
+      self._persist_window_geometry()
       self._root.withdraw()
 
   def _show_window(self):
     if self._root is None:
       return
+    self._load_window_geometry()
+    self._apply_window_geometry()
     self._root.deiconify()
     self._root.lift()
+    self._persist_window_geometry()
 
   def _build_layout(self):
     root = self._root
@@ -240,6 +252,60 @@ class OperatorConsole:
     if self._root is None or self._always_on_top_var is None:
       return
     self._root.attributes("-topmost", bool(self._always_on_top_var.get()))
+
+  def _load_window_geometry(self):
+    self._window_geometry = self.DEFAULT_GEOMETRY
+    try:
+      with open("config.json", "r", encoding="utf-8") as file:
+        config_data = json.load(file)
+    except Exception:
+      return
+
+    debug_config = config_data.get("debug") or {}
+    operator_console_config = debug_config.get("operator_console") or {}
+    geometry = operator_console_config.get("window_geometry")
+    if isinstance(geometry, str) and geometry.strip():
+      self._window_geometry = geometry.strip()
+
+  def _apply_window_geometry(self):
+    if self._root is None:
+      return
+    geometry = self._window_geometry or self.DEFAULT_GEOMETRY
+    self._root.geometry(geometry)
+
+  def _on_window_configure(self, event):
+    if self._root is None or event.widget is not self._root:
+      return
+    self._persist_window_geometry()
+
+  def _persist_window_geometry(self):
+    if self._root is None:
+      return
+    if str(self._root.state()) == "withdrawn":
+      return
+
+    geometry = self._root.geometry()
+    if geometry == self._last_saved_geometry:
+      return
+
+    try:
+      with open("config.json", "r", encoding="utf-8") as file:
+        config_data = json.load(file)
+    except Exception:
+      config_data = {}
+
+    debug_config = config_data.setdefault("debug", {})
+    operator_console_config = debug_config.setdefault("operator_console", {})
+    operator_console_config["window_geometry"] = geometry
+
+    try:
+      with open("config.json", "w", encoding="utf-8") as file:
+        json.dump(config_data, file, indent=2)
+    except Exception as exc:
+      debug(f"Unable to persist operator console geometry: {exc}")
+      return
+
+    self._last_saved_geometry = geometry
 
   def _launch_adjuster(self):
     threading.Thread(target=self._launch_adjuster_background, daemon=True).start()

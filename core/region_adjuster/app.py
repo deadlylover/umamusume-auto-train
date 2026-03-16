@@ -30,6 +30,14 @@ SCENARIO_FILTERS = {
 SCENARIO_FILTERS_REVERSE = {label: key for key, label in SCENARIO_FILTERS.items()}
 
 
+def _counterpart_name(name: str) -> Optional[str]:
+  if name.endswith("_REGION"):
+    return f"{name[:-7]}_BBOX"
+  if name.endswith("_BBOX"):
+    return f"{name[:-5]}_REGION"
+  return None
+
+
 def _load_context(path: Path) -> Dict:
   with path.open("r", encoding="utf-8") as file:
     return json.load(file)
@@ -37,6 +45,7 @@ def _load_context(path: Path) -> Dict:
 
 class RegionAdjusterApp:
   HOTKEY_BINDTAG = "RegionAdjusterHotkeys"
+  RESIZE_MARGIN = 8
 
   def __init__(self, context: Dict):
     self.context = context
@@ -91,6 +100,7 @@ class RegionAdjusterApp:
     self.regions: Dict[str, Dict] = {}
     self.region_order: List[str] = []
     self.visible_region_order: List[str] = []
+    self.hidden_region_names = set()
     for entry in context.get("regions", []):
       name = entry.get("name")
       kind = entry.get("kind")
@@ -102,6 +112,12 @@ class RegionAdjusterApp:
       norm_value = [int(round(v)) for v in value[:4]]
       self.regions[name] = {"kind": kind, "value": norm_value}
       self.region_order.append(name)
+
+    self.hidden_region_names = {
+      name
+      for name, entry in self.regions.items()
+      if entry["kind"] == "bbox" and _counterpart_name(name) in self.regions
+    }
 
     if not self.region_order:
       raise RuntimeError("No OCR regions are available for adjustment.")
@@ -116,6 +132,11 @@ class RegionAdjusterApp:
     self._current_templates: List[str] = []
     self._selected_template_path: Optional[str] = None
     self._template_matches: List[Tuple[int, int, int, int]] = []
+    self._drag_mode: Optional[str] = None
+    self._drag_edges = set()
+    self._drag_start_point = (0, 0)
+    self._drag_origin_box = (0, 0, 0, 0)
+    self._active_cursor = ""
 
     self.root = tk.Tk()
     self.root.title("Uma OCR Region Adjuster")
@@ -162,6 +183,11 @@ class RegionAdjusterApp:
     self.canvas = tk.Canvas(self.root, background="black", highlightthickness=0)
     self._install_hotkey_bindtag(self.canvas)
     self.canvas.grid(row=1, column=0, sticky="nsew")
+    self.canvas.bind("<Motion>", self._on_canvas_motion)
+    self.canvas.bind("<Leave>", self._on_canvas_leave)
+    self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+    self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+    self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
 
     self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw")
 
@@ -557,6 +583,7 @@ class RegionAdjusterApp:
           overlay.paste(crop, (x1, y1))
           draw = ImageDraw.Draw(overlay)
           draw.rectangle((x1, y1, x2, y2), outline=(255, 215, 0, 255), width=1)
+          self._draw_resize_handles(draw, (x1, y1, x2, y2))
           grid = GRID_OVERLAYS.get(self.selected_name)
           if grid:
             cols, rows = grid
@@ -611,9 +638,51 @@ class RegionAdjusterApp:
       return not is_unity and not is_mant
     return True
 
+  def _should_hide_generic_duplicate(self, name: str) -> bool:
+    if name.startswith(("UNITY_", "MANT_")):
+      return False
+
+    mode = SCENARIO_FILTERS_REVERSE.get(self.scenario_filter_var.get(), "generic_mant")
+    scenario_prefix = None
+    if mode == "generic_mant":
+      scenario_prefix = "MANT_"
+    elif mode == "generic_unity":
+      scenario_prefix = "UNITY_"
+
+    if not scenario_prefix:
+      return False
+
+    return f"{scenario_prefix}{name}" in self.regions
+
+  def _sync_counterpart_region(self, name: str):
+    counterpart_name = _counterpart_name(name)
+    if not counterpart_name:
+      return
+
+    source = self.regions.get(name)
+    counterpart = self.regions.get(counterpart_name)
+    if not source or not counterpart:
+      return
+
+    source_value = source["value"]
+    if source["kind"] == "bbox":
+      x1, y1, x2, y2 = source_value
+      counterpart["value"] = [x1, y1, x2 - x1, y2 - y1]
+    else:
+      x, y, w, h = source_value
+      counterpart["value"] = [x, y, x + w, y + h]
+
   def _refresh_region_list(self):
     current_selection = self.selected_name
-    self.visible_region_order = [name for name in self.region_order if self._matches_scenario_filter(name)]
+    self.visible_region_order = [
+      name
+      for name in self.region_order
+      if (
+        name not in self.hidden_region_names
+        and self._matches_scenario_filter(name)
+        and not self._should_hide_generic_duplicate(name)
+      )
+    ]
     if not self.visible_region_order:
       self.visible_region_order = list(self.region_order)
 
@@ -719,6 +788,174 @@ class RegionAdjusterApp:
       y = y1 + int(height * row / rows)
       draw.line((x1, y, x2, y), fill=grid_color, width=1)
 
+  def _draw_resize_handles(self, draw: ImageDraw.ImageDraw, box: Tuple[int, int, int, int]):
+    x1, y1, x2, y2 = box
+    handle_size = 3
+    handle_color = (255, 215, 0, 255)
+    points = [
+      (x1, y1),
+      (x2, y1),
+      (x1, y2),
+      (x2, y2),
+      ((x1 + x2) // 2, y1),
+      ((x1 + x2) // 2, y2),
+      (x1, (y1 + y2) // 2),
+      (x2, (y1 + y2) // 2),
+    ]
+    for px, py in points:
+      draw.rectangle(
+        (px - handle_size, py - handle_size, px + handle_size, py + handle_size),
+        fill=handle_color,
+        outline=handle_color,
+      )
+
+  def _canvas_coords(self, event) -> Tuple[int, int]:
+    return (
+      int(round(self.canvas.canvasx(event.x))),
+      int(round(self.canvas.canvasy(event.y))),
+    )
+
+  def _cursor_for_region_area(self, edges: set, inside: bool) -> str:
+    if "left" in edges and "top" in edges:
+      return "top_left_corner"
+    if "right" in edges and "bottom" in edges:
+      return "bottom_right_corner"
+    if "right" in edges and "top" in edges:
+      return "top_right_corner"
+    if "left" in edges and "bottom" in edges:
+      return "bottom_left_corner"
+    if "left" in edges or "right" in edges:
+      return "sb_h_double_arrow"
+    if "top" in edges or "bottom" in edges:
+      return "sb_v_double_arrow"
+    if inside:
+      return "fleur"
+    return ""
+
+  def _region_hit_test(self, x: int, y: int) -> Tuple[set, bool]:
+    box = self._current_box(self.selected_name)
+    if not box:
+      return set(), False
+
+    x1, y1, x2, y2 = box
+    margin = self.RESIZE_MARGIN
+    inside = x1 <= x <= x2 and y1 <= y <= y2
+    near_x = (x1 - margin) <= x <= (x2 + margin)
+    near_y = (y1 - margin) <= y <= (y2 + margin)
+    if not near_x or not near_y:
+      return set(), False
+
+    edges = set()
+    if abs(x - x1) <= margin:
+      edges.add("left")
+    if abs(x - x2) <= margin:
+      edges.add("right")
+    if abs(y - y1) <= margin:
+      edges.add("top")
+    if abs(y - y2) <= margin:
+      edges.add("bottom")
+    return edges, inside
+
+  def _set_canvas_cursor(self, cursor: str):
+    if cursor == self._active_cursor:
+      return
+    self.canvas.configure(cursor=cursor)
+    self._active_cursor = cursor
+
+  def _on_canvas_motion(self, event):
+    if self._drag_mode is not None:
+      return
+    x, y = self._canvas_coords(event)
+    edges, inside = self._region_hit_test(x, y)
+    self._set_canvas_cursor(self._cursor_for_region_area(edges, inside))
+
+  def _on_canvas_leave(self, _event):
+    if self._drag_mode is None:
+      self._set_canvas_cursor("")
+
+  def _on_canvas_press(self, event):
+    x, y = self._canvas_coords(event)
+    edges, inside = self._region_hit_test(x, y)
+    if edges:
+      self._drag_mode = "resize"
+      self._drag_edges = set(edges)
+    elif inside:
+      self._drag_mode = "move"
+      self._drag_edges = set()
+    else:
+      self._drag_mode = None
+      self._drag_edges = set()
+      return
+
+    self._drag_start_point = (x, y)
+    self._drag_origin_box = self._current_box(self.selected_name)
+    self._set_canvas_cursor(self._cursor_for_region_area(self._drag_edges, inside))
+
+  def _on_canvas_drag(self, event):
+    if self._drag_mode is None or not self.selected_name:
+      return
+
+    x, y = self._canvas_coords(event)
+    start_x, start_y = self._drag_start_point
+    origin_x1, origin_y1, origin_x2, origin_y2 = self._drag_origin_box
+    dx = x - start_x
+    dy = y - start_y
+
+    if self._drag_mode == "move":
+      new_box = (
+        origin_x1 + dx,
+        origin_y1 + dy,
+        origin_x2 + dx,
+        origin_y2 + dy,
+      )
+    else:
+      new_x1, new_y1, new_x2, new_y2 = origin_x1, origin_y1, origin_x2, origin_y2
+      if "left" in self._drag_edges:
+        new_x1 = min(origin_x1 + dx, origin_x2 - 1)
+      if "right" in self._drag_edges:
+        new_x2 = max(origin_x2 + dx, origin_x1 + 1)
+      if "top" in self._drag_edges:
+        new_y1 = min(origin_y1 + dy, origin_y2 - 1)
+      if "bottom" in self._drag_edges:
+        new_y2 = max(origin_y2 + dy, origin_y1 + 1)
+      new_box = (new_x1, new_y1, new_x2, new_y2)
+
+    self._apply_box_to_selected(new_box)
+
+  def _on_canvas_release(self, event):
+    if self._drag_mode is None:
+      return
+    self._drag_mode = None
+    self._drag_edges = set()
+    self._on_canvas_motion(event)
+
+  def _apply_box_to_selected(self, box: Tuple[int, int, int, int]):
+    if not self.selected_name:
+      return
+    entry = self.regions.get(self.selected_name)
+    if not entry:
+      return
+
+    x1, y1, x2, y2 = [int(round(value)) for value in box]
+    if x2 <= x1:
+      x2 = x1 + 1
+    if y2 <= y1:
+      y2 = y1 + 1
+
+    if entry["kind"] == "bbox":
+      next_value = [x1, y1, x2, y2]
+    else:
+      next_value = [x1, y1, x2 - x1, y2 - y1]
+
+    if next_value == entry["value"]:
+      return
+
+    entry["value"] = next_value
+    self._sync_counterpart_region(self.selected_name)
+    self._mark_dirty(True)
+    self._set_coord_text()
+    self._render_overlay()
+
   def _dedupe_boxes(self, boxes: List[Tuple[int, int, int, int]], min_dist: int = 5) -> List[Tuple[int, int, int, int]]:
     filtered: List[Tuple[int, int, int, int]] = []
     for x, y, w, h in boxes:
@@ -809,6 +1046,7 @@ class RegionAdjusterApp:
       value[0] += dx
       value[1] += dy
 
+    self._sync_counterpart_region(self.selected_name)
     self._mark_dirty(True)
     self._set_coord_text()
     self._render_overlay()
@@ -849,6 +1087,7 @@ class RegionAdjusterApp:
           changed = True
 
     if changed:
+      self._sync_counterpart_region(self.selected_name)
       self._mark_dirty(True)
       self._set_coord_text()
       self._render_overlay()
