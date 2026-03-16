@@ -64,6 +64,8 @@ def remove_if_exists(lst, items):
 
 def get_aptitude_index(aptitude):
   aptitude_order = ['g', 'f', 'e', 'd', 'c', 'b', 'a', 's']
+  if aptitude not in aptitude_order:
+    return None
   return aptitude_order.index(aptitude)
 
 def check_race_suitability(race, aptitudes, min_surface_index, min_distance_index):
@@ -71,8 +73,16 @@ def check_race_suitability(race, aptitudes, min_surface_index, min_distance_inde
   race_distance_type = race["distance"]["type"].lower()
   surface_key = f"surface_{race_surface}"
   distance_key = f"distance_{race_distance_type}"
-  surface_apt = get_aptitude_index(aptitudes[surface_key])
-  distance_apt = get_aptitude_index(aptitudes[distance_key])
+  surface_value = aptitudes.get(surface_key)
+  distance_value = aptitudes.get(distance_key)
+  surface_apt = get_aptitude_index(surface_value)
+  distance_apt = get_aptitude_index(distance_value)
+  if surface_apt is None or distance_apt is None:
+    warning(
+      f"Skipping race suitability check for '{race.get('name', 'unknown')}' because "
+      f"aptitude OCR is incomplete. surface={surface_key}:{surface_value} distance={distance_key}:{distance_value}"
+    )
+    return False
   if surface_apt >= min_surface_index and distance_apt >= min_distance_index:
     return True
   else:

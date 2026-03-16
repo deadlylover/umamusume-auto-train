@@ -57,6 +57,13 @@ Implemented in the current branch:
 - `execution_mode` is now in config and loaded by `core/config.py`.
 - macOS Tk crash was fixed by moving Tk window creation to the main thread and running the server in a background thread.
 
+Implementation note to preserve during debugging:
+
+- During Tazuna hint troubleshooting, template assets were given a broad global scale adjustment of about `1.26` in `utils/device_action_wrapper.py`.
+- That change was a pragmatic troubleshooting step, not a proven global invariant.
+- There is a real risk that some template matches now work only because of this global scaling while other assets may become less reliable or fail entirely.
+- Semi-auto review should remain useful for spotting per-asset regressions caused by this workaround, especially when only a subset of templates starts failing.
+
 Not implemented yet:
 
 - richer reasoning text beyond the current snapshot payload

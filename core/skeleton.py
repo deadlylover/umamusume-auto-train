@@ -4,7 +4,7 @@ import cv2
 from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
-from core.state import collect_main_state, collect_training_state, clear_aptitudes_cache
+from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, clear_aptitudes_cache
 from utils.shared import CleanDefaultDict
 import core.config as config
 from PIL import ImageGrab
@@ -110,7 +110,8 @@ def _match_scenario_banners(screenshot, threshold=0.8):
 def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
   anchor_counts = {}
   for name, (template_path, _bbox_key) in STABLE_CAREER_SCREEN_ANCHORS.items():
-    anchor_counts[name] = len(device_action.match_template(template_path, screenshot, threshold=threshold))
+    matches = device_action.match_template(template_path, screenshot, threshold=threshold)
+    anchor_counts[name] = len(matches)
   return anchor_counts
 
 
@@ -319,18 +320,21 @@ def _resolve_template_path(template):
 
 
 def _best_template_score(template_path, crop):
-  if not template_path:
-    return None
-  template = cv2.imread(template_path, cv2.IMREAD_COLOR)
-  if template is None:
-    return None
   if crop is None or crop.size == 0:
     return None
-  if crop.shape[0] < template.shape[0] or crop.shape[1] < template.shape[1]:
+
+  best_match = device_action.best_template_match(
+    template_path,
+    crop,
+  )
+  if best_match is None:
     return None
-  result = cv2.matchTemplate(crop, template, cv2.TM_CCOEFF_NORMED)
-  _, max_val, _, _ = cv2.minMaxLoc(result)
-  return float(max_val)
+  return {
+    "score": round(best_match["score"], 4),
+    "scale": round(best_match["scale"], 3),
+    "location": best_match["location"],
+    "size": best_match["size"],
+  }
 
 
 def _capture_debug_crop(entry):
@@ -356,9 +360,15 @@ def _capture_debug_crop(entry):
   template_path = _resolve_template_path(entry.get("template"))
   if template_path:
     entry["template_image_path"] = template_path
-    best_score = _best_template_score(template_path, crop_bgr)
+    best_score = _best_template_score(template_path, crop)
     if best_score is not None:
-      entry["best_match_score"] = round(best_score, 4)
+      if isinstance(best_score, dict):
+        entry["best_match_score"] = best_score["score"]
+        entry["best_match_scale"] = best_score["scale"]
+        entry["best_match_location"] = best_score["location"]
+        entry["best_match_size"] = best_score["size"]
+      else:
+        entry["best_match_score"] = round(best_score, 4)
 
   return entry
 
@@ -388,6 +398,27 @@ def _base_ocr_debug_entries(state_obj):
         _region_debug_entry("trackblazer_shop_coins", "MANT_SHOP_COIN_REGION", parsed_value=state_obj.get("shop_coins")),
         _region_debug_entry("trackblazer_shop_button", "MANT_SHOP_BUTTON_REGION"),
       ]
+    )
+  aptitudes = state_obj.get("aptitudes") or {}
+  for key, ratios in APTITUDE_BOX_RATIOS.items():
+    entries.append(
+      _region_debug_entry(
+        f"aptitude_{key}",
+        "FULL_STATS_APTITUDE_REGION",
+        parsed_value=aptitudes.get(key, "missing"),
+        extra={"box_ratios": ratios},
+      )
+    )
+  missing_keys = state_obj.get("aptitudes_missing_keys")
+  if missing_keys:
+    entries.append(
+      {
+        "field": "aptitude_missing_keys",
+        "source_type": "ocr_summary",
+        "scenario_name": scenario_name,
+        "platform_profile": getattr(config, "PLATFORM_PROFILE", "auto"),
+        "parsed_value": missing_keys,
+      }
     )
   return entries
 
@@ -475,6 +506,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "current_mood": state_obj.get("current_mood"),
     "date_event_available": state_obj.get("date_event_available"),
     "race_mission_available": state_obj.get("race_mission_available"),
+    "aptitudes": state_obj.get("aptitudes"),
     "ocr_region_profile": profile_info["active_profile"],
     "ocr_overrides_path": profile_info["overrides_path"],
   }

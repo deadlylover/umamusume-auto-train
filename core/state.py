@@ -22,6 +22,19 @@ from math import floor
 
 aptitudes_cache = {}
 _last_turn = None  # Best-effort fallback when OCR intermittently fails.
+APTITUDE_BOX_RATIOS = {
+  "surface_turf": (0.0, 0.00, 0.25, 0.33),
+  "surface_dirt": (0.25, 0.00, 0.25, 0.33),
+  "distance_sprint": (0.0, 0.33, 0.25, 0.33),
+  "distance_mile": (0.25, 0.33, 0.25, 0.33),
+  "distance_medium": (0.50, 0.33, 0.25, 0.33),
+  "distance_long": (0.75, 0.33, 0.25, 0.33),
+  "style_front": (0.0, 0.66, 0.25, 0.33),
+  "style_pace": (0.25, 0.66, 0.25, 0.33),
+  "style_late": (0.50, 0.66, 0.25, 0.33),
+  "style_end": (0.75, 0.66, 0.25, 0.33),
+}
+
 def clear_aptitudes_cache():
   global aptitudes_cache
   aptitudes_cache = {}
@@ -90,6 +103,10 @@ def collect_main_state():
       if config.VERBOSE_ACTIONS:
         info("[STATE] Full stats opened; reading aptitudes.")
       state_object["aptitudes"] = get_aptitudes()
+      state_object["aptitudes_missing_keys"] = [
+        key for key in APTITUDE_BOX_RATIOS.keys()
+        if key not in state_object["aptitudes"]
+      ]
       aptitudes_cache = state_object["aptitudes"]
       filter_race_list(state_object)
       filter_race_schedule(state_object)
@@ -593,24 +610,8 @@ def get_aptitudes():
     sleep(0.5)
     device_action.flush_screenshot_cache()
     image = device_action.screenshot(region_xywh=constants.FULL_STATS_APTITUDE_REGION)
-  # Ratios for each aptitude box (x, y, width, height) in percentages
-  boxes = {
-    "surface_turf":   (0.0, 0.00, 0.25, 0.33),
-    "surface_dirt":   (0.25, 0.00, 0.25, 0.33),
-
-    "distance_sprint": (0.0, 0.33, 0.25, 0.33),
-    "distance_mile":   (0.25, 0.33, 0.25, 0.33),
-    "distance_medium": (0.50, 0.33, 0.25, 0.33),
-    "distance_long":   (0.75, 0.33, 0.25, 0.33),
-
-    "style_front":  (0.0, 0.66, 0.25, 0.33),
-    "style_pace":   (0.25, 0.66, 0.25, 0.33),
-    "style_late":   (0.50, 0.66, 0.25, 0.33),
-    "style_end":    (0.75, 0.66, 0.25, 0.33),
-  }
-
   h, w = image.shape[:2]
-  for key, (xr, yr, wr, hr) in boxes.items():
+  for key, (xr, yr, wr, hr) in APTITUDE_BOX_RATIOS.items():
     x, y, ww, hh = int(xr*w), int(yr*h), int(wr*w), int(hr*h)
     cropped_image = np.array(image[y:y+hh, x:x+ww])
     matches = device_action.multi_match_templates(constants.APTITUDE_IMAGES, cropped_image, stop_after_first_match=True)
@@ -621,8 +622,24 @@ def get_aptitudes():
           info(f"[APT] {key} -> {name}")
         #debug_window(cropped_image)
 
+  missing_keys = [key for key in APTITUDE_BOX_RATIOS.keys() if key not in aptitudes]
+  if missing_keys:
+    warning(f"Missing aptitude OCR for: {missing_keys}")
   warning(f"Parsed aptitude values: {aptitudes}. If these values are wrong, please stop and start the bot again with the hotkey.")
   return aptitudes
+
+def _expand_energy_region(region_xywh, min_height=24, vertical_padding=12):
+  x, y, w, h = region_xywh
+  if h >= min_height:
+    return region_xywh
+
+  game_left, game_top, game_right, game_bottom = constants.GAME_WINDOW_BBOX
+  extra_height = max(min_height - h, 0)
+  top_pad = vertical_padding + extra_height // 2
+  bottom_pad = vertical_padding + extra_height - extra_height // 2
+  new_top = max(game_top, y - top_pad)
+  new_bottom = min(game_bottom, y + h + bottom_pad)
+  return (x, new_top, w, max(1, new_bottom - new_top))
 
 def get_energy_level(threshold=0.85):
   # find where the right side of the bar is on screen
@@ -633,6 +650,15 @@ def get_energy_level(threshold=0.85):
   else:
     region_xywh = constants.ENERGY_REGION
   screenshot = device_action.screenshot(region_xywh=region_xywh)
+  if screenshot.shape[0] < 16:
+    expanded_region = _expand_energy_region(region_xywh)
+    if expanded_region != region_xywh:
+      warning(
+        f"Energy region height {screenshot.shape[0]}px is too small for template matching; "
+        f"retrying with expanded region {expanded_region}."
+      )
+      screenshot = device_action.screenshot(region_xywh=expanded_region)
+      region_xywh = expanded_region
 
   right_bar_match = device_action.match_template("assets/ui/energy_bar_right_end_part.png", screenshot, threshold)
   # longer energy bars get more round at the end
@@ -672,11 +698,18 @@ def filter_race_list(state):
   aptitudes = state["aptitudes"]
   min_surface_index = get_aptitude_index(config.MINIMUM_APTITUDES["surface"])
   min_distance_index = get_aptitude_index(config.MINIMUM_APTITUDES["distance"])
+  if not aptitudes:
+    warning("Aptitudes are empty; race filtering will produce no suitable races instead of crashing.")
+  if min_surface_index is None or min_distance_index is None:
+    warning(f"Invalid minimum aptitude config: {config.MINIMUM_APTITUDES}")
   for date in constants.ALL_RACES:
     if date not in constants.RACES:
       constants.RACES[date] = []
     for race in constants.ALL_RACES[date]:
-      suitable = check_race_suitability(race, aptitudes, min_surface_index, min_distance_index)
+      if min_surface_index is None or min_distance_index is None:
+        suitable = False
+      else:
+        suitable = check_race_suitability(race, aptitudes, min_surface_index, min_distance_index)
       if suitable:
         constants.RACES[date].append(race)
   debug(f"Races after filtering: {constants.RACES}")

@@ -8,6 +8,12 @@ from utils.log import error, info, warning, debug, debug_window, args
 
 from time import sleep, time
 
+# Temporary global template scaling workaround added during Tazuna hint troubleshooting.
+# Approximate factor is 1.26, but this was applied broadly as a debugging shortcut and may
+# only be correct for some assets. If template matching regresses in isolated places, verify
+# whether this global scale is masking an asset-specific sizing problem instead.
+GLOBAL_TEMPLATE_SCALING = 1.26
+
 class BotStopException(Exception):
   #Exception raised to immediately stop the bot
   pass
@@ -97,20 +103,75 @@ def long_press(mouse_x_y : tuple[int, int], duration=2.0, text: str = ""):
   sleep(0.35)
   return True
 
+def _resize_template(template: np.ndarray, scale: float):
+  width = max(1, int(round(template.shape[1] * scale)))
+  height = max(1, int(round(template.shape[0] * scale)))
+  interpolation = cv2.INTER_LINEAR if scale >= 1.0 else cv2.INTER_AREA
+  return cv2.resize(template, (width, height), interpolation=interpolation)
+
+def _effective_template_scale(template_scaling: float = 1.0):
+  return float(GLOBAL_TEMPLATE_SCALING) * float(template_scaling)
+
+def _load_template_image(template_path: str, grayscale=False):
+  if grayscale:
+    return cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+  template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+  if template is None:
+    return None
+  if len(template.shape) == 3 and template.shape[2] == 4:
+    template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
+  return cv2.cvtColor(template, cv2.COLOR_RGB2BGR)
+
+def best_template_match(template_path: str, screenshot: np.ndarray, grayscale=False, template_scales=None):
+  template = _load_template_image(template_path, grayscale=grayscale)
+  if template is None:
+    error(f"Template '{template_path}' could not be loaded.")
+    return None
+
+  if grayscale:
+    screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
+
+  scales = template_scales or [_effective_template_scale()]
+  best_match = None
+
+  for scale in scales:
+    resized_template = template if abs(scale - 1.0) < 1e-6 else _resize_template(template, scale)
+
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    template_h, template_w = resized_template.shape[:2]
+    if template_h > screenshot_h or template_w > screenshot_w:
+      continue
+
+    result = cv2.matchTemplate(screenshot, resized_template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    candidate = {
+      "score": float(max_val),
+      "scale": float(scale),
+      "location": max_loc,
+      "template": resized_template,
+      "size": (template_w, template_h),
+    }
+    if best_match is None or candidate["score"] > best_match["score"]:
+      best_match = candidate
+
+  return best_match
+
 def match_cached_templates(cached_templates, region_ltrb=None, threshold=0.85, text: str = "", template_scaling=1.0, stop_after_first_match=False):
   if region_ltrb == None:
     raise ValueError(f"region_ltrb cannot be None")
   _screenshot = screenshot(region_ltrb=region_ltrb)
   results = {}
+  effective_scale = _effective_template_scale(template_scaling)
   if args.save_images:
     debug_window(_screenshot, save_name=f"cached_templates_screenshot")
   for name, template in cached_templates.items():
+    scaled_template = template if abs(effective_scale - 1.0) < 1e-6 else _resize_template(template, effective_scale)
     if args.save_images:
-      debug_window(template, save_name=f"{name}_template")
+      debug_window(scaled_template, save_name=f"{name}_template")
     
     # Validate template and screenshot dimensions before matching
     screenshot_h, screenshot_w = _screenshot.shape[:2]
-    template_h, template_w = template.shape[:2]
+    template_h, template_w = scaled_template.shape[:2]
     
     if template_h > screenshot_h or template_w > screenshot_w:
       error(f"Cached template '{name}' is larger than screenshot!")
@@ -119,9 +180,9 @@ def match_cached_templates(cached_templates, region_ltrb=None, threshold=0.85, t
       results[name] = []  # Return empty list for this template
       continue
     
-    result = cv2.matchTemplate(_screenshot, template, cv2.TM_CCOEFF_NORMED)
+    result = cv2.matchTemplate(_screenshot, scaled_template, cv2.TM_CCOEFF_NORMED)
     loc = np.where(result >= threshold)
-    h, w = template.shape[:2]
+    h, w = scaled_template.shape[:2]
     boxes = [(x+region_ltrb[0], y+region_ltrb[1], w, h) for (x, y) in zip(*loc[::-1])]
     results[name] = deduplicate_boxes(boxes)
     if stop_after_first_match and len(results[name]) > 0:
@@ -145,19 +206,15 @@ def multi_match_templates(templates, screenshot: np.ndarray, threshold=0.85, tex
 def match_template(template_path : str, screenshot : np.ndarray, threshold=0.85, text: str = "", grayscale=False, template_scaling=1.0):
   if text and args.device_debug:
     debug(text)
+  template = _load_template_image(template_path, grayscale=grayscale)
+  if template is None:
+    error(f"Template '{template_path}' could not be loaded.")
+    return []
   if grayscale:
-    template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
     screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
-  else:
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)  # safe default
-    if template is None:
-      error(f"Template '{template_path}' could not be loaded.")
-      return []
-    if template.shape[2] == 4:
-      template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
-    template = cv2.cvtColor(template, cv2.COLOR_RGB2BGR)
-  if template_scaling != 1.0:
-    template = cv2.resize(template, (int(template.shape[1] * template_scaling), int(template.shape[0] * template_scaling)))
+  effective_scale = _effective_template_scale(template_scaling)
+  if effective_scale != 1.0:
+    template = _resize_template(template, effective_scale)
   if args.save_images:
     template_name = template_path.split("/")[-1].split(".")[0]
     debug_window(template, save_name=f"{template_name}_template")
@@ -171,7 +228,7 @@ def match_template(template_path : str, screenshot : np.ndarray, threshold=0.85,
     error(f"Template '{template_path}' is larger than screenshot!")
     error(f"  Template size: {template_w}x{template_h}")
     error(f"  Screenshot size: {screenshot_w}x{screenshot_h}")
-    error(f"  Template scaling: {template_scaling}")
+    error(f"  Template scaling: {effective_scale}")
     return []  # Return empty list instead of crashing
   
   result = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
@@ -181,6 +238,33 @@ def match_template(template_path : str, screenshot : np.ndarray, threshold=0.85,
   boxes = [(x, y, w, h) for (x, y) in zip(*loc[::-1])]
 
   return deduplicate_boxes(boxes)
+
+def match_template_multiscale(template_path: str, screenshot: np.ndarray, threshold=0.85, text: str = "", grayscale=False, template_scales=None):
+  if text and args.device_debug:
+    debug(text)
+
+  best_match = best_template_match(
+    template_path,
+    screenshot,
+    grayscale=grayscale,
+    template_scales=template_scales,
+  )
+  if best_match is None:
+    return []
+
+  if args.device_debug:
+    debug(
+      f"Best multi-scale match for '{template_path}': "
+      f"score={best_match['score']:.4f}, scale={best_match['scale']:.3f}, "
+      f"location={best_match['location']}, size={best_match['size']}"
+    )
+
+  if best_match["score"] < threshold:
+    return []
+
+  x, y = best_match["location"]
+  w, h = best_match["size"]
+  return [(x, y, w, h)]
 
 def deduplicate_boxes(boxes_xywh : list[tuple[int, int, int, int]], min_dist=5):
   # boxes_xywh = (x, y, width, height)
