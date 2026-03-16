@@ -78,7 +78,7 @@ class RegionAdjusterApp:
     self._recognition_offset_respected = bool(offset_context.get("respected_by_overrides"))
     display_scaling = context.get("display_scaling") or {}
     self._display_scaling_enabled = bool(display_scaling.get("enabled"))
-    self._display_scaling_regions = bool(display_scaling.get("scale_regions"))
+    self._display_scaling_bounds_only = bool(display_scaling.get("bounds_only", True))
     self._display_scaling_reference = (
       int(display_scaling.get("reference_width", 0) or 0),
       int(display_scaling.get("reference_height", 0) or 0),
@@ -397,7 +397,7 @@ class RegionAdjusterApp:
     if not self._display_scaling_enabled:
       return "Display scaling: disabled"
     width, height = self._display_scaling_reference
-    scope = "regions scaled" if self._display_scaling_regions else "bounds only"
+    scope = "bounds only" if self._display_scaling_bounds_only else "custom"
     return f"Display scaling: enabled ({scope}, reference {width}x{height})"
 
   def _clone_regions(self, regions: Dict[str, Dict]) -> Dict[str, Dict]:

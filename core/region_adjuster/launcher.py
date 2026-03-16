@@ -120,7 +120,7 @@ def _display_scaling_snapshot() -> Dict[str, Any]:
   reference = display_config.get("reference_display") or {}
   return {
     "enabled": bool(display_config.get("enabled")),
-    "scale_regions": bool(display_config.get("scale_regions", False)),
+    "bounds_only": True,
     "reference_width": int(reference.get("width", 0) or 0),
     "reference_height": int(reference.get("height", 0) or 0),
   }

@@ -103,35 +103,38 @@ def _resolve_display_aware_mac_settings(
 
   current_width, current_height, source = _get_macos_display_resolution()
   scale = _compute_display_scale(current_width, current_height, display_config)
-  scale_regions = bool(display_config.get("scale_regions", False))
 
-  scaled_bounds = dict(bounds)
+  scaled_bounds = {
+    key: _coerce_int(bounds.get(key), 0 if key in ("x", "y") else 1)
+    for key in ("x", "y", "width", "height")
+  }
   if display_config.get("scale_bounds", True):
-    scaled_bounds = {
-      key: _coerce_int(bounds.get(key), 0 if key in ("x", "y") else 1)
-      for key in ("x", "y", "width", "height")
-    }
     for key in ("x", "y", "width", "height"):
       scaled_bounds[key] = max(
         1 if key in ("width", "height") else 0,
         int(round(scaled_bounds[key] * scale)),
       )
 
-  if display_config.get("scale_general_offsets", True) and not scale_regions:
-    offset_x = int(round(offset_x * scale))
-    offset_y = int(round(offset_y * scale))
-
-  if display_config.get("scale_recognition_offsets", True) and not scale_regions:
-    recognition_offset_x = int(round(recognition_offset_x * scale))
-    recognition_offset_y = int(round(recognition_offset_y * scale))
+  if display_config.get("scale_regions", False):
+    warning(
+      "platform.mac_bluestacks_air.display_aware_bounds.scale_regions is deprecated and ignored. "
+      "Use OCR region adjuster profiles instead."
+    )
+  if display_config.get("scale_general_offsets", True):
+    warning(
+      "platform.mac_bluestacks_air.display_aware_bounds.scale_general_offsets is deprecated and ignored."
+    )
+  if display_config.get("scale_recognition_offsets", True):
+    warning(
+      "platform.mac_bluestacks_air.display_aware_bounds.scale_recognition_offsets is deprecated and ignored."
+    )
 
   reference = display_config.get("reference_display") or {}
   info(
     "macOS display-aware bounds: "
     f"display={current_width}x{current_height} via {source}, "
     f"reference={_coerce_int(reference.get('width'), 0)}x{_coerce_int(reference.get('height'), 0)}, "
-    f"scale={scale:.4f}, bounds={scaled_bounds}, offsets=({offset_x}, {offset_y}), "
-    f"recognition_offsets=({recognition_offset_x}, {recognition_offset_y})"
+    f"scale={scale:.4f}, bounds={scaled_bounds}"
   )
 
   return scaled_bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, scale
@@ -242,7 +245,7 @@ def _focus_mac_bluestacks_air() -> bool:
   if offset_y is None:
     offset_y = 0
 
-  bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, display_scale = _resolve_display_aware_mac_settings(
+  bounds, offset_x, offset_y, recognition_offset_x, recognition_offset_y, _ = _resolve_display_aware_mac_settings(
     settings=settings,
     bounds=bounds,
     offset_x=_coerce_int(offset_x, 0),
@@ -333,11 +336,6 @@ def _focus_mac_bluestacks_air() -> bool:
   _, _, overrides_path = resolve_region_adjuster_profiles(overrides_config)
   if constants.apply_region_overrides(overrides_path=overrides_path):
     debug("Applied region overrides from adjuster settings.")
-
-  display_config = settings.get("display_aware_bounds") or {}
-  if display_config.get("enabled") and display_config.get("scale_regions", False):
-    constants.scale_coordinate_constants(display_scale)
-    debug(f"Applied display-aware coordinate scaling factor {display_scale:.4f}.")
 
   return True
 

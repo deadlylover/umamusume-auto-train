@@ -4,10 +4,42 @@ import os
 #put a default for sleep time multiplier since it's an important value
 SLEEP_TIME_MULTIPLIER = 1
 
+
+def _migrate_deprecated_display_scaling(config):
+  platform_config = config.get("platform")
+  if not isinstance(platform_config, dict):
+    return config, False
+
+  mac_settings = platform_config.get("mac_bluestacks_air")
+  if not isinstance(mac_settings, dict):
+    return config, False
+
+  display_config = mac_settings.get("display_aware_bounds")
+  if not isinstance(display_config, dict):
+    return config, False
+
+  changed = False
+
+  for key in ("scale_regions", "scale_general_offsets", "scale_recognition_offsets"):
+    if display_config.get(key):
+      display_config[key] = False
+      changed = True
+
+  return config, changed
+
 # to see any config variables you must call reload_config()
 def load_config():
   with open("config.json", "r", encoding="utf-8") as file:
-    return json.load(file)
+    config = json.load(file)
+
+  config, migrated = _migrate_deprecated_display_scaling(config)
+  if migrated:
+    with open("config.json", "w", encoding="utf-8") as file:
+      json.dump(config, file, indent=2)
+      file.write("\n")
+    print("[INFO] Deprecated macOS OCR scaling flags were disabled in config.json. Display-aware bounds now only affect the BlueStacks window size.")
+
+  return config
 
 def load_var(var_name, value):
   globals()[var_name] = value

@@ -1,554 +1,554 @@
 {
   "GAME_WINDOW_BBOX": [
-    4,
+    1,
     125,
-    764,
-    1506
+    763,
+    1505
   ],
   "GAME_WINDOW_REGION": [
     1,
-    127,
-    763,
-    1378
+    125,
+    762,
+    1380
   ],
   "SCREEN_TOP_BBOX": [
-    3,
-    127,
-    766,
-    602
+    -2,
+    128,
+    764,
+    529
   ],
   "SCREEN_TOP_REGION": [
-    1,
-    126,
-    765,
-    467
+    -2,
+    128,
+    766,
+    401
   ],
   "SCREEN_MIDDLE_BBOX": [
-    1,
-    448,
-    763,
-    1128
+    2,
+    447,
+    768,
+    1266
   ],
   "SCREEN_MIDDLE_REGION": [
-    3,
-    443,
-    762,
-    692
+    2,
+    447,
+    766,
+    819
   ],
   "SCREEN_BOTTOM_BBOX": [
-    3,
-    1105,
-    766,
-    1505
+    -21,
+    1109,
+    764,
+    1504
   ],
   "SCREEN_BOTTOM_REGION": [
-    5,
-    1108,
-    759,
-    396
+    -21,
+    1109,
+    785,
+    395
   ],
   "SCROLLING_SKILL_SCREEN_BBOX": [
-    0,
-    106,
-    169,
-    241
+    30,
+    621,
+    758,
+    1229
   ],
   "SCROLLING_SKILL_SCREEN_REGION": [
-    0,
-    106,
-    167,
-    134
+    30,
+    621,
+    728,
+    608
   ],
   "ENERGY_BBOX": [
-    50,
-    56,
-    148,
-    68
-  ],
-  "ENERGY_REGION": [
+    32,
     36,
-    56,
-    98,
-    11
-  ],
-  "UNITY_ENERGY_BBOX": [
-    36,
-    56,
-    136,
-    68
-  ],
-  "UNITY_ENERGY_REGION": [
-    36,
-    56,
-    99,
-    11
-  ],
-  "MANT_ENERGY_BBOX": [
-    233,
-    33,
-    330,
+    96,
     44
   ],
+  "ENERGY_REGION": [
+    23,
+    36,
+    64,
+    7
+  ],
+  "UNITY_ENERGY_BBOX": [
+    23,
+    36,
+    88,
+    44
+  ],
+  "UNITY_ENERGY_REGION": [
+    23,
+    36,
+    64,
+    7
+  ],
+  "MANT_ENERGY_BBOX": [
+    169,
+    275,
+    722,
+    327
+  ],
   "MANT_ENERGY_REGION": [
-    233,
-    33,
-    98,
-    11
+    169,
+    275,
+    553,
+    52
   ],
   "MOOD_BBOX": [
-    119,
-    58,
-    154,
-    65
+    548,
+    270,
+    756,
+    330
   ],
   "MOOD_REGION": [
-    123,
-    58,
-    36,
-    6
+    548,
+    270,
+    208,
+    60
   ],
   "TURN_BBOX": [
-    3,
-    46,
-    32,
-    62
+    2,
+    30,
+    21,
+    40
   ],
   "TURN_REGION": [
-    3,
-    46,
+    2,
     30,
-    16
+    19,
+    10
   ],
   "UNITY_TURN_BBOX": [
-    4,
-    40,
-    20,
-    53
+    3,
+    26,
+    13,
+    34
   ],
   "UNITY_TURN_REGION": [
-    4,
-    40,
-    16,
-    12
+    3,
+    26,
+    10,
+    8
   ],
   "MANT_TURN_BBOX": [
-    184,
-    22,
-    212,
-    36
+    12,
+    229,
+    152,
+    296
   ],
   "MANT_TURN_REGION": [
-    184,
-    22,
-    28,
-    14
+    12,
+    229,
+    140,
+    67
   ],
   "UNITY_TURN_FULL_BBOX": [
-    3,
-    40,
-    36,
-    53
+    2,
+    26,
+    23,
+    34
   ],
   "UNITY_TURN_FULL_REGION": [
-    3,
-    41,
-    33,
-    12
+    2,
+    27,
+    21,
+    8
   ],
   "MANT_TURN_FULL_BBOX": [
-    184,
-    22,
-    212,
-    36
+    10,
+    222,
+    151,
+    322
   ],
   "MANT_TURN_FULL_REGION": [
-    184,
-    22,
-    28,
-    14
+    10,
+    222,
+    141,
+    100
   ],
   "UNITY_RACE_TURNS_BBOX": [
-    7,
-    56,
-    18,
-    61
+    5,
+    36,
+    12,
+    40
   ],
   "UNITY_RACE_TURNS_REGION": [
-    6,
-    56,
-    11,
-    5
+    4,
+    36,
+    7,
+    3
   ],
   "FAILURE_BBOX": [
-    6,
-    216,
-    145,
-    224
+    4,
+    140,
+    94,
+    145
   ],
   "FAILURE_REGION": [
     -1,
-    235,
     153,
-    18
+    99,
+    12
   ],
   "UNITY_FAILURE_BBOX": [
-    13,
-    238,
-    152,
-    247
+    8,
+    154,
+    99,
+    160
   ],
   "UNITY_FAILURE_REGION": [
-    13,
-    238,
-    139,
-    10
+    8,
+    154,
+    90,
+    6
   ],
   "MANT_FAILURE_BBOX": [
-    195,
-    216,
-    334,
-    224
+    4,
+    166,
+    293,
+    202
   ],
   "MANT_FAILURE_REGION": [
-    195,
-    216,
-    139,
-    8
+    4,
+    166,
+    289,
+    36
   ],
   "YEAR_BBOX": [
-    3,
-    33,
-    47,
-    40
+    2,
+    21,
+    31,
+    26
   ],
   "YEAR_REGION": [
     1,
-    34,
-    45,
-    6
+    22,
+    29,
+    4
   ],
   "UNITY_YEAR_BBOX": [
-    36,
-    34,
-    81,
-    40
+    23,
+    22,
+    53,
+    26
   ],
   "UNITY_YEAR_REGION": [
-    37,
-    34,
-    45,
-    5
+    24,
+    22,
+    29,
+    3
   ],
   "MANT_YEAR_BBOX": [
-    182,
-    10,
-    227,
-    16
+    8,
+    168,
+    334,
+    198
   ],
   "MANT_YEAR_REGION": [
-    182,
-    10,
-    45,
-    6
+    8,
+    168,
+    326,
+    30
   ],
   "CRITERIA_BBOX": [
-    56,
-    41,
-    136,
-    56
-  ],
-  "CRITERIA_REGION": [
-    56,
-    40,
-    84,
-    16
-  ],
-  "UNITY_CRITERIA_BBOX": [
-    52,
-    41,
-    140,
-    56
-  ],
-  "UNITY_CRITERIA_REGION": [
-    52,
-    41,
+    36,
+    27,
     88,
-    15
-  ],
-  "MANT_CRITERIA_BBOX": [
-    237,
-    16,
-    317,
-    32
-  ],
-  "MANT_CRITERIA_REGION": [
-    237,
-    16,
-    80,
-    15
-  ],
-  "CURRENT_STATS_BBOX": [
-    5,
-    221,
-    158,
-    234
-  ],
-  "CURRENT_STATS_REGION": [
-    5,
-    221,
-    153,
-    12
-  ],
-  "RACE_INFO_TEXT_BBOX": [
-    5,
-    92,
-    149,
-    101
-  ],
-  "RACE_INFO_TEXT_REGION": [
-    9,
-    116,
-    143,
-    10
-  ],
-  "RACE_LIST_BOX_BBOX": [
-    5,
-    183,
-    165,
-    262
-  ],
-  "RACE_LIST_BOX_REGION": [
-    3,
-    183,
-    160,
-    79
-  ],
-  "URA_STAT_GAINS_BBOX": [
-    187,
-    179,
-    341,
-    189
-  ],
-  "URA_STAT_GAINS_REGION": [
-    187,
-    179,
-    155,
-    9
-  ],
-  "UNITY_STAT_GAINS_BBOX": [
-    6,
-    208,
-    162,
-    216
-  ],
-  "UNITY_STAT_GAINS_REGION": [
-    5,
-    208,
-    155,
-    8
-  ],
-  "UNITY_STAT_GAINS_2_BBOX": [
-    6,
-    198,
-    162,
-    208
-  ],
-  "UNITY_STAT_GAINS_2_REGION": [
-    5,
-    198,
-    155,
-    10
-  ],
-  "MANT_STAT_GAINS_BBOX": [
-    187,
-    179,
-    341,
-    189
-  ],
-  "MANT_STAT_GAINS_REGION": [
-    187,
-    179,
-    155,
-    9
-  ],
-  "MANT_STAT_GAINS_2_BBOX": [
-    187,
-    179,
-    341,
-    189
-  ],
-  "MANT_STAT_GAINS_2_REGION": [
-    187,
-    179,
-    155,
-    9
-  ],
-  "FULL_STATS_STATUS_BBOX": [
-    10,
-    157,
-    168,
-    257
-  ],
-  "FULL_STATS_STATUS_REGION": [
-    4,
-    182,
-    158,
-    100
-  ],
-  "FULL_STATS_APTITUDE_BBOX": [
-    40,
-    117,
-    155,
-    145
-  ],
-  "FULL_STATS_APTITUDE_REGION": [
-    39,
-    117,
-    116,
-    27
-  ],
-  "SUPPORT_CARD_ICON_BBOX": [
-    134,
-    55,
-    161,
-    204
-  ],
-  "SUPPORT_CARD_ICON_REGION": [
-    134,
-    62,
-    29,
-    149
-  ],
-  "UNITY_SUPPORT_CARD_ICON_BBOX": [
-    129,
-    66,
-    166,
-    221
-  ],
-  "UNITY_SUPPORT_CARD_ICON_REGION": [
-    129,
-    63,
-    37,
-    156
-  ],
-  "MANT_SUPPORT_CARD_ICON_BBOX": [
-    343,
-    43,
-    372,
-    191
-  ],
-  "MANT_SUPPORT_CARD_ICON_REGION": [
-    343,
-    43,
-    29,
-    149
-  ],
-  "UNITY_TEAM_MATCHUP_BBOX": [
-    10,
-    179,
-    157,
-    190
-  ],
-  "UNITY_TEAM_MATCHUP_REGION": [
-    10,
-    179,
-    147,
-    11
-  ],
-  "MANT_SHOP_COIN_BBOX": [
-    306,
-    23,
-    336,
     36
   ],
+  "CRITERIA_REGION": [
+    36,
+    26,
+    55,
+    10
+  ],
+  "UNITY_CRITERIA_BBOX": [
+    34,
+    27,
+    91,
+    36
+  ],
+  "UNITY_CRITERIA_REGION": [
+    34,
+    27,
+    57,
+    10
+  ],
+  "MANT_CRITERIA_BBOX": [
+    243,
+    204,
+    640,
+    269
+  ],
+  "MANT_CRITERIA_REGION": [
+    243,
+    204,
+    397,
+    65
+  ],
+  "CURRENT_STATS_BBOX": [
+    74,
+    1048,
+    627,
+    1080
+  ],
+  "CURRENT_STATS_REGION": [
+    74,
+    1048,
+    553,
+    32
+  ],
+  "RACE_INFO_TEXT_BBOX": [
+    183,
+    201,
+    585,
+    295
+  ],
+  "RACE_INFO_TEXT_REGION": [
+    183,
+    201,
+    402,
+    94
+  ],
+  "RACE_LIST_BOX_BBOX": [
+    3,
+    119,
+    107,
+    170
+  ],
+  "RACE_LIST_BOX_REGION": [
+    2,
+    119,
+    104,
+    51
+  ],
+  "URA_STAT_GAINS_BBOX": [
+    121,
+    116,
+    221,
+    123
+  ],
+  "URA_STAT_GAINS_REGION": [
+    121,
+    116,
+    101,
+    6
+  ],
+  "UNITY_STAT_GAINS_BBOX": [
+    4,
+    135,
+    105,
+    140
+  ],
+  "UNITY_STAT_GAINS_REGION": [
+    3,
+    135,
+    101,
+    5
+  ],
+  "UNITY_STAT_GAINS_2_BBOX": [
+    4,
+    129,
+    105,
+    135
+  ],
+  "UNITY_STAT_GAINS_2_REGION": [
+    3,
+    129,
+    101,
+    6
+  ],
+  "MANT_STAT_GAINS_BBOX": [
+    32,
+    985,
+    624,
+    1022
+  ],
+  "MANT_STAT_GAINS_REGION": [
+    32,
+    985,
+    592,
+    37
+  ],
+  "MANT_STAT_GAINS_2_BBOX": [
+    121,
+    116,
+    221,
+    123
+  ],
+  "MANT_STAT_GAINS_2_REGION": [
+    121,
+    116,
+    101,
+    6
+  ],
+  "FULL_STATS_STATUS_BBOX": [
+    69,
+    486,
+    738,
+    518
+  ],
+  "FULL_STATS_STATUS_REGION": [
+    69,
+    486,
+    669,
+    32
+  ],
+  "FULL_STATS_APTITUDE_BBOX": [
+    185,
+    560,
+    713,
+    680
+  ],
+  "FULL_STATS_APTITUDE_REGION": [
+    185,
+    560,
+    528,
+    120
+  ],
+  "SUPPORT_CARD_ICON_BBOX": [
+    87,
+    36,
+    104,
+    132
+  ],
+  "SUPPORT_CARD_ICON_REGION": [
+    87,
+    40,
+    19,
+    97
+  ],
+  "UNITY_SUPPORT_CARD_ICON_BBOX": [
+    84,
+    43,
+    108,
+    143
+  ],
+  "UNITY_SUPPORT_CARD_ICON_REGION": [
+    84,
+    41,
+    24,
+    101
+  ],
+  "MANT_SUPPORT_CARD_ICON_BBOX": [
+    606,
+    323,
+    762,
+    983
+  ],
+  "MANT_SUPPORT_CARD_ICON_REGION": [
+    606,
+    323,
+    156,
+    660
+  ],
+  "UNITY_TEAM_MATCHUP_BBOX": [
+    6,
+    116,
+    102,
+    123
+  ],
+  "UNITY_TEAM_MATCHUP_REGION": [
+    6,
+    116,
+    95,
+    7
+  ],
+  "MANT_SHOP_COIN_BBOX": [
+    399,
+    604,
+    517,
+    683
+  ],
   "MANT_SHOP_COIN_REGION": [
-    306,
-    23,
-    30,
-    12
+    399,
+    604,
+    118,
+    79
   ],
   "MANT_GRADE_POINT_BBOX": [
-    194,
-    33,
-    235,
-    49
+    281,
+    492,
+    415,
+    596
   ],
   "MANT_GRADE_POINT_REGION": [
-    194,
-    33,
-    41,
-    16
+    281,
+    492,
+    134,
+    104
   ],
   "MANT_SHOP_BUTTON_BBOX": [
-    317,
-    214,
-    347,
-    243
+    385,
+    1277,
+    560,
+    1409
   ],
   "MANT_SHOP_BUTTON_REGION": [
-    317,
-    214,
-    30,
-    29
+    385,
+    1277,
+    175,
+    132
   ],
   "EVENT_NAME_BBOX": [
-    25,
-    78,
-    126,
-    89
+    -2,
+    331,
+    585,
+    471
   ],
   "EVENT_NAME_REGION": [
-    -3,
-    80,
-    100,
-    8
+    -2,
+    331,
+    587,
+    140
   ],
   "CLAW_MACHINE_SPEED_BBOX": [
-    341,
-    16,
-    367,
-    25
+    221,
+    10,
+    238,
+    16
   ],
   "CLAW_MACHINE_SPEED_REGION": [
-    341,
+    221,
+    10,
     16,
-    25,
-    8
+    5
   ],
   "CLAW_MACHINE_PLUSHIE_BBOX": [
-    64,
-    137,
-    116,
-    219
+    42,
+    89,
+    75,
+    142
   ],
   "CLAW_MACHINE_PLUSHIE_REGION": [
-    57,
-    157,
-    52,
-    82
+    37,
+    102,
+    34,
+    53
   ],
   "SKIP_BTN_BIG_BBOX_LANDSCAPE": [
     0,
-    48,
-    169,
-    275
+    31,
+    110,
+    178
   ],
   "SKIP_BTN_BIG_REGION_LANDSCAPE": [
     0,
-    232,
-    169,
-    90
+    151,
+    110,
+    58
   ],
   "RACE_BUTTON_IN_RACE_BBOX_LANDSCAPE": [
     0,
-    34,
-    171,
-    287
+    22,
+    111,
+    186
   ],
   "RACE_BUTTON_IN_RACE_REGION_LANDSCAPE": [
-    34,
-    260,
-    95,
-    27
+    22,
+    169,
+    62,
+    18
   ]
 }

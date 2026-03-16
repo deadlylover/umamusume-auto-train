@@ -1758,8 +1758,8 @@
         "scale_mode": "contain",
         "scale_bounds": true,
         "scale_regions": false,
-        "scale_general_offsets": true,
-        "scale_recognition_offsets": true,
+        "scale_general_offsets": false,
+        "scale_recognition_offsets": false,
         "min_scale": 0.5,
         "max_scale": 1.0
       }
