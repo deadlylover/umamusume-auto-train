@@ -358,7 +358,7 @@ class Strategy:
         if skip_wit_for_other_training:
           action.func = "do_training"
           for training_name, training_data in available_trainings.items():
-            if training == "wit":
+            if training_name == "wit":
               continue
             else:
               action["training_name"] = training_name
@@ -376,21 +376,23 @@ class Strategy:
         else:
           action.func = "do_rest"
         info(f"[ENERGY_MGMT] → Resting before summer for energy. Energy: ({current_energy})")
-      # Use wit if it provides significant energy gain
-      elif wit_energy_value >= 9 and energy_headroom > wit_energy_value and wit_score_ratio < config.WIT_TRAINING_SCORE_RATIO_THRESHOLD:
+      # Use wit if it provides significant energy gain, but only when energy is high enough that resting is wasteful
+      elif wit_energy_value >= 9 and energy_headroom > wit_energy_value and wit_score_ratio < config.WIT_TRAINING_SCORE_RATIO_THRESHOLD and current_energy >= config.WIT_TRAINING_MIN_ENERGY:
         action["training_name"] = "wit"
         action["training_data"] = available_trainings["wit"]
-        info(f"[ENERGY_MGMT] → WIT TRAINING: Energy gain ({wit_energy_value}/{wit_raw_energy}, {rainbow_count} rainbows)")
-      # Rest if energy is very low
-      elif ((current_energy < 50 and training_score <= min_score) or
-        (current_energy < 50 and action["training_name"] == "wit")):
+        info(f"[ENERGY_MGMT] → WIT TRAINING (energy gain): energy={current_energy}/{config.WIT_TRAINING_MIN_ENERGY} threshold, energy_value={wit_energy_value}/{wit_raw_energy} (headroom={energy_headroom}), rainbows={rainbow_count}, score_ratio={wit_score_ratio:.2f}/{config.WIT_TRAINING_SCORE_RATIO_THRESHOLD}")
+      # Rest if energy is below wit_training_min_energy and training isn't worth doing
+      elif current_energy < config.WIT_TRAINING_MIN_ENERGY and (training_score <= min_score or action["training_name"] == "wit"):
         if state["date_event_available"]:
           action.func = "do_recreation"
         else:
           action.func = "do_rest"
-        info(f"[ENERGY_MGMT] → RESTING: Very low energy ({current_energy}) and score ({training_score}) is below minimum ({min_score})")
+        info(f"[ENERGY_MGMT] → RESTING: Low energy ({current_energy} < {config.WIT_TRAINING_MIN_ENERGY}) and score ({training_score}) is below minimum ({min_score})")
       else:
-        debug(f"[ENERGY_MGMT] → STICK WITH TRAINING: No compelling alternatives (wit effective energy: {wit_energy_value})")
+        if action["training_name"] == "wit":
+          info(f"[ENERGY_MGMT] → WIT TRAINING (strategy kept): energy={current_energy} (min={config.WIT_TRAINING_MIN_ENERGY}), wit_energy_value={wit_energy_value} (need>=9 for auto-switch), score_ratio={wit_score_ratio:.2f} (threshold={config.WIT_TRAINING_SCORE_RATIO_THRESHOLD}), training_score={training_score} (min={min_score}), rainbows={rainbow_count}. REASON: no guard triggered.")
+        else:
+          debug(f"[ENERGY_MGMT] → STICK WITH TRAINING: No compelling alternatives (wit effective energy: {wit_energy_value})")
     elif current_energy < config.SKIP_TRAINING_ENERGY:
       if state["date_event_available"]:
         action.func = "do_recreation"
@@ -444,12 +446,22 @@ class Strategy:
     return action
 
   def validate_state(self, state):
+    invalid_reasons = []
     if state["year"] == "":
-      return False
+      invalid_reasons.append("year empty")
     if state["turn"] == -1:
-      return False
+      invalid_reasons.append("turn unreadable (-1)")
     if all(value == -1 for value in state["current_stats"].values()):
-      return False
+      invalid_reasons.append("current_stats unreadable (all -1)")
     if state["criteria"] == "":
+      invalid_reasons.append("criteria empty")
+
+    if invalid_reasons:
+      warning(
+        f"Invalid state, will retry. Reasons: {invalid_reasons} "
+        f"(year={state.get('year')!r}, turn={state.get('turn')!r}, "
+        f"criteria={state.get('criteria')!r})"
+      )
       return False
+
     return True

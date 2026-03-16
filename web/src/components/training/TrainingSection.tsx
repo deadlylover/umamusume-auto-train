@@ -23,6 +23,7 @@ export default function TrainingSection({ config, updateConfig }: Props) {
     hint_hunting_enabled,
     hint_hunting_weights,
     wit_training_score_ratio_threshold,
+    wit_training_min_energy,
     rainbow_support_weight_addition,
     non_max_support_weight,
     scenario_gimmick_weight,
@@ -94,6 +95,17 @@ export default function TrainingSection({ config, updateConfig }: Props) {
                 "wit_training_score_ratio_threshold",
                 e.target.valueAsNumber
               )
+            }
+          />
+          <span>wit_training_min_energy</span>
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step={5}
+            value={wit_training_min_energy}
+            onChange={(e) =>
+              updateConfig("wit_training_min_energy", e.target.valueAsNumber)
             }
           />
           <span>rainbow_support_weight_addition</span>

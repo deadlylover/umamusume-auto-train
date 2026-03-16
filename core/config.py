@@ -35,6 +35,7 @@ def reload_config(print_config=True):
     load_var('NEVER_REST_ENERGY', config["never_rest_energy"])
     load_var('SKIP_INFIRMARY_UNLESS_MISSING_ENERGY', config["skip_infirmary_unless_missing_energy"])
     load_var('WIT_TRAINING_SCORE_RATIO_THRESHOLD', config["wit_training_score_ratio_threshold"])
+    load_var('WIT_TRAINING_MIN_ENERGY', config.get("wit_training_min_energy", 70))
     load_var('MINIMUM_CONDITION_SEVERITY', config["minimum_condition_severity"])
     load_var('PREFERRED_POSITION', config["preferred_position"])
     load_var('ENABLE_POSITIONS_BY_RACE', config["enable_positions_by_race"])

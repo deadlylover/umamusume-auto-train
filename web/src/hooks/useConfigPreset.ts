@@ -100,6 +100,19 @@ export function useConfigPreset() {
     });
   };
 
+  const copyPreset = (targetIndex: number, sourceConfig: Config) => {
+    setPresetStorage((prev) => {
+      const newPresets = [...prev.presets];
+      newPresets[targetIndex] = {
+        name: sourceConfig.config_name || `Preset ${targetIndex + 1}`,
+        config: sourceConfig,
+      };
+      const next = { ...prev, presets: newPresets };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   return {
     activeIndex,
     activeConfig: presetStorage.presets[activeIndex]?.config,
@@ -107,5 +120,6 @@ export function useConfigPreset() {
     setActiveIndex,
     updatePreset,
     savePreset,
+    copyPreset,
   };
 }

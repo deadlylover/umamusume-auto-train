@@ -21,6 +21,7 @@ from collections import defaultdict
 from math import floor
 
 aptitudes_cache = {}
+_last_turn = None  # Best-effort fallback when OCR intermittently fails.
 def clear_aptitudes_cache():
   global aptitudes_cache
   aptitudes_cache = {}
@@ -155,6 +156,11 @@ def collect_training_state(state_object, training_function_name):
     training_results = filter_training_lock(training_results)
     if config.VERBOSE_ACTIONS:
       info(f"[STATE] Training scan complete. Options: {list(training_results.keys())}")
+    if not training_results:
+      warning(
+        "[STATE] Training scan returned no usable results. "
+        "This may indicate training hover/positions or OCR regions are misaligned."
+      )
     device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(1), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
     state_object["training_results"] = training_results
 
@@ -442,6 +448,7 @@ def get_mood(attempts=0):
 
 # Check turn
 def get_turn():
+  global _last_turn
   if device_action.locate("assets/buttons/race_day_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX):
     return "Race Day"
   elif device_action.locate("assets/ura/ura_race_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX):
@@ -450,6 +457,7 @@ def get_turn():
     region_xywh = constants.UNITY_TURN_REGION
   else:
     region_xywh = constants.TURN_REGION
+  # TODO: add template-matching fallback for digits "1" and "7" when OCR fails.
   turn = device_action.screenshot(region_xywh=region_xywh)
   turn = enhance_image_for_ocr(turn, resize_factor=2)
   turn_text = extract_allowed_text(turn, allowlist="0123456789")
@@ -470,7 +478,12 @@ def get_turn():
   digits_only = re.sub(r"[^\d]", "", turn_text)
 
   if digits_only:
-    return int(digits_only)
+    _last_turn = int(digits_only)
+    return _last_turn
+
+  if _last_turn is not None:
+    warning(f"[STATE] Turn OCR failed; using last known turn {_last_turn}.")
+    return _last_turn
 
   return -1
 
@@ -484,6 +497,8 @@ def get_current_year():
     year = enhanced_screenshot(region_xywh)
     text = extract_text(year, allowlist=constants.OCR_DATE_RECOGNITION_SET)
     text = text.replace("Pre Debut", "Pre-Debut")
+    text = text.replace("Early- ", "Early ").replace("Late- ", "Late ")
+    text = re.sub(r"\s+", " ", text).strip()
     debug(f"Year text: {text}")
     if text in constants.TIMELINE:
       break

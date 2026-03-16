@@ -34,3 +34,4 @@ data/region_overrides.json
 # Reference copies and agent docs
 ref/
 AGENTS.md
+CLAUDE.md

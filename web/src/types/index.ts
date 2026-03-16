@@ -19,6 +19,7 @@ export const ConfigSchema = z.object({
   hint_hunting_weights: StatSchema,
   use_skip_claw_machine: z.boolean(),
   wit_training_score_ratio_threshold: z.number(),
+  wit_training_min_energy: z.number(),
   rainbow_support_weight_addition: z.number(),
   non_max_support_weight: z.number(),
   scenario_gimmick_weight: z.number(),

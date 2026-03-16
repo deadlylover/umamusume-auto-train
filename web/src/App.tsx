@@ -41,6 +41,7 @@ function App() {
     setActiveIndex,
     savePreset,
     updatePreset,
+    copyPreset,
   } = useConfigPreset();
   const { config, setConfig, saveConfig } = useConfig(
     activeConfig ?? defaultConfig
@@ -119,14 +120,27 @@ function App() {
 
         <div className="flex flex-wrap gap-4 mb-8">
           {presets.map((_, i) => (
-            <Button
-              key={_.name + i}
-              variant={i === activeIndex ? "default" : "outline"}
-              size="sm"
-              onClick={() => setActiveIndex(i)}
-            >
-              Preset {i + 1}
-            </Button>
+            <div key={_.name + i} className="relative group flex items-center">
+              <Button
+                variant={i === activeIndex ? "default" : "outline"}
+                size="sm"
+                onClick={() => setActiveIndex(i)}
+              >
+                {_.name || `Preset ${i + 1}`}
+              </Button>
+              {i !== activeIndex && (
+                <button
+                  title={`Copy current preset here`}
+                  className="absolute -top-2 -right-2 hidden group-hover:flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs leading-none shadow"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    copyPreset(i, config);
+                  }}
+                >
+                  ⎘
+                </button>
+              )}
+            </div>
           ))}
         </div>
 
