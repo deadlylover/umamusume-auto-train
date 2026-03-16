@@ -243,6 +243,7 @@ def get_support_card_data(threshold=0.8):
   if constants.SCENARIO_NAME == "unity":
     region_xywh = constants.UNITY_SUPPORT_CARD_ICON_REGION
   elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    # Accept both names while Trackblazer remains the canonical scenario key.
     region_xywh = constants.MANT_SUPPORT_CARD_ICON_REGION
   else:
     region_xywh = constants.SUPPORT_CARD_ICON_REGION

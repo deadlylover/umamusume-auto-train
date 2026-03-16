@@ -104,7 +104,6 @@ class RegionAdjusterApp:
     if not self.region_order:
       raise RuntimeError("No OCR regions are available for adjustment.")
 
-    self.scenario_filter_var = tk.StringVar(value=SCENARIO_FILTERS["generic_mant"])
     self.selected_name = self.region_order[0]
     self.screenshot = None
     self.overlay_image = None
@@ -129,6 +128,8 @@ class RegionAdjusterApp:
     y = max(0, min(margin, screen_height - window_height - margin))
     self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
     self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+    self.scenario_filter_var = tk.StringVar(self.root, value=SCENARIO_FILTERS["generic_mant"])
+    self.show_all_templates_var = tk.BooleanVar(value=False)
 
     self.root.columnconfigure(0, weight=1)
     self.root.rowconfigure(1, weight=1)
@@ -193,6 +194,7 @@ class RegionAdjusterApp:
       wraplength=220,
       justify="left",
     ).pack(anchor="w", pady=(0, 8))
+    self.coord_var = tk.StringVar()
     filter_row = tk.Frame(side_panel, bg="#232323")
     filter_row.pack(fill=tk.X, pady=(0, 6))
     tk.Label(filter_row, text="Scenario", fg="white", bg="#232323").pack(side=tk.LEFT)
@@ -248,7 +250,6 @@ class RegionAdjusterApp:
     tk.Label(side_panel, textvariable=self.template_info_var, fg="#bbbbbb", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 8))
     tk.Button(side_panel, text="Test Template (Space)", command=self.test_selected_template).pack(fill=tk.X, pady=(0, 10))
 
-    self.coord_var = tk.StringVar()
     tk.Label(side_panel, textvariable=self.coord_var, fg="#9feaf9", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
 
     step_container = tk.Frame(side_panel, bg="#232323")
@@ -586,6 +587,8 @@ class RegionAdjusterApp:
     self._render_overlay()
 
   def _refresh_template_list(self):
+    if not hasattr(self, "template_listbox"):
+      return
     if self.show_all_templates_var.get():
       templates = self.all_templates
     else:

@@ -60,8 +60,9 @@ ENERGY_REGION = convert_xyxy_to_xywh(ENERGY_BBOX)
 UNITY_ENERGY_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (287, 120, -150, -920))
 UNITY_ENERGY_REGION = convert_xyxy_to_xywh(UNITY_ENERGY_BBOX)
 
-# Trackblazer / MANT placeholders start from the standard layout and can be tuned
-# independently in the region adjuster as scenario captures are gathered.
+# Trackblazer is the canonical scenario name. These MANT-prefixed constants are
+# legacy placeholders kept for compatibility and can be tuned independently in
+# the region adjuster as more Trackblazer captures are gathered.
 MANT_ENERGY_BBOX = ENERGY_BBOX
 MANT_ENERGY_REGION = ENERGY_REGION
 

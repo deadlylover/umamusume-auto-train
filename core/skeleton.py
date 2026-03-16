@@ -60,6 +60,7 @@ unity_templates = {
 
 cached_unity_templates = cache_templates(unity_templates)
 
+
 def detect_scenario():
   screenshot = device_action.screenshot()
   details_templates = [
@@ -81,8 +82,13 @@ def detect_scenario():
     return "default"
   sleep(0.5)
   screenshot = device_action.screenshot()
-  # find files in assets/scenario_banner make them the same as templates
-  scenario_banners = {f.split(".")[0]: f"assets/scenario_banner/{f}" for f in os.listdir("assets/scenario_banner") if f.endswith(".png")}
+  # Banner filenames are the scenario keys. Use "trackblazer" as the canonical name;
+  # "MANT" is only legacy shorthand in some code/comments.
+  scenario_banners = {
+    os.path.splitext(filename)[0]: f"assets/scenario_banner/{filename}"
+    for filename in sorted(os.listdir("assets/scenario_banner"))
+    if filename.endswith(".png")
+  }
   matches = device_action.multi_match_templates(scenario_banners, screenshot=screenshot, stop_after_first_match=True)
   device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(1))
   sleep(0.5)
