@@ -2,7 +2,13 @@
 
 ## Status
 
-Proposed.
+Implemented for the current macOS / BlueStacks Air path.
+
+Follow-up work may still be needed for:
+
+- additional direct host-input cleanup in less-used flows
+- optional full ADB screenshot mode
+- more explicit config/UI controls around coordinate mapping
 
 This repo already contains partial ADB support in the current branch, in `ref/`, and in the upstream emulator cutoff tag, but it is not yet treated as the primary control path for macOS automation. Recent debugging shows screenshot/template matching can succeed while host-side mouse injection fails to land on the requested coordinates during screen sharing. This PRD defines the work to promote ADB from "optional legacy toggle" to a supported, observable, preferred control backend.
 
@@ -221,6 +227,53 @@ Recommended rollout:
 - switch only the input backend first
 - treat full ADB screenshot mode as optional follow-up unless a coordinate mismatch appears
 
+### 6a. Implemented Coordinate Mapping Decision
+
+The working fix for BlueStacks Air was:
+
+- keep the existing host screenshot path unchanged
+- keep the existing OCR region / region-adjuster coordinate system unchanged
+- map only the final ADB input target into emulator coordinates
+
+Why:
+
+- the current macOS capture and OCR tooling is already calibrated against the host screenshot path
+- normalizing or rescaling the screenshot path broke OCR-region behavior and invalidated region-adjuster expectations
+- the actual mismatch was between host-recognized click coordinates and the emulator's ADB input coordinate space
+
+Implemented mapping approach:
+
+- take the resolved host click target in the current `GAME_WINDOW_BBOX` coordinate space
+- convert that target into a relative `(x, y)` position inside the active BlueStacks viewport
+- read live ADB device/display geometry from:
+  - `wm size`
+  - device screenshot dimensions
+- choose an ADB input frame that matches the current host viewport orientation
+- map the relative host point into that ADB frame
+- send the mapped ADB tap, not the raw host coordinate
+
+Observed case that motivated this:
+
+- host screenshot/debug path reported a Retina-backed full-screen image (`3840x2160`)
+- host monitor logical space was `1920x1080`
+- ADB device space was also `1920x1080`
+- raw host click targets were therefore correct for recognition/debug, but incorrect for direct ADB taps unless remapped through the active game window bounds
+
+Diagnostic requirement for this mapping:
+
+- every ADB tap should record:
+  - raw host target
+  - mapped ADB target
+  - host game-window bounds
+  - relative target inside the viewport
+  - ADB frame size/source
+  - whether orientation was swapped
+
+Non-goal for this phase:
+
+- do not rescale the main macOS screenshot path just to satisfy ADB input
+- do not invalidate OCR calibration data that already works in the host capture path
+
 ### 7. Console / Review Integration
 
 Semi-auto review mode must show backend-specific planned execution details.
@@ -312,6 +365,7 @@ Reason:
 
 - BlueStacks Air ADB endpoint may not always be available or stable.
 - Host screenshots plus ADB input may still expose coordinate-space mismatches if emulator content scaling differs from host capture.
+- Mapping from host viewport space to ADB space depends on the active game window bounds being accurate; stale bounds/offsets will still misplace taps.
 - Silent fallback to host input would hide the real failure and recreate the same debugging problem.
 - Some flows may still contain direct pyautogui usage outside the wrapper and need cleanup.
 
@@ -328,6 +382,8 @@ Reason:
 - The operator console shows the active backend and device id.
 - When ADB is unavailable, the bot reports a backend initialization failure clearly.
 - Review/debug snapshots make it obvious whether planned input will use ADB or host input.
+- ADB click diagnostics include both the host-recognized target and the mapped emulator tap target.
+- On BlueStacks Air, scenario-selection taps use mapped ADB coordinates and can land on the detected Details button without altering the working host screenshot/OCR path.
 - No main gameplay flow requires direct host-pointer injection when ADB mode is active.
 - The implementation does not regress existing Windows / non-ADB flows.
 
@@ -338,6 +394,7 @@ Reason:
 3. Add canonical backend runtime state and startup resolution.
 4. Refactor `init_adb()` to return structured connection status.
 5. Surface backend state in runtime snapshot and operator console.
+6. Keep host screenshots unchanged; map host click targets into ADB device space using the active BlueStacks viewport and live ADB display geometry.
 6. Audit for direct host-input calls that bypass the wrapper.
 7. Add explicit fallback policy for ADB init failure.
 8. Verify `check_only`, `preview_clicks`, and `execute` all show the resolved backend.

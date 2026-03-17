@@ -6,6 +6,7 @@ except ImportError:
 
 import numpy as np
 import core.bot as bot
+import utils.constants as constants
 from utils.log import info, debug, error, debug_window, args
 from utils.constants import name_of_variable
 
@@ -80,6 +81,14 @@ def _collect_device_display_info():
     info_map["wm_density"] = _parse_density(str(device.shell("wm density")).strip())
   except Exception as exc:
     info_map["wm_density_error"] = str(exc)
+  try:
+    device_screenshot = np.array(device.screenshot(error_ok=False))
+    info_map["screenshot_size"] = {
+      "width": int(device_screenshot.shape[1]),
+      "height": int(device_screenshot.shape[0]),
+    }
+  except Exception as exc:
+    info_map["screenshot_size_error"] = str(exc)
   return info_map
 
 
@@ -118,6 +127,80 @@ def _record_runtime_error(message, connected=None):
 
 def get_last_input_debug():
   return dict(LAST_INPUT_DEBUG or {})
+
+
+def _resolve_adb_input_frame_size():
+  display_info = (LAST_STATUS or {}).get("display_info") or {}
+  screenshot_size = display_info.get("screenshot_size") or {}
+  physical_size = (display_info.get("wm_size") or {}).get("physical_size") or {}
+
+  width = int(screenshot_size.get("width") or physical_size.get("width") or 0)
+  height = int(screenshot_size.get("height") or physical_size.get("height") or 0)
+  source = "screenshot_size" if screenshot_size else "physical_size"
+
+  if width <= 0 or height <= 0:
+    return 0, 0, source, False
+
+  game_left, game_top, game_right, game_bottom = constants.GAME_WINDOW_BBOX
+  host_width = max(1, int(game_right - game_left))
+  host_height = max(1, int(game_bottom - game_top))
+  host_is_portrait = host_height >= host_width
+  target_is_portrait = height >= width
+  orientation_swapped = False
+
+  if host_is_portrait != target_is_portrait:
+    width, height = height, width
+    orientation_swapped = True
+
+  return width, height, source, orientation_swapped
+
+
+def map_host_to_adb_target(x, y):
+  game_left, game_top, game_right, game_bottom = constants.GAME_WINDOW_BBOX
+  host_width = max(1, int(game_right - game_left))
+  host_height = max(1, int(game_bottom - game_top))
+  frame_width, frame_height, frame_source, orientation_swapped = _resolve_adb_input_frame_size()
+
+  relative_x = (float(x) - float(game_left)) / float(host_width)
+  relative_y = (float(y) - float(game_top)) / float(host_height)
+  clamped_x = min(max(relative_x, 0.0), 1.0)
+  clamped_y = min(max(relative_y, 0.0), 1.0)
+
+  mapped_x = int(round(clamped_x * frame_width)) if frame_width > 0 else int(round(x))
+  mapped_y = int(round(clamped_y * frame_height)) if frame_height > 0 else int(round(y))
+
+  if frame_width > 0:
+    mapped_x = min(max(mapped_x, 0), frame_width - 1)
+  if frame_height > 0:
+    mapped_y = min(max(mapped_y, 0), frame_height - 1)
+
+  return {
+    "host_target": [int(x), int(y)],
+    "host_game_window_bbox": [int(game_left), int(game_top), int(game_right), int(game_bottom)],
+    "host_game_window_size": [int(host_width), int(host_height)],
+    "relative_target": [round(relative_x, 6), round(relative_y, 6)],
+    "relative_target_clamped": [round(clamped_x, 6), round(clamped_y, 6)],
+    "adb_frame_size": [int(frame_width), int(frame_height)],
+    "adb_frame_source": frame_source,
+    "orientation_swapped": orientation_swapped,
+    "mapped_target": [int(mapped_x), int(mapped_y)],
+  }
+
+
+def map_host_swipe_to_adb_target(x1, y1, x2, y2):
+  start_mapping = map_host_to_adb_target(x1, y1)
+  end_mapping = map_host_to_adb_target(x2, y2)
+  return {
+    "start": start_mapping,
+    "end": end_mapping,
+    "mapped_start": list(start_mapping["mapped_target"]),
+    "mapped_end": list(end_mapping["mapped_target"]),
+    "adb_frame_size": list(start_mapping["adb_frame_size"]),
+    "adb_frame_source": start_mapping["adb_frame_source"],
+    "orientation_swapped": bool(
+      start_mapping["orientation_swapped"] or end_mapping["orientation_swapped"]
+    ),
+  }
 
 
 def init_adb():
@@ -176,15 +259,19 @@ def click(x, y):
     _record_runtime_error("ADB click requested without an initialized device.", connected=False)
     return False
   try:
+    mapping = map_host_to_adb_target(x, y)
+    mapped_x, mapped_y = mapping["mapped_target"]
     LAST_INPUT_DEBUG = {
       "backend": "adb",
       "action": "tap",
-      "target": [int(x), int(y)],
+      "target": [int(mapped_x), int(mapped_y)],
+      "host_target": [int(x), int(y)],
       "device_id": bot.device_id or DEFAULT_DEVICE_ID,
       "display_info": (LAST_STATUS or {}).get("display_info") or _collect_device_display_info(),
+      "mapping": mapping,
     }
-    info(f"[INPUT][ADB] Tap target=({x}, {y}) diagnostics={LAST_INPUT_DEBUG}")
-    device.click(x, y)
+    info(f"[INPUT][ADB] Tap host_target=({x}, {y}) mapped_target=({mapped_x}, {mapped_y}) diagnostics={LAST_INPUT_DEBUG}")
+    device.click(mapped_x, mapped_y)
     return True
   except Exception as exc:
     _record_runtime_error(f"ADB click failed: {exc}")
@@ -197,17 +284,27 @@ def swipe(x1, y1, x2, y2, duration=0.3):
     _record_runtime_error("ADB swipe requested without an initialized device.", connected=False)
     return False
   try:
+    mapping = map_host_swipe_to_adb_target(x1, y1, x2, y2)
+    mapped_x1, mapped_y1 = mapping["mapped_start"]
+    mapped_x2, mapped_y2 = mapping["mapped_end"]
     LAST_INPUT_DEBUG = {
       "backend": "adb",
       "action": "swipe",
-      "start": [int(x1), int(y1)],
-      "end": [int(x2), int(y2)],
+      "start": [int(mapped_x1), int(mapped_y1)],
+      "end": [int(mapped_x2), int(mapped_y2)],
+      "host_start": [int(x1), int(y1)],
+      "host_end": [int(x2), int(y2)],
       "duration": float(duration),
       "device_id": bot.device_id or DEFAULT_DEVICE_ID,
       "display_info": (LAST_STATUS or {}).get("display_info") or _collect_device_display_info(),
+      "mapping": mapping,
     }
-    info(f"[INPUT][ADB] Swipe start=({x1}, {y1}) end=({x2}, {y2}) duration={duration} diagnostics={LAST_INPUT_DEBUG}")
-    device.swipe(x1, y1, x2, y2, duration)
+    info(
+      f"[INPUT][ADB] Swipe host_start=({x1}, {y1}) host_end=({x2}, {y2}) "
+      f"mapped_start=({mapped_x1}, {mapped_y1}) mapped_end=({mapped_x2}, {mapped_y2}) "
+      f"duration={duration} diagnostics={LAST_INPUT_DEBUG}"
+    )
+    device.swipe(mapped_x1, mapped_y1, mapped_x2, mapped_y2, duration)
     return True
   except Exception as exc:
     _record_runtime_error(f"ADB swipe failed: {exc}")

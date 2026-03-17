@@ -10,6 +10,7 @@ from PIL import Image, ImageTk
 import core.bot as bot
 import core.config as config
 import utils.constants as constants
+import utils.device_action_wrapper as device_action
 from core.platform.window_focus import focus_target_window
 from core.region_adjuster import run_region_adjuster_session
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
@@ -118,7 +119,7 @@ class OperatorConsole:
     root.columnconfigure(1, weight=1)
     root.rowconfigure(2, weight=1)
 
-    top = tk.Frame(root, bg="#101418", padx=14, pady=12)
+    top = tk.Frame(root, bg="#101418", padx=8, pady=4)
     top.grid(row=0, column=0, columnspan=2, sticky="ew")
     for col in range(5):
       top.columnconfigure(col, weight=1)
@@ -134,7 +135,7 @@ class OperatorConsole:
     self._backend_value = self._make_stat(top, 8, "Backend")
     self._device_value = self._make_stat(top, 9, "Device")
 
-    actions = tk.Frame(root, bg="#101418", padx=14, pady=0)
+    actions = tk.Frame(root, bg="#101418", padx=8, pady=0)
     actions.grid(row=1, column=0, columnspan=2, sticky="ew")
     self._bot_button = tk.Button(actions, text="Start Bot", command=self._toggle_bot)
     self._bot_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -144,7 +145,8 @@ class OperatorConsole:
     self._resume_button.pack(side=tk.LEFT, padx=(0, 8))
     self._continue_button = tk.Button(actions, text="Continue (F2)", command=self._continue_review)
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
-    tk.Button(actions, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT)
+    tk.Button(actions, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
+    tk.Button(actions, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "preview_clicks", "execute"):
       tk.Radiobutton(
@@ -172,10 +174,10 @@ class OperatorConsole:
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
 
-    left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=12, pady=12)
-    left.grid(row=2, column=0, sticky="nsew", padx=(14, 8), pady=12)
+    left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
+    left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
     right = tk.Frame(root, bg="#101418")
-    right.grid(row=2, column=1, sticky="nsew", padx=(8, 14), pady=12)
+    right.grid(row=2, column=1, sticky="nsew", padx=(4, 8), pady=6)
     right.columnconfigure(0, weight=1)
     right.rowconfigure(1, weight=1)
     right.rowconfigure(3, weight=0)
@@ -188,10 +190,11 @@ class OperatorConsole:
         anchor="w",
         fg="#9aa4ad",
         bg="#192028",
-        padx=10,
-        pady=8,
+        padx=8,
+        pady=3,
+        font=("Helvetica", 10),
       )
-      label.pack(fill=tk.X, pady=3)
+      label.pack(fill=tk.X, pady=1)
       self._phase_labels[phase] = label
 
     self._message_value = tk.StringVar(value="")
@@ -202,7 +205,7 @@ class OperatorConsole:
     tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=1, sticky="e")
     self._summary_text = scrolledtext.ScrolledText(right, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._summary_text.grid(row=1, column=0, sticky="nsew", pady=(4, 10))
+    self._summary_text.grid(row=1, column=0, sticky="nsew", pady=(2, 6))
 
     training_header = tk.Frame(right, bg="#101418")
     training_header.grid(row=2, column=0, sticky="ew")
@@ -210,7 +213,7 @@ class OperatorConsole:
     tk.Label(training_header, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e")
     self._training_text = scrolledtext.ScrolledText(right, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._training_text.grid(row=3, column=0, sticky="nsew", pady=(4, 10))
+    self._training_text.grid(row=3, column=0, sticky="nsew", pady=(2, 6))
 
     ocr_header = tk.Frame(right, bg="#101418")
     ocr_header.grid(row=4, column=0, sticky="ew")
@@ -218,7 +221,7 @@ class OperatorConsole:
     tk.Label(ocr_header, text="OCR Debug", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(ocr_header, text="Copy OCR Debug", command=self._copy_ocr_debug).grid(row=0, column=1, sticky="e")
     ocr_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
-    ocr_panel.grid(row=5, column=0, sticky="nsew", pady=(4, 10))
+    ocr_panel.grid(row=5, column=0, sticky="nsew", pady=(2, 6))
 
     ocr_list_frame = tk.Frame(ocr_panel, bg="#101418")
     self._ocr_debug_listbox = tk.Listbox(
@@ -258,11 +261,11 @@ class OperatorConsole:
   def _make_stat(self, parent, column, title):
     row = 0 if column < 5 else 1
     actual_column = column if column < 5 else column - 5
-    frame = tk.Frame(parent, bg="#151b22", padx=10, pady=8)
-    frame.grid(row=row, column=actual_column, sticky="ew", padx=4, pady=4)
-    tk.Label(frame, text=title, fg="#8a949e", bg="#151b22").pack(anchor="w")
+    frame = tk.Frame(parent, bg="#151b22", padx=6, pady=3)
+    frame.grid(row=row, column=actual_column, sticky="ew", padx=2, pady=2)
+    tk.Label(frame, text=title, fg="#8a949e", bg="#151b22", font=("Helvetica", 9)).pack(anchor="w")
     value = tk.StringVar(value="-")
-    tk.Label(frame, textvariable=value, fg="white", bg="#151b22", font=("Helvetica", 12, "bold")).pack(anchor="w")
+    tk.Label(frame, textvariable=value, fg="white", bg="#151b22", font=("Helvetica", 10, "bold")).pack(anchor="w")
     return value
 
   def _poll_queue(self):
@@ -568,6 +571,39 @@ class OperatorConsole:
       return
 
     self._last_saved_geometry = geometry
+
+  def _launch_asset_creator(self):
+    from core.region_adjuster.asset_creator import AssetCreatorWindow
+    context = {}
+    screenshot = None
+    capture_bbox = None
+    try:
+      runtime_state = bot.get_runtime_state()
+      snapshot = runtime_state.get("snapshot") or {}
+      state_summary = snapshot.get("state_summary") or {}
+      context["scenario"] = snapshot.get("scenario_name") or constants.SCENARIO_NAME or ""
+      context["turn"] = snapshot.get("turn_label") or ""
+      context["energy"] = snapshot.get("energy_label") or ""
+      context["phase"] = runtime_state.get("phase") or ""
+      action = (snapshot.get("selected_action") or {}).get("func")
+      if action:
+        context["action"] = action
+      for key in ("mood", "speed", "stamina", "power", "guts", "int"):
+        val = state_summary.get(key)
+        if val:
+          context[key] = str(val)
+      game_window_bbox = tuple(int(v) for v in constants.GAME_WINDOW_BBOX)
+      capture_bbox = game_window_bbox
+      full_screenshot = device_action.screenshot()
+      if full_screenshot is not None:
+        left, top, right, bottom = game_window_bbox
+        screenshot = Image.fromarray(full_screenshot[top:bottom, left:right]).convert("RGBA")
+        context["capture_space"] = "game_window_bbox"
+        context["game_window_bbox"] = str(game_window_bbox)
+    except Exception:
+      pass
+    context = {k: v for k, v in context.items() if v}
+    AssetCreatorWindow(parent=self._root, screenshot=screenshot, context=context, capture_bbox=capture_bbox)
 
   def _launch_adjuster(self):
     threading.Thread(target=self._launch_adjuster_background, daemon=True).start()

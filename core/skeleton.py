@@ -97,15 +97,48 @@ def _scenario_banner_templates():
   }
 
 
+def _scenario_banner_template_scales():
+  base_scale = float(device_action._effective_template_scale())
+  candidates = [1.0, base_scale * 0.9, base_scale, base_scale * 1.1, base_scale * 1.2]
+  unique_scales = []
+  seen = set()
+  for scale in candidates:
+    rounded = round(float(scale), 3)
+    if rounded in seen or rounded <= 0:
+      continue
+    seen.add(rounded)
+    unique_scales.append(float(rounded))
+  return unique_scales
+
+
 def _match_scenario_banners(screenshot, threshold=0.8):
   match_counts = {}
+  match_debug = {}
   first_match = ""
+  first_match_score = -1.0
+  template_scales = _scenario_banner_template_scales()
   for raw_name, template_path in _scenario_banner_templates().items():
-    matches = device_action.match_template(template_path, screenshot, threshold=threshold)
-    match_counts[raw_name] = len(matches)
-    if not first_match and matches:
+    best_match = device_action.best_template_match(
+      template_path,
+      screenshot,
+      template_scales=template_scales,
+    )
+    best_score = round(best_match["score"], 4) if best_match is not None else None
+    passed_threshold = bool(best_match is not None and best_match["score"] >= threshold)
+    match_counts[raw_name] = 1 if passed_threshold else 0
+    match_debug[raw_name] = {
+      "threshold": threshold,
+      "best_live_score": best_score,
+      "passed_threshold": passed_threshold,
+      "match_location": best_match["location"] if best_match is not None else None,
+      "match_size": best_match["size"] if best_match is not None else None,
+      "best_match_scale": round(best_match["scale"], 3) if best_match is not None else None,
+      "template_scales_tested": template_scales,
+    }
+    if passed_threshold and best_match["score"] > first_match_score:
       first_match = raw_name
-  return first_match, match_counts
+      first_match_score = best_match["score"]
+  return first_match, match_counts, match_debug
 
 
 def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
@@ -140,7 +173,7 @@ def detect_scenario():
   def verify_details_opened():
     screenshot = device_action.screenshot()
     close_btn = device_action.best_template_match("assets/buttons/close_btn.png", screenshot)
-    banner_name, banner_counts = _match_scenario_banners(screenshot)
+    banner_name, banner_counts, banner_debug = _match_scenario_banners(screenshot)
     close_btn_score = round(close_btn["score"], 4) if close_btn is not None else None
     close_btn_passed = bool(close_btn is not None and close_btn["score"] >= 0.8)
     verified = close_btn_passed or any(count > 0 for count in banner_counts.values())
@@ -151,6 +184,7 @@ def detect_scenario():
       "close_btn_size": close_btn["size"] if close_btn is not None else None,
       "banner_first_match": banner_name,
       "banner_counts": banner_counts,
+      "banner_debug": banner_debug,
     }
     return verified, verification_details
 
@@ -193,7 +227,7 @@ def detect_scenario():
   sleep(0.5)
   screenshot = device_action.screenshot()
   debug_window(screenshot, save_name="scenario_detection_details")
-  raw_name, match_counts = _match_scenario_banners(screenshot)
+  raw_name, match_counts, match_debug = _match_scenario_banners(screenshot)
   update_startup_scan_snapshot(
     message="Scenario banner scan complete.",
     sub_phase="detect_scenario_match_banner",
@@ -201,7 +235,9 @@ def detect_scenario():
       _template_debug_entry(
         f"scenario_banner_{name}",
         f"assets/scenario_banner/{name}.png",
+        bbox_key="GAME_WINDOW_BBOX",
         parsed_value=count,
+        extra=match_debug.get(name),
       )
       for name, count in match_counts.items()
     ],
@@ -218,8 +254,12 @@ def detect_scenario():
         _template_debug_entry(
           f"scenario_banner_{name}",
           f"assets/scenario_banner/{name}.png",
+          bbox_key="GAME_WINDOW_BBOX",
           parsed_value=count,
-          extra={"canonical_name": _canonicalize_scenario_name(name)},
+          extra={
+            "canonical_name": _canonicalize_scenario_name(name),
+            **(match_debug.get(name) or {}),
+          },
         )
         for name, count in match_counts.items()
       ],

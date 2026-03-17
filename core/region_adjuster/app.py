@@ -141,8 +141,8 @@ class RegionAdjusterApp:
     self.root = tk.Tk()
     self.root.title("Uma OCR Region Adjuster")
     self.root.configure(background="#1f1f1f")
-    window_width = 1400
-    window_height = 900
+    window_width = 1500
+    window_height = 920
     self.root.geometry(f"{window_width}x{window_height}")
     screen_width = self.root.winfo_screenwidth()
     screen_height = self.root.winfo_screenheight()
@@ -163,23 +163,38 @@ class RegionAdjusterApp:
     self.capture_screenshot()
 
   def _build_layout(self):
+    # ---- Row 0: Compact toolbar ----
+    toolbar = tk.Frame(self.root, bg="#1f1f1f", padx=6, pady=4)
+    toolbar.grid(row=0, column=0, columnspan=6, sticky="ew")
+
     self.profile_notebook = None
     self._profile_tab_names: List[str] = []
     if self.profile_paths:
-      self.profile_notebook = ttk.Notebook(self.root)
-      self._install_hotkey_bindtag(self.profile_notebook)
-      self.profile_notebook.grid(row=0, column=0, columnspan=4, sticky="ew")
-      active_index = 0
-      for idx, name in enumerate(self.profile_paths.keys()):
-        frame = ttk.Frame(self.profile_notebook, height=1)
-        self._install_hotkey_bindtag(frame)
-        self.profile_notebook.add(frame, text=name)
-        self._profile_tab_names.append(name)
-        if name == self.active_profile:
-          active_index = idx
-      self.profile_notebook.select(active_index)
-      self.profile_notebook.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
+      tk.Label(toolbar, text="Profile:", fg="white", bg="#1f1f1f", font=("Helvetica", 10)).pack(side=tk.LEFT)
+      self._profile_var = tk.StringVar(value=self.active_profile)
+      profile_names = list(self.profile_paths.keys())
+      self._profile_tab_names = profile_names
+      profile_menu = tk.OptionMenu(
+        toolbar,
+        self._profile_var,
+        *profile_names,
+        command=self._on_profile_changed,
+      )
+      profile_menu.configure(bg="#3a3a3a", fg="white", highlightthickness=0, activebackground="#4a4a4a")
+      profile_menu["menu"].configure(bg="#3a3a3a", fg="white")
+      profile_menu.pack(side=tk.LEFT, padx=(4, 16))
 
+    # Right-side toolbar buttons (packed right-to-left)
+    tk.Button(toolbar, text="Close", command=self._on_close).pack(side=tk.RIGHT, padx=2)
+    tk.Button(toolbar, text="Save (Cmd+S)", command=self.save_overrides).pack(side=tk.RIGHT, padx=2)
+    tk.Button(toolbar, text="Screenshot (R)", command=self.capture_screenshot).pack(side=tk.RIGHT, padx=2)
+    tk.Button(toolbar, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.RIGHT, padx=2)
+
+    # ---- Content area ----
+    self.root.columnconfigure(0, weight=1)
+    self.root.rowconfigure(1, weight=1)
+
+    # Canvas (col 0)
     self.canvas = tk.Canvas(self.root, background="black", highlightthickness=0)
     self._install_hotkey_bindtag(self.canvas)
     self.canvas.grid(row=1, column=0, sticky="nsew")
@@ -188,9 +203,9 @@ class RegionAdjusterApp:
     self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
     self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
     self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
-
     self.canvas_image_id = self.canvas.create_image(0, 0, anchor="nw")
 
+    # Canvas scrollbars
     self.v_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
     self._install_hotkey_bindtag(self.v_scroll)
     self.v_scroll.grid(row=1, column=1, sticky="ns")
@@ -199,7 +214,8 @@ class RegionAdjusterApp:
     self.h_scroll.grid(row=2, column=0, sticky="ew")
     self.canvas.configure(xscrollcommand=self.h_scroll.set, yscrollcommand=self.v_scroll.set)
 
-    self.side_canvas = tk.Canvas(self.root, background="#232323", highlightthickness=0, width=320)
+    # ---- Left panel (scrollable) — regions + templates ----
+    self.side_canvas = tk.Canvas(self.root, background="#232323", highlightthickness=0, width=300)
     self._install_hotkey_bindtag(self.side_canvas)
     self.side_canvas.grid(row=1, column=2, rowspan=2, sticky="ns")
     self.side_scroll = tk.Scrollbar(self.root, orient="vertical", command=self.side_canvas.yview)
@@ -207,33 +223,32 @@ class RegionAdjusterApp:
     self.side_scroll.grid(row=1, column=3, rowspan=2, sticky="ns")
     self.side_canvas.configure(yscrollcommand=self.side_scroll.set)
 
-    side_panel = tk.Frame(self.side_canvas, bg="#232323", padx=12, pady=12)
-    self._install_hotkey_bindtag(side_panel)
-    self.side_window_id = self.side_canvas.create_window((0, 0), window=side_panel, anchor="nw")
-    side_panel.bind("<Configure>", self._on_side_panel_configure)
+    left_panel = tk.Frame(self.side_canvas, bg="#232323", padx=10, pady=8)
+    self._install_hotkey_bindtag(left_panel)
+    self.side_window_id = self.side_canvas.create_window((0, 0), window=left_panel, anchor="nw")
+    left_panel.bind("<Configure>", self._on_side_panel_configure)
     self.side_canvas.bind("<Configure>", self._on_side_canvas_configure)
 
-    tk.Label(side_panel, text="OCR Regions", fg="white", bg="#232323", font=("Helvetica", 12, "bold")).pack(anchor="w")
-    offset_text = self._format_offset_text()
+    tk.Label(left_panel, text="OCR Regions", fg="white", bg="#232323", font=("Helvetica", 12, "bold")).pack(anchor="w")
     tk.Label(
-      side_panel,
-      text=offset_text,
+      left_panel,
+      text=self._format_offset_text(),
       fg="#f0c674",
       bg="#232323",
-      wraplength=220,
+      wraplength=260,
       justify="left",
-    ).pack(anchor="w", pady=(2, 8))
+    ).pack(anchor="w", pady=(2, 4))
     tk.Label(
-      side_panel,
+      left_panel,
       text=self._format_display_scaling_text(),
       fg="#9feaf9",
       bg="#232323",
-      wraplength=220,
+      wraplength=260,
       justify="left",
-    ).pack(anchor="w", pady=(0, 8))
+    ).pack(anchor="w", pady=(0, 6))
     self.coord_var = tk.StringVar()
-    filter_row = tk.Frame(side_panel, bg="#232323")
-    filter_row.pack(fill=tk.X, pady=(0, 6))
+    filter_row = tk.Frame(left_panel, bg="#232323")
+    filter_row.pack(fill=tk.X, pady=(0, 4))
     tk.Label(filter_row, text="Scenario", fg="white", bg="#232323").pack(side=tk.LEFT)
     filter_menu = tk.OptionMenu(
       filter_row,
@@ -245,8 +260,8 @@ class RegionAdjusterApp:
     filter_menu["menu"].configure(bg="#3a3a3a", fg="white")
     filter_menu.pack(side=tk.RIGHT, fill=tk.X, expand=True)
     self.region_listbox = tk.Listbox(
-      side_panel,
-      height=25,
+      left_panel,
+      height=20,
       width=28,
       exportselection=False,
       selectmode=tk.SINGLE,
@@ -255,13 +270,14 @@ class RegionAdjusterApp:
     )
     self._install_hotkey_bindtag(self.region_listbox)
     self.region_listbox.bind("<<ListboxSelect>>", self._on_region_select)
-    self.region_listbox.pack(fill=tk.BOTH, expand=False, pady=(6, 10))
+    self.region_listbox.pack(fill=tk.BOTH, expand=False, pady=(4, 8))
     self._refresh_region_list()
 
-    tk.Label(side_panel, text="Templates", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    # Templates section
+    tk.Label(left_panel, text="Templates", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
     self.show_all_templates_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
-      side_panel,
+      left_panel,
       text="Show all templates",
       variable=self.show_all_templates_var,
       command=self._refresh_template_list,
@@ -272,7 +288,7 @@ class RegionAdjusterApp:
       activeforeground="white",
     ).pack(anchor="w", pady=(0, 4))
     self.template_listbox = tk.Listbox(
-      side_panel,
+      left_panel,
       height=4,
       width=28,
       exportselection=False,
@@ -283,21 +299,29 @@ class RegionAdjusterApp:
     self._install_hotkey_bindtag(self.template_listbox)
     self.template_listbox.bind("<<ListboxSelect>>", self._on_template_select)
     self.template_listbox.pack(fill=tk.BOTH, expand=False)
-    self.template_preview_label = tk.Label(side_panel, bg="#1b1b1b", relief=tk.GROOVE)
+    self.template_preview_label = tk.Label(left_panel, bg="#1b1b1b", relief=tk.GROOVE)
     self.template_preview_label.pack(fill=tk.BOTH, expand=False, pady=(6, 4))
     self.template_info_var = tk.StringVar()
-    tk.Label(side_panel, textvariable=self.template_info_var, fg="#bbbbbb", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 8))
-    tk.Button(side_panel, text="Test Template (Space)", command=self.test_selected_template).pack(fill=tk.X, pady=(0, 10))
+    tk.Label(left_panel, textvariable=self.template_info_var, fg="#bbbbbb", bg="#232323", wraplength=260, justify="left").pack(anchor="w", pady=(0, 6))
+    tk.Button(left_panel, text="Test Template (Space)", command=self.test_selected_template).pack(fill=tk.X, pady=(0, 8))
 
-    tk.Label(side_panel, textvariable=self.coord_var, fg="#9feaf9", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
-    tk.Label(side_panel, text="Selected Region Preview", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
-    self.region_preview_label = tk.Label(side_panel, bg="#1b1b1b", relief=tk.GROOVE, text="No region preview", fg="#9aa4ad")
+    # Region preview
+    tk.Label(left_panel, textvariable=self.coord_var, fg="#9feaf9", bg="#232323", wraplength=260, justify="left").pack(anchor="w", pady=(0, 6))
+    tk.Label(left_panel, text="Selected Region Preview", fg="white", bg="#232323", font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(0, 4))
+    self.region_preview_label = tk.Label(left_panel, bg="#1b1b1b", relief=tk.GROOVE, text="No region preview", fg="#9aa4ad")
     self.region_preview_label.pack(fill=tk.BOTH, expand=False, pady=(0, 4))
     self.region_preview_info_var = tk.StringVar(value="")
-    tk.Label(side_panel, textvariable=self.region_preview_info_var, fg="#bbbbbb", bg="#232323", wraplength=220, justify="left").pack(anchor="w", pady=(0, 10))
+    tk.Label(left_panel, textvariable=self.region_preview_info_var, fg="#bbbbbb", bg="#232323", wraplength=260, justify="left").pack(anchor="w", pady=(0, 4))
 
-    step_container = tk.Frame(side_panel, bg="#232323")
-    step_container.pack(anchor="w", pady=(0, 10))
+    # ---- Right panel (non-scrollable) — controls + status ----
+    right_panel = tk.Frame(self.root, bg="#232323", padx=10, pady=8)
+    self._install_hotkey_bindtag(right_panel)
+    right_panel.grid(row=1, column=4, rowspan=2, sticky="nsew")
+    self.root.columnconfigure(4, weight=0, minsize=250)
+
+    # Step size
+    step_container = tk.Frame(right_panel, bg="#232323")
+    step_container.pack(anchor="w", pady=(0, 8))
     tk.Label(step_container, text="Step (px)", fg="white", bg="#232323").pack(side=tk.LEFT)
     self.step_var = tk.IntVar(value=1)
     for value in (1, 5, 10, 25):
@@ -313,9 +337,29 @@ class RegionAdjusterApp:
         selectcolor="#5d5d5d",
       ).pack(side=tk.LEFT, padx=2)
 
+    # Movement
+    move_frame = tk.Frame(right_panel, bg="#232323")
+    move_frame.pack(anchor="center", pady=(0, 8))
+    tk.Button(move_frame, text="\u25b2", width=6, command=lambda: self.move_selected(0, -self._step_size())).grid(row=0, column=1, pady=2)
+    tk.Button(move_frame, text="\u25c0", width=6, command=lambda: self.move_selected(-self._step_size(), 0)).grid(row=1, column=0, padx=2)
+    tk.Button(move_frame, text="\u25b6", width=6, command=lambda: self.move_selected(self._step_size(), 0)).grid(row=1, column=2, padx=2)
+    tk.Button(move_frame, text="\u25bc", width=6, command=lambda: self.move_selected(0, self._step_size())).grid(row=2, column=1, pady=2)
+
+    # Resize
+    resize_frame = tk.LabelFrame(right_panel, text="Resize", fg="white", bg="#232323", bd=1, relief=tk.GROOVE, labelanchor="n")
+    resize_frame.configure(highlightbackground="#484848")
+    resize_frame.pack(fill=tk.X, pady=(0, 8))
+    tk.Button(resize_frame, text="Wider", command=lambda: self.resize_selected(dw=self._step_size())).grid(row=0, column=0, padx=4, pady=4, sticky="ew")
+    tk.Button(resize_frame, text="Narrower", command=lambda: self.resize_selected(dw=-self._step_size())).grid(row=0, column=1, padx=4, pady=4, sticky="ew")
+    tk.Button(resize_frame, text="Taller", command=lambda: self.resize_selected(dh=self._step_size())).grid(row=1, column=0, padx=4, pady=4, sticky="ew")
+    tk.Button(resize_frame, text="Shorter", command=lambda: self.resize_selected(dh=-self._step_size())).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
+    for i in range(2):
+      resize_frame.columnconfigure(i, weight=1)
+
+    # Show training positions
     self.show_training_positions_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
-      side_panel,
+      right_panel,
       text="Show training positions",
       variable=self.show_training_positions_var,
       command=self._render_overlay,
@@ -324,28 +368,12 @@ class RegionAdjusterApp:
       selectcolor="#1b1b1b",
       activebackground="#232323",
       activeforeground="white",
-    ).pack(anchor="w", pady=(0, 10))
+    ).pack(anchor="w", pady=(0, 8))
 
-    move_frame = tk.Frame(side_panel, bg="#232323")
-    move_frame.pack(anchor="center", pady=(5, 10))
-    tk.Button(move_frame, text="▲", width=6, command=lambda: self.move_selected(0, -self._step_size())).grid(row=0, column=1, pady=2)
-    tk.Button(move_frame, text="◀", width=6, command=lambda: self.move_selected(-self._step_size(), 0)).grid(row=1, column=0, padx=2)
-    tk.Button(move_frame, text="▶", width=6, command=lambda: self.move_selected(self._step_size(), 0)).grid(row=1, column=2, padx=2)
-    tk.Button(move_frame, text="▼", width=6, command=lambda: self.move_selected(0, self._step_size())).grid(row=2, column=1, pady=2)
-
-    resize_frame = tk.LabelFrame(side_panel, text="Resize", fg="white", bg="#232323", bd=1, relief=tk.GROOVE, labelanchor="n")
-    resize_frame.configure(highlightbackground="#484848")
-    resize_frame.pack(fill=tk.X, pady=(0, 10))
-    tk.Button(resize_frame, text="Wider", command=lambda: self.resize_selected(dw=self._step_size())).grid(row=0, column=0, padx=4, pady=4, sticky="ew")
-    tk.Button(resize_frame, text="Narrower", command=lambda: self.resize_selected(dw=-self._step_size())).grid(row=0, column=1, padx=4, pady=4, sticky="ew")
-    tk.Button(resize_frame, text="Taller", command=lambda: self.resize_selected(dh=self._step_size())).grid(row=1, column=0, padx=4, pady=4, sticky="ew")
-    tk.Button(resize_frame, text="Shorter", command=lambda: self.resize_selected(dh=-self._step_size())).grid(row=1, column=1, padx=4, pady=4, sticky="ew")
-    for i in range(2):
-      resize_frame.columnconfigure(i, weight=1)
-
-    bounds_frame = tk.LabelFrame(side_panel, text="Window Bounds", fg="white", bg="#232323", bd=1, relief=tk.GROOVE, labelanchor="n")
+    # Window bounds
+    bounds_frame = tk.LabelFrame(right_panel, text="Window Bounds", fg="white", bg="#232323", bd=1, relief=tk.GROOVE, labelanchor="n")
     bounds_frame.configure(highlightbackground="#484848")
-    bounds_frame.pack(fill=tk.X, pady=(0, 10))
+    bounds_frame.pack(fill=tk.X, pady=(0, 8))
     self.bound_vars = {}
     for idx, key in enumerate(["x", "y", "width", "height"]):
       tk.Label(bounds_frame, text=key.capitalize(), fg="white", bg="#232323").grid(row=idx, column=0, sticky="w", padx=4, pady=2)
@@ -355,21 +383,16 @@ class RegionAdjusterApp:
       self._install_hotkey_bindtag(entry)
       entry.grid(row=idx, column=1, sticky="e", padx=4, pady=2)
       self.bound_vars[key] = var
-
     tk.Button(bounds_frame, text="Set Bounds", command=self.apply_window_bounds).grid(row=4, column=0, columnspan=2, pady=(6, 2))
 
-    tk.Button(side_panel, text="Refresh Screenshot", command=self.capture_screenshot).pack(fill=tk.X, pady=(5, 5))
-    tk.Button(side_panel, text="Save Overrides", command=self.save_overrides).pack(fill=tk.X, pady=(0, 5))
-    tk.Button(side_panel, text="Close", command=self._on_close).pack(fill=tk.X)
-
+    # Status
     self.status_var = tk.StringVar()
-    status_label = tk.Label(side_panel, textvariable=self.status_var, fg="#d0d0d0", bg="#232323", wraplength=220, justify="left")
-    status_label.pack(fill=tk.X, pady=(10, 0))
+    tk.Label(right_panel, textvariable=self.status_var, fg="#d0d0d0", bg="#232323", wraplength=220, justify="left").pack(fill=tk.X, pady=(8, 0))
 
     window_names_text = ", ".join(self.window_names) if self.window_names else "(no candidates)"
     self.window_search_var = tk.StringVar(value=f"Looking for window names: {window_names_text}")
     tk.Label(
-      side_panel,
+      right_panel,
       textvariable=self.window_search_var,
       fg="#8fb8ff",
       bg="#232323",
@@ -379,13 +402,15 @@ class RegionAdjusterApp:
 
     self.window_dims_var = tk.StringVar(value="Detecting BlueStacks window size...")
     tk.Label(
-      side_panel,
+      right_panel,
       textvariable=self.window_dims_var,
       fg="#bbbbbb",
       bg="#232323",
       wraplength=220,
       justify="left",
-    ).pack(fill=tk.X, pady=(0, 0))
+    ).pack(fill=tk.X)
+
+    # Final setup
     self._set_coord_text()
     self._update_region_preview()
     self._refresh_template_list()
@@ -462,6 +487,10 @@ class RegionAdjusterApp:
     if hasattr(self, "status_var"):
       self.status_var.set(f"Switched to profile '{profile_name}' using {path}.")
     self._mark_dirty(False)
+
+  def _on_profile_changed(self, selected_name):
+    if selected_name in self.profile_paths:
+      self._switch_profile(selected_name)
 
   def _on_profile_tab_changed(self, _event):
     if self.profile_notebook is None:
@@ -1188,6 +1217,21 @@ class RegionAdjusterApp:
     self._dirty = dirty
     title = "Uma OCR Region Adjuster*" if dirty else "Uma OCR Region Adjuster"
     self.root.title(title)
+
+  def _launch_asset_creator(self):
+    from core.region_adjuster.asset_creator import AssetCreatorWindow
+    context = {}
+    if self.selected_name:
+      entry = self.regions.get(self.selected_name)
+      if entry:
+        context["selected_region"] = self.selected_name
+        context["region_kind"] = entry["kind"]
+        context["region_coords"] = str(entry["value"])
+      templates = self.template_map.get(self.selected_name)
+      if templates:
+        context["mapped_templates"] = ", ".join(templates)
+    context["overrides_path"] = str(self.overrides_path)
+    AssetCreatorWindow(parent=self.root, screenshot=self.screenshot, context=context)
 
   def _on_close(self):
     if self._dirty:
