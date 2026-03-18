@@ -879,6 +879,18 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   return "executed"
 
 
+def update_pre_action_phase(state_obj, action, message=None, reasoning_notes=None, sub_phase=None):
+  is_race_action = getattr(action, "func", None) == "do_race"
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="pre_race" if is_race_action else "pre_training",
+    message=message or ("Preparing race decision." if is_race_action else "Preparing pre-training decision."),
+    reasoning_notes=reasoning_notes,
+    sub_phase=sub_phase or ("evaluate_race_action" if is_race_action else "evaluate_training_action"),
+  )
+
+
 def maybe_review_skill_purchase(state_obj, current_action_count, race_check=False):
   context = get_skill_purchase_context(state_obj, current_action_count, race_check=race_check)
   if not context.get("should_check"):
@@ -891,7 +903,7 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
   update_operator_snapshot(
     state_obj,
     skill_action,
-    phase="evaluating_strategy",
+    phase="pre_race" if race_check else "pre_training",
     message="Skill purchase review ready.",
     reasoning_notes=reasoning_notes,
     sub_phase="evaluate_skill_purchase",
@@ -1108,6 +1120,11 @@ def career_lobby(dry_run_turn=False):
         action["is_race_day"] = True
         action["year"] = state_obj["year"]
         info(f"Race Day")
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Race day detected. Preparing pre-race decision.",
+        )
         race_day_result = run_action_with_review(
           state_obj,
           action,
@@ -1130,6 +1147,11 @@ def career_lobby(dry_run_turn=False):
         action["race_name"] = "any"
         action["race_image_path"] = "assets/ui/match_track.png"
         action["race_mission_available"] = True
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Mission race candidate detected. Preparing pre-race decision.",
+        )
         skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
         if skill_result in ("failed", "previewed"):
           continue
@@ -1155,6 +1177,11 @@ def career_lobby(dry_run_turn=False):
       if "race_name" in action.options:
         action.func = "do_race"
         info(f"Taking action: {action.func}")
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Scheduled race candidate detected. Preparing pre-race decision.",
+        )
         skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
         if skill_result in ("failed", "previewed"):
           continue
@@ -1181,6 +1208,11 @@ def career_lobby(dry_run_turn=False):
         action["race_image_path"] = "assets/ui/match_track.png"
         action["prioritize_missions_over_g1"] = config.PRIORITIZE_MISSIONS_OVER_G1
         action["race_mission_available"] = True
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Mission race candidate detected. Preparing pre-race decision.",
+        )
         skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
         if skill_result in ("failed", "previewed"):
           continue
@@ -1206,6 +1238,11 @@ def career_lobby(dry_run_turn=False):
         action = strategy.decide_race_for_goal(state_obj, action)
         if action.func == "do_race":
           info(f"Taking action: {action.func}")
+          update_pre_action_phase(
+            state_obj,
+            action,
+            message="Goal race candidate detected. Preparing pre-race decision.",
+          )
           skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
           if skill_result in ("failed", "previewed"):
             continue
@@ -1227,6 +1264,11 @@ def career_lobby(dry_run_turn=False):
 
       update_operator_snapshot(phase="collecting_training_state", message="Scanning all trainings.")
       state_obj = collect_training_state(state_obj, training_function_name)
+      update_pre_action_phase(
+        state_obj,
+        action,
+        message="Training scan complete. Preparing pre-training decision.",
+      )
 
       # Review skill buying separately so OCR and planned clicks can be inspected.
       skill_result = maybe_review_skill_purchase(state_obj, action_count)
@@ -1258,6 +1300,11 @@ def career_lobby(dry_run_turn=False):
         info("Skipping turn, retrying...")
       else:
         info(f"Taking action: {action.func}")
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Reviewing final pre-action state.",
+        )
 
         # go to skill buy function if we come across a do_race function, conditions are handled in buy_skill
         if dry_run_turn:
@@ -1287,6 +1334,11 @@ def career_lobby(dry_run_turn=False):
             sleep(1)
             info(f"Trying action: {function_name}")
             action.func = function_name
+            update_pre_action_phase(
+              state_obj,
+              action,
+              message=f"Retry candidate ready: {function_name}.",
+            )
             # go to skill buy function if we come across a do_race function, conditions are handled in buy_skill
             retry_result = run_action_with_review(
               state_obj,
