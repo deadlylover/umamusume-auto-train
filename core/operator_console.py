@@ -70,6 +70,8 @@ class OperatorConsole:
     self._continue_button = None
     self._window_geometry = self.DEFAULT_GEOMETRY
     self._last_saved_geometry = None
+    self._geometry_persist_ready = False
+    self._geometry_debounce_id = None
 
   def start(self):
     if self._root is not None:
@@ -79,13 +81,16 @@ class OperatorConsole:
       self._root = tk.Tk()
       self._root.title("Uma Operator Console")
       self._root.configure(bg="#101418")
-      self._root.geometry(self._window_geometry)
       self._root.attributes("-topmost", False)
       self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
       self._build_layout()
       self._root.update_idletasks()
-      self._apply_window_geometry()
+      self._root.geometry(self._window_geometry)
       self._root.bind("<Configure>", self._on_window_configure)
+      # Apply position after mainloop starts — macOS WM ignores pre-mainloop positioning
+      self._root.after(0, self._deferred_apply_geometry)
+      self._root.after(500, self._deferred_apply_geometry)
+      self._root.after(1500, self._enable_geometry_persist)
       self._poll_queue()
     except Exception as exc:  # pragma: no cover
       error(f"Operator console failed to start: {exc}")
@@ -113,9 +118,11 @@ class OperatorConsole:
       return
     state = str(self._root.state())
     if state == "withdrawn":
+      self._geometry_persist_ready = False
       self._load_window_geometry()
-      self._apply_window_geometry()
       self._root.deiconify()
+      self._root.after(0, self._deferred_apply_geometry)
+      self._root.after(1000, self._enable_geometry_persist)
     elif state == "iconic":
       self._root.deiconify()
     self._root.lift()
@@ -210,6 +217,7 @@ class OperatorConsole:
       activebackground="#101418",
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Button(secondary_controls, text="Save Position", command=self._save_and_test_position).pack(side=tk.LEFT, padx=(12, 0))
 
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
@@ -587,18 +595,51 @@ class OperatorConsole:
     if isinstance(geometry, str) and geometry.strip():
       self._window_geometry = geometry.strip()
 
+  def _deferred_apply_geometry(self):
+    if self._root is None:
+      return
+    geometry = self._window_geometry or self.DEFAULT_GEOMETRY
+    self._root.geometry(geometry)
+
   def _apply_window_geometry(self):
     if self._root is None:
       return
     geometry = self._window_geometry or self.DEFAULT_GEOMETRY
     self._root.geometry(geometry)
 
+  def _enable_geometry_persist(self):
+    self._geometry_persist_ready = True
+
+  def _save_and_test_position(self):
+    if self._root is None:
+      return
+    geometry = self._root.geometry()
+    saved = self._persist_config_value("debug.operator_console.window_geometry", geometry)
+    if saved:
+      self._last_saved_geometry = geometry
+      self._message_value.set(f"Saved: {geometry}. Testing restore...")
+      self._root.geometry("+0+0")
+      self._root.after(600, lambda: self._test_restore_position(geometry))
+    else:
+      self._message_value.set("Failed to save position.")
+
+  def _test_restore_position(self, geometry):
+    if self._root is None:
+      return
+    self._root.geometry(geometry)
+    self._message_value.set(f"Restored: {geometry}")
+
   def _on_window_configure(self, event):
     if self._root is None or event.widget is not self._root:
       return
-    self._persist_window_geometry()
+    if not self._geometry_persist_ready:
+      return
+    if self._geometry_debounce_id is not None:
+      self._root.after_cancel(self._geometry_debounce_id)
+    self._geometry_debounce_id = self._root.after(500, self._persist_window_geometry)
 
   def _persist_window_geometry(self):
+    self._geometry_debounce_id = None
     if self._root is None:
       return
     if str(self._root.state()) in {"withdrawn", "iconic"}:

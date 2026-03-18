@@ -32,11 +32,10 @@ def deep_merge(template: dict, user_config: dict) -> dict:
       debug(f"Adding new key: {key} = {value}")
       updated_config[key] = value
 
-  # remove unused key
+  # preserve user-defined keys not in template (e.g. operator_console settings)
   for key in user_config:
     if key not in template:
-      debug(f"Removing deprecated key: {key}")
-      is_changed = True
+      updated_config[key] = user_config[key]
 
   return updated_config
 
