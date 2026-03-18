@@ -3,6 +3,7 @@ import operator
 import re
 import cv2
 import time
+from pathlib import Path
 
 from utils.log import info, warning, error, debug, debug_window, args
 
@@ -22,6 +23,7 @@ from math import floor
 
 aptitudes_cache = {}
 _last_turn = None  # Best-effort fallback when OCR intermittently fails.
+_runtime_ocr_debug = {}
 APTITUDE_BOX_RATIOS = {
   "surface_turf": (0.0, 0.00, 0.25, 0.33),
   "surface_dirt": (0.25, 0.00, 0.25, 0.33),
@@ -34,6 +36,42 @@ APTITUDE_BOX_RATIOS = {
   "style_late": (0.50, 0.66, 0.25, 0.33),
   "style_end": (0.75, 0.66, 0.25, 0.33),
 }
+
+
+def _save_training_scan_debug_image(image, training_name, label):
+  if image is None or getattr(image, "size", 0) == 0:
+    return ""
+  runtime_debug_dir = Path("logs/runtime_debug")
+  runtime_debug_dir.mkdir(parents=True, exist_ok=True)
+  safe_training = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(training_name))
+  safe_label = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(label))
+  filename = runtime_debug_dir / f"scan_{int(time.time() * 1000)}_{safe_training}_{safe_label}.png"
+  image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+  cv2.imwrite(str(filename), image_bgr)
+  return str(filename)
+
+
+def clear_runtime_ocr_debug():
+  global _runtime_ocr_debug
+  _runtime_ocr_debug = {}
+
+
+def snapshot_runtime_ocr_debug():
+  return {key: dict(value) for key, value in _runtime_ocr_debug.items()}
+
+
+def record_runtime_ocr_debug(field, image=None, extra=None, image_path=None):
+  global _runtime_ocr_debug
+  entry = dict(_runtime_ocr_debug.get(field, {}))
+  if image_path:
+    entry["search_image_path"] = image_path
+  elif image is not None:
+    saved_path = _save_training_scan_debug_image(image, "state", field)
+    if saved_path:
+      entry["search_image_path"] = saved_path
+  if extra:
+    entry.update(extra)
+  _runtime_ocr_debug[field] = entry
 
 def clear_aptitudes_cache():
   global aptitudes_cache
@@ -57,6 +95,7 @@ def _close_full_stats():
 
 def collect_main_state():
   global aptitudes_cache
+  clear_runtime_ocr_debug()
   debug("Start state collection. Collecting stats.")
   #??? minimum_mood_junior_year = constants.MOOD_LIST.index(config.MINIMUM_MOOD_JUNIOR_YEAR)
 
@@ -132,6 +171,7 @@ def collect_main_state():
           warning("[STATE] Training button not visible after closing full stats.")
     elif config.VERBOSE_ACTIONS:
       warning("[STATE] Full stats button not found; skipping aptitudes.")
+  state_object["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
   debug(f"Main state collection done.")
   return state_object
 
@@ -144,6 +184,7 @@ def collect_training_state(state_object, training_function_name):
     info(f"[STATE] Collecting training state using '{training_function_name}'.")
   if device_action.locate_and_click("assets/buttons/training_btn.png", min_search_time=get_secs(5), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
     training_results = CleanDefaultDict()
+    training_scan_debug = CleanDefaultDict()
     sleep(0.6)
     # Hold/drag across training buttons to reveal info without confirming training.
     hold_active = False
@@ -176,6 +217,34 @@ def collect_training_state(state_object, training_function_name):
           debug(sample_info)
       training_results[name].update(get_training_data(year=state_object["year"], check_stat_gains=check_stat_gains))
       training_results[name].update(get_support_card_data())
+      if constants.SCENARIO_NAME == "unity":
+        failure_region = constants.UNITY_FAILURE_REGION
+        support_region = constants.UNITY_SUPPORT_CARD_ICON_REGION
+        stat_region = constants.UNITY_STAT_GAINS_REGION
+      elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        failure_region = constants.MANT_FAILURE_REGION
+        support_region = constants.MANT_SUPPORT_CARD_ICON_REGION
+        stat_region = constants.MANT_STAT_GAINS_REGION
+      else:
+        failure_region = constants.FAILURE_REGION
+        support_region = constants.SUPPORT_CARD_ICON_REGION
+        stat_region = constants.URA_STAT_GAINS_REGION
+
+      training_scan_debug[name]["failure"] = _save_training_scan_debug_image(
+        device_action.screenshot(region_xywh=failure_region),
+        name,
+        "failure",
+      )
+      training_scan_debug[name]["support_icons"] = _save_training_scan_debug_image(
+        device_action.screenshot(region_xywh=support_region),
+        name,
+        "support_icons",
+      )
+      training_scan_debug[name]["stat_gains"] = _save_training_scan_debug_image(
+        device_action.screenshot(region_xywh=stat_region),
+        name,
+        "stat_gains",
+      )
 
     if hold_active:
       pyautogui_actions.moveTo(constants.SAFE_SPACE_MOUSE_POS[0], constants.SAFE_SPACE_MOUSE_POS[1], duration=0.1)
@@ -193,6 +262,7 @@ def collect_training_state(state_object, training_function_name):
       )
     device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(1), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
     state_object["training_results"] = training_results
+    state_object["training_scan_debug"] = training_scan_debug
 
   debug(f"State object: {state_object}")
   return state_object
@@ -445,28 +515,87 @@ def get_stat_gains(year=1, attempts=0, enable_debug=True, show_screenshot=False,
   return stat_gains
 
 
+def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None):
+  enhanced = enhance_image_for_ocr(image, resize_factor=4, binarize_threshold=None)
+  threshold_values = thresholds or [0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
+
+  if "%" in allowlist:
+    for threshold in threshold_values:
+      text = extract_text(enhanced, allowlist=allowlist, threshold=threshold)
+      matches = re.findall(r"\d{1,3}", text or "")
+      for match in matches:
+        value = int(match)
+        if 0 <= value <= 100:
+          return value
+    return -1
+
+  for threshold in threshold_values:
+    value = extract_number(enhanced, threshold=threshold)
+    if value != -1:
+      return value
+  return -1
+
+
 def get_failure_chance(region_xywh=None):
   if region_xywh is None:
     raise ValueError("region_xywh is required")
   screenshot = device_action.screenshot(region_xywh=region_xywh)
-  match = device_action.match_template("assets/ui/fail_percent_symbol.png", screenshot, grayscale=True, threshold=0.75)
-  if not match:
-    error("Failed to match percent symbol, cannot produce failure percentage result.")
-    return -1
-  else:
-    x, y, w, h = match[0]
+  record_runtime_ocr_debug("training_failure", image=screenshot)
+  template_scales = [0.9, 1.0, 1.1, 1.26, 1.4]
+  best_failure_match = None
+  for template_path in constants.FAILURE_PERCENT_TEMPLATES:
+    best_match = device_action.best_template_match(
+      template_path,
+      screenshot,
+      grayscale=True,
+      template_scales=template_scales,
+    )
+    if best_match is None or best_match["score"] < 0.7:
+      continue
+    if best_failure_match is None or best_match["score"] > best_failure_match["score"]:
+      best_failure_match = dict(best_match)
+      best_failure_match["template_path"] = template_path
+
+  if best_failure_match:
+    x, y = best_failure_match["location"]
+    w, h = best_failure_match["size"]
+    record_runtime_ocr_debug(
+      "training_failure",
+      extra={
+        "matched_template": best_failure_match["template_path"],
+        "best_match_score": round(best_failure_match["score"], 4),
+        "best_match_scale": round(best_failure_match["scale"], 3),
+        "best_match_location": best_failure_match["location"],
+        "best_match_size": best_failure_match["size"],
+      },
+    )
     x = x + region_xywh[0]
     y = y + region_xywh[1]
-  failure_cropped = device_action.screenshot(region_ltrb=(x - 40, y - 3, x, y + h + 3))
-  enhanced = enhance_image_for_ocr(failure_cropped, resize_factor=4, binarize_threshold=None)
 
-  threshold=0.7
-  failure_text = extract_number(enhanced, threshold=threshold)
-  while failure_text == -1 and threshold > 0.2:
-    threshold=threshold-0.1
-    failure_text = extract_number(enhanced, threshold=threshold)
+    digit_crop_width = max(40, int(round(w * 4.5)))
+    vertical_padding = max(3, int(round(h * 0.25)))
+    failure_cropped = device_action.screenshot(
+      region_ltrb=(
+        max(0, x - digit_crop_width),
+        max(0, y - vertical_padding),
+        x,
+        y + h + vertical_padding,
+      )
+    )
+    failure_text = _extract_failure_ocr_value(failure_cropped)
+    if failure_text != -1:
+      return failure_text
 
-  return failure_text
+    debug("Failure percent digit crop OCR failed, falling back to whole failure region OCR.")
+  else:
+    debug("Failed to match percent symbol, falling back to whole failure region OCR.")
+
+  fallback_text = _extract_failure_ocr_value(screenshot, allowlist="0123456789%")
+  if fallback_text != -1:
+    return fallback_text
+
+  error("Failed to read failure percentage from training region.")
+  return -1
 
 def get_mood(attempts=0):
   if attempts >= 10:
@@ -498,6 +627,7 @@ def get_turn():
     region_xywh = constants.TURN_REGION
   # TODO: add template-matching fallback for digits "1" and "7" when OCR fails.
   turn = device_action.screenshot(region_xywh=region_xywh)
+  record_runtime_ocr_debug("turn", image=turn)
   turn = enhance_image_for_ocr(turn, resize_factor=2)
   turn_text = extract_allowed_text(turn, allowlist="0123456789")
   debug(f"Turn text: {turn_text}")
@@ -536,6 +666,7 @@ def get_current_year():
     region_xywh = constants.YEAR_REGION
   for i in range(10):
     year = enhanced_screenshot(region_xywh)
+    record_runtime_ocr_debug("year", image=np.array(year.convert("RGB")))
     text = extract_text(year, allowlist=constants.OCR_DATE_RECOGNITION_SET)
     text = text.replace("Pre Debut", "Pre-Debut")
     text = text.replace("Early- ", "Early ").replace("Late- ", "Late ")
@@ -557,6 +688,7 @@ def get_criteria():
   else:
     region_xywh = constants.CRITERIA_REGION
   img = enhanced_screenshot(region_xywh)
+  record_runtime_ocr_debug("criteria", image=np.array(img.convert("RGB")))
   text = extract_text(img)
   debug(f"Criteria text: {text}")
   return text
@@ -617,6 +749,7 @@ def get_current_stats(turn, enable_debug=True):
 def get_aptitudes():
   aptitudes={}
   image = device_action.screenshot(region_xywh=constants.FULL_STATS_APTITUDE_REGION)
+  record_runtime_ocr_debug("full_stats_aptitudes", image=image)
   if not device_action.locate("assets/buttons/close_btn.png", min_search_time=get_secs(2), region_ltrb=constants.GAME_WINDOW_BBOX):
     if config.VERBOSE_ACTIONS:
       warning("[APT] Close button not detected; retrying full stats screenshot.")
@@ -627,6 +760,7 @@ def get_aptitudes():
   for key, (xr, yr, wr, hr) in APTITUDE_BOX_RATIOS.items():
     x, y, ww, hh = int(xr*w), int(yr*h), int(wr*w), int(hr*h)
     cropped_image = np.array(image[y:y+hh, x:x+ww])
+    record_runtime_ocr_debug(f"aptitude_{key}", image=cropped_image)
     matches = device_action.multi_match_templates(constants.APTITUDE_IMAGES, cropped_image, stop_after_first_match=True)
     for name, match in matches.items():
       if match:
@@ -672,6 +806,7 @@ def get_energy_level(threshold=0.85):
       )
       screenshot = device_action.screenshot(region_xywh=expanded_region)
       region_xywh = expanded_region
+  record_runtime_ocr_debug("energy", image=screenshot)
 
   right_bar_match = device_action.match_template("assets/ui/energy_bar_right_end_part.png", screenshot, threshold)
   # longer energy bars get more round at the end

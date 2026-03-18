@@ -493,13 +493,15 @@ def _resolve_template_path(template):
   return ""
 
 
-def _best_template_score(template_path, crop):
+def _best_template_score(template_path, crop, grayscale=False, template_scales=None):
   if crop is None or crop.size == 0:
     return None
 
   best_match = device_action.best_template_match(
     template_path,
     crop,
+    grayscale=grayscale,
+    template_scales=template_scales,
   )
   if best_match is None:
     return None
@@ -512,6 +514,12 @@ def _best_template_score(template_path, crop):
 
 
 def _capture_debug_crop(entry):
+  if entry.get("search_image_path"):
+    template_path = _resolve_template_path(entry.get("template"))
+    if template_path:
+      entry["template_image_path"] = template_path
+    return entry
+
   bbox = entry.get("bbox_xyxy")
   region = entry.get("region_xywh")
   try:
@@ -534,7 +542,12 @@ def _capture_debug_crop(entry):
   template_path = _resolve_template_path(entry.get("template"))
   if template_path:
     entry["template_image_path"] = template_path
-    best_score = _best_template_score(template_path, crop)
+    best_score = _best_template_score(
+      template_path,
+      crop,
+      grayscale=bool(entry.get("grayscale", False)),
+      template_scales=entry.get("template_scales"),
+    )
     if best_score is not None:
       if isinstance(best_score, dict):
         entry["best_match_score"] = best_score["score"]
@@ -555,6 +568,18 @@ def _enrich_ocr_debug_entries(entries):
       entry = _capture_debug_crop(entry)
     enriched.append(entry)
   return enriched
+
+
+def _apply_runtime_ocr_debug(entry, state_obj):
+  if not isinstance(state_obj, dict):
+    return entry
+  runtime_debug = state_obj.get("ocr_runtime_debug", {}) or {}
+  field_debug = runtime_debug.get(entry.get("field"), {}) or {}
+  if field_debug:
+    entry.update({k: v for k, v in field_debug.items() if v not in (None, "")})
+    if field_debug.get("matched_template"):
+      entry["template"] = field_debug["matched_template"]
+  return entry
 
 
 def _base_ocr_debug_entries(state_obj):
@@ -594,7 +619,7 @@ def _base_ocr_debug_entries(state_obj):
         "parsed_value": missing_keys,
       }
     )
-  return entries
+  return [_apply_runtime_ocr_debug(entry, state_obj) for entry in entries]
 
 
 def _planned_clicks_for_action(action):
@@ -646,13 +671,46 @@ def _ocr_debug_for_action(state_obj, action):
   entries = _base_ocr_debug_entries(state_obj)
   if not hasattr(action, "func"):
     return entries
-  if action.func == "do_training":
-    scenario_name = constants.SCENARIO_NAME or "default"
+  scenario_name = constants.SCENARIO_NAME or "default"
+  has_training_context = bool(action.get("available_trainings")) if hasattr(action, "get") else False
+  if not has_training_context and isinstance(state_obj, dict):
+    has_training_context = bool(state_obj.get("training_results"))
+  if action.func == "do_training" or has_training_context:
+    selected_training_name = action.get("training_name") if hasattr(action, "get") else None
+    if not selected_training_name and hasattr(action, "get"):
+      available_trainings = action.get("available_trainings", {}) or {}
+      if available_trainings:
+        selected_training_name = next(iter(available_trainings))
+    if not selected_training_name and isinstance(state_obj, dict):
+      training_results = state_obj.get("training_results", {}) or {}
+      if training_results:
+        selected_training_name = next(iter(training_results))
+    training_scan_debug = {}
+    if isinstance(state_obj, dict):
+      training_scan_debug = (state_obj.get("training_scan_debug", {}) or {}).get(selected_training_name, {}) or {}
     entries.extend(
       [
-        _region_debug_entry("training_failure", "UNITY_FAILURE_REGION" if scenario_name == "unity" else "MANT_FAILURE_REGION" if scenario_name == "trackblazer" else "FAILURE_REGION"),
-        _region_debug_entry("training_support_icons", "UNITY_SUPPORT_CARD_ICON_REGION" if scenario_name == "unity" else "MANT_SUPPORT_CARD_ICON_REGION" if scenario_name == "trackblazer" else "SUPPORT_CARD_ICON_REGION"),
-        _region_debug_entry("training_stat_gains", "UNITY_STAT_GAINS_REGION" if scenario_name == "unity" else "MANT_STAT_GAINS_REGION" if scenario_name == "trackblazer" else "URA_STAT_GAINS_REGION"),
+        _region_debug_entry(
+          "training_failure",
+          "UNITY_FAILURE_REGION" if scenario_name == "unity" else "MANT_FAILURE_REGION" if scenario_name == "trackblazer" else "FAILURE_REGION",
+          extra={
+            "template": "assets/ui/fail_percent_symbol.png",
+            "grayscale": True,
+            "template_scales": [0.9, 1.0, 1.1, 1.26, 1.4],
+            "search_image_path": training_scan_debug.get("failure"),
+            "training_name": selected_training_name,
+          },
+        ),
+        _region_debug_entry(
+          "training_support_icons",
+          "UNITY_SUPPORT_CARD_ICON_REGION" if scenario_name == "unity" else "MANT_SUPPORT_CARD_ICON_REGION" if scenario_name == "trackblazer" else "SUPPORT_CARD_ICON_REGION",
+          extra={"search_image_path": training_scan_debug.get("support_icons"), "training_name": selected_training_name},
+        ),
+        _region_debug_entry(
+          "training_stat_gains",
+          "UNITY_STAT_GAINS_REGION" if scenario_name == "unity" else "MANT_STAT_GAINS_REGION" if scenario_name == "trackblazer" else "URA_STAT_GAINS_REGION",
+          extra={"search_image_path": training_scan_debug.get("stat_gains"), "training_name": selected_training_name},
+        ),
       ]
     )
   elif action.func == "do_race":
@@ -696,6 +754,22 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
   }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
+  if not available_trainings and isinstance(state_obj, dict):
+    raw_training_results = state_obj.get("training_results", {}) or {}
+    for training_name, training_data in raw_training_results.items():
+      ranked_trainings.append(
+        {
+          "name": training_name,
+          "score_tuple": None,
+          "failure": training_data.get("failure"),
+          "total_supports": training_data.get("total_supports"),
+          "total_rainbow_friends": None,
+          "total_friendship_increases": None,
+          "stat_gains": training_data.get("stat_gains"),
+          "unity_gauge_fills": training_data.get("unity_gauge_fills"),
+          "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+        }
+      )
   for training_name, training_data in available_trainings.items():
     ranked_trainings.append(
       {

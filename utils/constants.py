@@ -96,6 +96,12 @@ UNITY_FAILURE_REGION = convert_xyxy_to_xywh(UNITY_FAILURE_BBOX)
 MANT_FAILURE_BBOX = FAILURE_BBOX
 MANT_FAILURE_REGION = FAILURE_REGION
 
+FAILURE_PERCENT_TEMPLATES = [
+  "assets/ui/fail_percent_symbol.png",
+  "assets/ui/fail_percent_orange.png",
+  "assets/ui/fail_percent_red.png",
+]
+
 YEAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (107, 35, -530, -1020))
 YEAR_REGION = convert_xyxy_to_xywh(YEAR_BBOX)
 
