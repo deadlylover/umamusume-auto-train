@@ -847,19 +847,18 @@ def review_action_before_execution(state_obj, action, message="Review action bef
 def run_action_with_review(state_obj, action, review_message, pre_run_hook=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
   if not review_action_before_execution(state_obj, action, review_message, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks):
     return "failed"
-  execution_intent = bot.get_execution_intent()
+  execution_intent = _wait_for_execute_intent(
+    state_obj,
+    action,
+    message_prefix="Action review ready",
+    reasoning_notes="Use execute mode to commit clicks. Current view shows OCR/debug and planned click targets only.",
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  if execution_intent == "failed":
+    return "failed"
   if execution_intent != "execute":
-    update_operator_snapshot(
-      state_obj,
-      action,
-      phase="waiting_for_confirmation",
-      status="idle",
-      message=f"{execution_intent} mode active; action not executed.",
-      reasoning_notes="Use execute mode to commit clicks. Current view shows OCR/debug and planned click targets only.",
-      sub_phase=sub_phase,
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
     return "previewed"
   if pre_run_hook is not None:
     pre_run_hook()
@@ -919,19 +918,18 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
     planned_clicks=context.get("planned_clicks"),
   ):
     return "failed"
-  execution_intent = bot.get_execution_intent()
+  execution_intent = _wait_for_execute_intent(
+    state_obj,
+    skill_action,
+    message_prefix="Skill purchase review ready",
+    reasoning_notes=reasoning_notes,
+    sub_phase="preview_skill_purchase",
+    ocr_debug=context.get("ocr_debug"),
+    planned_clicks=context.get("planned_clicks"),
+  )
+  if execution_intent == "failed":
+    return "failed"
   if execution_intent != "execute":
-    update_operator_snapshot(
-      state_obj,
-      skill_action,
-      phase="waiting_for_confirmation",
-      status="idle",
-      message=f"{execution_intent} mode active; skill purchase not executed.",
-      reasoning_notes=reasoning_notes,
-      sub_phase="preview_skill_purchase",
-      ocr_debug=context.get("ocr_debug"),
-      planned_clicks=context.get("planned_clicks"),
-    )
     return "previewed"
   buy_skill(state_obj, current_action_count, race_check=race_check)
   update_operator_snapshot(
@@ -945,6 +943,48 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
     planned_clicks=context.get("planned_clicks"),
   )
   return "executed"
+
+
+def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  while True:
+    execution_intent = bot.get_execution_intent()
+    if execution_intent == "execute":
+      return execution_intent
+
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="waiting_for_confirmation",
+      status="idle",
+      message=f"{execution_intent} mode active; no action committed.",
+      reasoning_notes=(
+        f"{reasoning_notes or ''} "
+        "Switch to execute and press Continue to commit this action."
+      ).strip(),
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+
+    bot.begin_review_wait()
+    publish_runtime_state()
+    while bot.is_bot_running and not bot.stop_event.is_set():
+      if bot.review_event.wait(timeout=0.1):
+        break
+
+    if not bot.is_bot_running or bot.stop_event.is_set():
+      bot.cancel_review_wait()
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text=f"{message_prefix} interrupted by stop request.",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return "failed"
 
 def career_lobby(dry_run_turn=False):
   global last_state, action_count, non_match_count, scenario_detection_attempts
@@ -1092,21 +1132,25 @@ def career_lobby(dry_run_turn=False):
       else:
         info(f"Stable career screen matched, moving to state collection. anchor_counts={stable_anchor_counts}")
         if constants.SCENARIO_NAME == "":
-          scenario_detection_attempts += 1
-          scenario_name = detect_scenario()
-          if scenario_name:
-            constants.SCENARIO_NAME = scenario_name
-            info(f"Scenario confirmed at startup checkpoint: {scenario_name}")
-          elif scenario_detection_attempts >= MAX_SCENARIO_DETECTION_ATTEMPTS:
-            warning(
-              "Scenario detection failed repeatedly; continuing with generic/default logic for now. "
-              "Trackblazer-specific logic will stay inactive until a banner match succeeds."
-            )
+          if config.SKIP_SCENARIO_DETECTION:
+            constants.SCENARIO_NAME = config.STARTUP_SCENARIO_OVERRIDE or "default"
+            info(f"Skipping scenario detection by config; assuming scenario '{constants.SCENARIO_NAME}'.")
           else:
-            warning(
-              f"Scenario detection not confirmed yet (attempt {scenario_detection_attempts}/{MAX_SCENARIO_DETECTION_ATTEMPTS}). "
-              "Continuing with generic/default logic and will retry on the next stable turn."
-            )
+            scenario_detection_attempts += 1
+            scenario_name = detect_scenario()
+            if scenario_name:
+              constants.SCENARIO_NAME = scenario_name
+              info(f"Scenario confirmed at startup checkpoint: {scenario_name}")
+            elif scenario_detection_attempts >= MAX_SCENARIO_DETECTION_ATTEMPTS:
+              warning(
+                "Scenario detection failed repeatedly; continuing with generic/default logic for now. "
+                "Trackblazer-specific logic will stay inactive until a banner match succeeds."
+              )
+            else:
+              warning(
+                f"Scenario detection not confirmed yet (attempt {scenario_detection_attempts}/{MAX_SCENARIO_DETECTION_ATTEMPTS}). "
+                "Continuing with generic/default logic and will retry on the next stable turn."
+              )
         non_match_count = 0
 
       info(f"Bot version: {VERSION}")

@@ -89,11 +89,23 @@ def collect_main_state():
   if config.DO_MISSION_RACES_IF_POSSIBLE:
     if device_action.locate("assets/icons/race_mission_icon.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX):
       state_object["race_mission_available"] = True
+  if config.SKIP_FULL_STATS_APTITUDE_CHECK:
+    if config.VERBOSE_ACTIONS:
+      info("[STATE] Skipping full stats aptitude check by config.")
+    state_object["aptitudes"] = dict(aptitudes_cache) if aptitudes_cache else {}
+    state_object["aptitudes_missing_keys"] = [
+      key for key in APTITUDE_BOX_RATIOS.keys()
+      if key not in state_object["aptitudes"]
+    ]
+    filter_race_list(state_object)
+    filter_race_schedule(state_object)
   # first init or inspiration.
-  if aptitudes_cache and "Early Apr" not in state_object["year"]:
+  elif aptitudes_cache and "Early Apr" not in state_object["year"]:
     if config.VERBOSE_ACTIONS:
       info("[STATE] Using cached aptitudes; skipping full stats.")
     state_object["aptitudes"] = aptitudes_cache
+    filter_race_list(state_object)
+    filter_race_schedule(state_object)
   else:
     # Aptitudes are behind full stats button.
     if config.VERBOSE_ACTIONS:
@@ -135,17 +147,18 @@ def collect_training_state(state_object, training_function_name):
     sleep(0.6)
     # Hold/drag across training buttons to reveal info without confirming training.
     hold_active = False
-    for name, mouse_pos in constants.TRAINING_BUTTON_POSITIONS.items():
+    for name, mouse_pos in constants.TRAINING_SCAN_POSITIONS.items():
       if bot.is_adb_input_active():
         # Keep the original swipe behavior for ADB devices.
         device_action.swipe(mouse_pos, (mouse_pos[0], mouse_pos[1] + 150), duration=0.15)
       else:
         if not hold_active:
-          pyautogui_actions.moveTo(mouse_pos[0], mouse_pos[1], duration=0.1)
+          # Begin the drag from neutral space so the initial mouseDown does not
+          # land on Speed and accidentally confirm a training.
+          pyautogui_actions.moveTo(constants.SAFE_SPACE_MOUSE_POS[0], constants.SAFE_SPACE_MOUSE_POS[1], duration=0.08)
           pyautogui_actions.hold()
           hold_active = True
-        else:
-          pyautogui_actions.moveTo(mouse_pos[0], mouse_pos[1], duration=0.12)
+        pyautogui_actions.moveTo(mouse_pos[0], mouse_pos[1], duration=0.12)
 
       sleep(0.3)
       device_action.flush_screenshot_cache()
@@ -694,6 +707,10 @@ def get_energy_level(threshold=0.85):
 
 def filter_race_list(state):
   debug(f"Races before filtering: {constants.ALL_RACES}")
+  if not state.get("aptitudes"):
+    constants.RACES = {date: list(races) for date, races in constants.ALL_RACES.items()}
+    debug("Aptitudes unavailable; using unfiltered race list.")
+    return
   constants.RACES = {}
   aptitudes = state["aptitudes"]
   min_surface_index = get_aptitude_index(config.MINIMUM_APTITUDES["surface"])
@@ -724,6 +741,15 @@ def filter_race_schedule(state):
       schedule[date_long] = []
     schedule[date_long].append(race)
   config.RACE_SCHEDULE = schedule
+  if not state.get("aptitudes"):
+    for date in schedule:
+      for race in schedule[date]:
+        for race_data in constants.ALL_RACES.get(date, []):
+          if race_data["name"] == race["name"]:
+            race["fans_gained"] = race_data["fans"]["gained"]
+            break
+    debug("Aptitudes unavailable; using unfiltered race schedule.")
+    return
   for date in schedule:
     for race in schedule[date]:
       if race["name"] not in [k["name"] for k in constants.RACES[date]]:

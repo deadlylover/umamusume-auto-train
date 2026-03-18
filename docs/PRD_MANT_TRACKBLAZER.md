@@ -70,6 +70,8 @@ The goal is not just "recognize the banner". The bot must be able to:
 
 Trackblazer support should be built together with the new operator/debug console, not after it. The scenario is new enough that "implement first, inspect logs later" will be too slow.
 
+The canonical flow vocabulary for this work should follow [`docs/BOT_FLOW.md`](./BOT_FLOW.md), so Trackblazer additions land as explicit sub-flows within the existing runtime phases instead of scattered one-off branches in the main loop.
+
 ## Non-Goals
 
 - Perfect full automation on day one.

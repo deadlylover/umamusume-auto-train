@@ -51,6 +51,8 @@ class OperatorConsole:
     self._message_value = None
     self._error_value = None
     self._execution_intent_var = None
+    self._skip_scenario_detection_var = None
+    self._skip_full_stats_aptitude_check_var = None
     self._phase_labels = {}
     self._summary_text = None
     self._training_text = None
@@ -109,11 +111,14 @@ class OperatorConsole:
   def _show_window(self):
     if self._root is None:
       return
-    self._load_window_geometry()
-    self._apply_window_geometry()
-    self._root.deiconify()
+    state = str(self._root.state())
+    if state == "withdrawn":
+      self._load_window_geometry()
+      self._apply_window_geometry()
+      self._root.deiconify()
+    elif state == "iconic":
+      self._root.deiconify()
     self._root.lift()
-    self._persist_window_geometry()
 
   def _build_layout(self):
     root = self._root
@@ -139,20 +144,26 @@ class OperatorConsole:
 
     actions = tk.Frame(root, bg="#101418", padx=8, pady=0)
     actions.grid(row=1, column=0, columnspan=2, sticky="ew")
-    self._bot_button = tk.Button(actions, text="Start Bot", command=self._toggle_bot)
+    actions.columnconfigure(0, weight=1)
+    primary_controls = tk.Frame(actions, bg="#101418")
+    primary_controls.grid(row=0, column=0, sticky="w")
+    secondary_controls = tk.Frame(actions, bg="#101418")
+    secondary_controls.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+    self._bot_button = tk.Button(primary_controls, text="Start Bot", command=self._toggle_bot)
     self._bot_button.pack(side=tk.LEFT, padx=(0, 8))
-    self._pause_button = tk.Button(actions, text="Pause", command=self._request_pause)
+    self._pause_button = tk.Button(primary_controls, text="Pause", command=self._request_pause)
     self._pause_button.pack(side=tk.LEFT, padx=(0, 8))
-    self._resume_button = tk.Button(actions, text="Resume", command=self._resume_bot)
+    self._resume_button = tk.Button(primary_controls, text="Resume", command=self._resume_bot)
     self._resume_button.pack(side=tk.LEFT, padx=(0, 8))
-    self._continue_button = tk.Button(actions, text="Continue (F2)", command=self._continue_review)
+    self._continue_button = tk.Button(primary_controls, text="Continue (F2)", command=self._continue_review)
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
-    tk.Button(actions, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
-    tk.Button(actions, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
+    tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
+    tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "preview_clicks", "execute"):
       tk.Radiobutton(
-        actions,
+        secondary_controls,
         text=intent.replace("_", " "),
         value=intent,
         variable=self._execution_intent_var,
@@ -162,13 +173,37 @@ class OperatorConsole:
         selectcolor="#192028",
         activebackground="#101418",
         activeforeground="white",
-      ).pack(side=tk.LEFT, padx=(12 if intent == "check_only" else 4, 0))
+      ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
+    self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
+    self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
     tk.Checkbutton(
-      actions,
+      secondary_controls,
       text="Always on top",
       variable=self._always_on_top_var,
       command=self._toggle_always_on_top,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Checkbutton(
+      secondary_controls,
+      text="Skip scenario detect",
+      variable=self._skip_scenario_detection_var,
+      command=self._toggle_skip_scenario_detection,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Checkbutton(
+      secondary_controls,
+      text="Skip full stats/aptitude",
+      variable=self._skip_full_stats_aptitude_check_var,
+      command=self._toggle_skip_full_stats_aptitude_check,
       fg="white",
       bg="#101418",
       selectcolor="#192028",
@@ -520,6 +555,24 @@ class OperatorConsole:
     bot.set_execution_intent(self._execution_intent_var.get())
     self.publish()
 
+  def _toggle_skip_scenario_detection(self):
+    if self._skip_scenario_detection_var is None:
+      return
+    enabled = bool(self._skip_scenario_detection_var.get())
+    config.SKIP_SCENARIO_DETECTION = enabled
+    if self._persist_config_value("skip_scenario_detection", enabled):
+      self._message_value.set(f"Skip scenario detection {'enabled' if enabled else 'disabled'}.")
+    self.publish()
+
+  def _toggle_skip_full_stats_aptitude_check(self):
+    if self._skip_full_stats_aptitude_check_var is None:
+      return
+    enabled = bool(self._skip_full_stats_aptitude_check_var.get())
+    config.SKIP_FULL_STATS_APTITUDE_CHECK = enabled
+    if self._persist_config_value("skip_full_stats_aptitude_check", enabled):
+      self._message_value.set(f"Skip full stats/aptitude {'enabled' if enabled else 'disabled'}.")
+    self.publish()
+
   def _load_window_geometry(self):
     self._window_geometry = self.DEFAULT_GEOMETRY
     try:
@@ -548,31 +601,37 @@ class OperatorConsole:
   def _persist_window_geometry(self):
     if self._root is None:
       return
-    if str(self._root.state()) == "withdrawn":
+    if str(self._root.state()) in {"withdrawn", "iconic"}:
       return
 
     geometry = self._root.geometry()
     if geometry == self._last_saved_geometry:
       return
 
+    if self._persist_config_value("debug.operator_console.window_geometry", geometry):
+      self._last_saved_geometry = geometry
+
+  def _persist_config_value(self, key_path, value):
     try:
       with open("config.json", "r", encoding="utf-8") as file:
         config_data = json.load(file)
     except Exception:
       config_data = {}
 
-    debug_config = config_data.setdefault("debug", {})
-    operator_console_config = debug_config.setdefault("operator_console", {})
-    operator_console_config["window_geometry"] = geometry
+    target = config_data
+    path_parts = key_path.split(".")
+    for key in path_parts[:-1]:
+      target = target.setdefault(key, {})
+    target[path_parts[-1]] = value
 
     try:
       with open("config.json", "w", encoding="utf-8") as file:
         json.dump(config_data, file, indent=2)
+        file.write("\n")
+      return True
     except Exception as exc:
-      debug(f"Unable to persist operator console geometry: {exc}")
-      return
-
-    self._last_saved_geometry = geometry
+      debug(f"Unable to persist config key '{key_path}': {exc}")
+      return False
 
   def _launch_asset_creator(self):
     from core.region_adjuster.asset_creator import AssetCreatorWindow

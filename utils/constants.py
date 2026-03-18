@@ -175,6 +175,46 @@ CLAW_MACHINE_PLUSHIE_REGION = convert_xyxy_to_xywh(CLAW_MACHINE_PLUSHIE_BBOX)
 
 FULL_SCREEN_LANDSCAPE = (0, 0, 1920, 1080)
 
+TRAINING_SWIPE_BOX_WIDTH = 28
+TRAINING_SWIPE_BOX_HEIGHT = 150
+TRAINING_EXECUTION_CLICK_OFFSET_Y = 20
+
+
+def _training_swipe_bbox(base_x: int) -> tuple[int, int, int, int]:
+  x1 = int(base_x - TRAINING_SWIPE_BOX_WIDTH // 2)
+  y1 = int(GAME_WINDOW_BBOX[1] + 900)
+  x2 = int(x1 + TRAINING_SWIPE_BOX_WIDTH)
+  y2 = int(y1 + TRAINING_SWIPE_BOX_HEIGHT)
+  return (x1, y1, x2, y2)
+
+
+def _training_execution_click_pos(bbox_xyxy: tuple[int, int, int, int]) -> tuple[int, int]:
+  x1, y1, x2, y2 = bbox_xyxy
+  return (
+    int((x1 + x2) // 2),
+    int(y2 + TRAINING_EXECUTION_CLICK_OFFSET_Y),
+  )
+
+
+def _training_scan_drag_pos(bbox_xyxy: tuple[int, int, int, int]) -> tuple[int, int]:
+  x1, y1, x2, _y2 = bbox_xyxy
+  return (
+    int((x1 + x2) // 2),
+    int(y1),
+  )
+
+
+TRAINING_SWIPE_SPD_BBOX = _training_swipe_bbox(GAME_WINDOW_BBOX[0] + 185)
+TRAINING_SWIPE_SPD_REGION = convert_xyxy_to_xywh(TRAINING_SWIPE_SPD_BBOX)
+TRAINING_SWIPE_STA_BBOX = _training_swipe_bbox(GAME_WINDOW_BBOX[0] + 290)
+TRAINING_SWIPE_STA_REGION = convert_xyxy_to_xywh(TRAINING_SWIPE_STA_BBOX)
+TRAINING_SWIPE_PWR_BBOX = _training_swipe_bbox(GAME_WINDOW_BBOX[0] + 395)
+TRAINING_SWIPE_PWR_REGION = convert_xyxy_to_xywh(TRAINING_SWIPE_PWR_BBOX)
+TRAINING_SWIPE_GUTS_BBOX = _training_swipe_bbox(GAME_WINDOW_BBOX[0] + 500)
+TRAINING_SWIPE_GUTS_REGION = convert_xyxy_to_xywh(TRAINING_SWIPE_GUTS_BBOX)
+TRAINING_SWIPE_WIT_BBOX = _training_swipe_bbox(GAME_WINDOW_BBOX[0] + 605)
+TRAINING_SWIPE_WIT_REGION = convert_xyxy_to_xywh(TRAINING_SWIPE_WIT_BBOX)
+
 SCROLLING_SELECTION_MOUSE_POS=(560, 680)
 SKILL_SCROLL_BOTTOM_MOUSE_POS=(560, 850)
 SKILL_SCROLL_TOP_MOUSE_POS=(560, SKILL_SCROLL_BOTTOM_MOUSE_POS[1] - 300)
@@ -182,12 +222,49 @@ SKILL_SCROLL_TOP_MOUSE_POS=(560, SKILL_SCROLL_BOTTOM_MOUSE_POS[1] - 300)
 RACE_SCROLL_BOTTOM_MOUSE_POS=(0, 0)
 RACE_SCROLL_TOP_MOUSE_POS=(0, 0)
 
-SPD_BUTTON_MOUSE_POS = (GAME_WINDOW_BBOX[0] + 90, GAME_WINDOW_BBOX[1] + 900)
-STA_BUTTON_MOUSE_POS = (105 + SPD_BUTTON_MOUSE_POS[0], SPD_BUTTON_MOUSE_POS[1])
-PWR_BUTTON_MOUSE_POS = (105 + STA_BUTTON_MOUSE_POS[0], STA_BUTTON_MOUSE_POS[1])
-GUTS_BUTTON_MOUSE_POS = (105 + PWR_BUTTON_MOUSE_POS[0], PWR_BUTTON_MOUSE_POS[1])
-WIT_BUTTON_MOUSE_POS = (105 + GUTS_BUTTON_MOUSE_POS[0], GUTS_BUTTON_MOUSE_POS[1])
+# Anchor the scan row from the same per-training swipe boxes that the OCR
+# adjuster exposes, but keep execution clicks separate so the scan pass does not
+# accidentally use live training-confirm targets.
+SPD_SCAN_MOUSE_POS = (
+  _training_scan_drag_pos(TRAINING_SWIPE_SPD_BBOX)
+)
+STA_SCAN_MOUSE_POS = (
+  _training_scan_drag_pos(TRAINING_SWIPE_STA_BBOX)
+)
+PWR_SCAN_MOUSE_POS = (
+  _training_scan_drag_pos(TRAINING_SWIPE_PWR_BBOX)
+)
+GUTS_SCAN_MOUSE_POS = (
+  _training_scan_drag_pos(TRAINING_SWIPE_GUTS_BBOX)
+)
+WIT_SCAN_MOUSE_POS = (
+  _training_scan_drag_pos(TRAINING_SWIPE_WIT_BBOX)
+)
+
+SPD_BUTTON_MOUSE_POS = (
+  _training_execution_click_pos(TRAINING_SWIPE_SPD_BBOX)
+)
+STA_BUTTON_MOUSE_POS = (
+  _training_execution_click_pos(TRAINING_SWIPE_STA_BBOX)
+)
+PWR_BUTTON_MOUSE_POS = (
+  _training_execution_click_pos(TRAINING_SWIPE_PWR_BBOX)
+)
+GUTS_BUTTON_MOUSE_POS = (
+  _training_execution_click_pos(TRAINING_SWIPE_GUTS_BBOX)
+)
+WIT_BUTTON_MOUSE_POS = (
+  _training_execution_click_pos(TRAINING_SWIPE_WIT_BBOX)
+)
 SAFE_SPACE_MOUSE_POS = (GAME_WINDOW_BBOX[0] + 405, GAME_WINDOW_BBOX[1] + 150)
+
+TRAINING_SCAN_POSITIONS = {
+  "spd": SPD_SCAN_MOUSE_POS,
+  "sta": STA_SCAN_MOUSE_POS,
+  "pwr": PWR_SCAN_MOUSE_POS,
+  "guts": GUTS_SCAN_MOUSE_POS,
+  "wit": WIT_SCAN_MOUSE_POS
+}
 
 TRAINING_BUTTON_POSITIONS = {
   "spd": SPD_BUTTON_MOUSE_POS,
@@ -208,17 +285,59 @@ def name_of_variable(region_xywh):
     return "Unknown"
 
 def update_training_button_positions():
-  global TRAINING_BUTTON_POSITIONS, SPD_BUTTON_MOUSE_POS, STA_BUTTON_MOUSE_POS
-  global PWR_BUTTON_MOUSE_POS, GUTS_BUTTON_MOUSE_POS, WIT_BUTTON_MOUSE_POS
+  global TRAINING_SCAN_POSITIONS, TRAINING_BUTTON_POSITIONS
+  global SPD_SCAN_MOUSE_POS, STA_SCAN_MOUSE_POS, PWR_SCAN_MOUSE_POS
+  global GUTS_SCAN_MOUSE_POS, WIT_SCAN_MOUSE_POS
+  global SPD_BUTTON_MOUSE_POS, STA_BUTTON_MOUSE_POS, PWR_BUTTON_MOUSE_POS
+  global GUTS_BUTTON_MOUSE_POS, WIT_BUTTON_MOUSE_POS
+  global TRAINING_SWIPE_SPD_BBOX, TRAINING_SWIPE_SPD_REGION
+  global TRAINING_SWIPE_STA_BBOX, TRAINING_SWIPE_STA_REGION
+  global TRAINING_SWIPE_PWR_BBOX, TRAINING_SWIPE_PWR_REGION
+  global TRAINING_SWIPE_GUTS_BBOX, TRAINING_SWIPE_GUTS_REGION
+  global TRAINING_SWIPE_WIT_BBOX, TRAINING_SWIPE_WIT_REGION
   global SAFE_SPACE_MOUSE_POS
-  base_x = GAME_WINDOW_BBOX[0] + 90
-  base_y = GAME_WINDOW_BBOX[1] + 900
-  SPD_BUTTON_MOUSE_POS = (base_x, base_y)
-  STA_BUTTON_MOUSE_POS = (105 + SPD_BUTTON_MOUSE_POS[0], SPD_BUTTON_MOUSE_POS[1])
-  PWR_BUTTON_MOUSE_POS = (105 + STA_BUTTON_MOUSE_POS[0], STA_BUTTON_MOUSE_POS[1])
-  GUTS_BUTTON_MOUSE_POS = (105 + PWR_BUTTON_MOUSE_POS[0], PWR_BUTTON_MOUSE_POS[1])
-  WIT_BUTTON_MOUSE_POS = (105 + GUTS_BUTTON_MOUSE_POS[0], GUTS_BUTTON_MOUSE_POS[1])
+  training_defaults = {
+    "spd": GAME_WINDOW_BBOX[0] + 185,
+    "sta": GAME_WINDOW_BBOX[0] + 290,
+    "pwr": GAME_WINDOW_BBOX[0] + 395,
+    "guts": GAME_WINDOW_BBOX[0] + 500,
+    "wit": GAME_WINDOW_BBOX[0] + 605,
+  }
+  swipe_bbox_names = {
+    "spd": "TRAINING_SWIPE_SPD_BBOX",
+    "sta": "TRAINING_SWIPE_STA_BBOX",
+    "pwr": "TRAINING_SWIPE_PWR_BBOX",
+    "guts": "TRAINING_SWIPE_GUTS_BBOX",
+    "wit": "TRAINING_SWIPE_WIT_BBOX",
+  }
+
+  for name, base_x in training_defaults.items():
+    bbox_name = swipe_bbox_names[name]
+    region_name = bbox_name.replace("_BBOX", "_REGION")
+    bbox_value = globals().get(bbox_name)
+    if not isinstance(bbox_value, tuple) or len(bbox_value) != 4:
+      bbox_value = _training_swipe_bbox(base_x)
+      globals()[bbox_name] = bbox_value
+      globals()[region_name] = convert_xyxy_to_xywh(bbox_value)
+
   SAFE_SPACE_MOUSE_POS = (GAME_WINDOW_BBOX[0] + 405, GAME_WINDOW_BBOX[1] + 150)
+  SPD_SCAN_MOUSE_POS = _training_scan_drag_pos(TRAINING_SWIPE_SPD_BBOX)
+  STA_SCAN_MOUSE_POS = _training_scan_drag_pos(TRAINING_SWIPE_STA_BBOX)
+  PWR_SCAN_MOUSE_POS = _training_scan_drag_pos(TRAINING_SWIPE_PWR_BBOX)
+  GUTS_SCAN_MOUSE_POS = _training_scan_drag_pos(TRAINING_SWIPE_GUTS_BBOX)
+  WIT_SCAN_MOUSE_POS = _training_scan_drag_pos(TRAINING_SWIPE_WIT_BBOX)
+  TRAINING_SCAN_POSITIONS = {
+    "spd": SPD_SCAN_MOUSE_POS,
+    "sta": STA_SCAN_MOUSE_POS,
+    "pwr": PWR_SCAN_MOUSE_POS,
+    "guts": GUTS_SCAN_MOUSE_POS,
+    "wit": WIT_SCAN_MOUSE_POS
+  }
+  SPD_BUTTON_MOUSE_POS = _training_execution_click_pos(TRAINING_SWIPE_SPD_BBOX)
+  STA_BUTTON_MOUSE_POS = _training_execution_click_pos(TRAINING_SWIPE_STA_BBOX)
+  PWR_BUTTON_MOUSE_POS = _training_execution_click_pos(TRAINING_SWIPE_PWR_BBOX)
+  GUTS_BUTTON_MOUSE_POS = _training_execution_click_pos(TRAINING_SWIPE_GUTS_BBOX)
+  WIT_BUTTON_MOUSE_POS = _training_execution_click_pos(TRAINING_SWIPE_WIT_BBOX)
   TRAINING_BUTTON_POSITIONS = {
     "spd": SPD_BUTTON_MOUSE_POS,
     "sta": STA_BUTTON_MOUSE_POS,
@@ -295,6 +414,16 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "SCREEN_BOTTOM_REGION",
   "SCROLLING_SKILL_SCREEN_BBOX",
   "SCROLLING_SKILL_SCREEN_REGION",
+  "TRAINING_SWIPE_SPD_BBOX",
+  "TRAINING_SWIPE_SPD_REGION",
+  "TRAINING_SWIPE_STA_BBOX",
+  "TRAINING_SWIPE_STA_REGION",
+  "TRAINING_SWIPE_PWR_BBOX",
+  "TRAINING_SWIPE_PWR_REGION",
+  "TRAINING_SWIPE_GUTS_BBOX",
+  "TRAINING_SWIPE_GUTS_REGION",
+  "TRAINING_SWIPE_WIT_BBOX",
+  "TRAINING_SWIPE_WIT_REGION",
   "ENERGY_BBOX",
   "ENERGY_REGION",
   "UNITY_ENERGY_BBOX",

@@ -12,52 +12,112 @@
     1380
   ],
   "SCREEN_TOP_BBOX": [
-    -2,
-    128,
-    764,
-    529
+    1,
+    125,
+    763,
+    725
   ],
   "SCREEN_TOP_REGION": [
-    -2,
-    128,
-    766,
-    401
+    1,
+    125,
+    762,
+    600
   ],
   "SCREEN_MIDDLE_BBOX": [
-    2,
-    447,
-    768,
-    1266
+    1,
+    425,
+    763,
+    1225
   ],
   "SCREEN_MIDDLE_REGION": [
-    2,
-    447,
-    766,
-    819
+    1,
+    425,
+    762,
+    800
   ],
   "SCREEN_BOTTOM_BBOX": [
-    -21,
-    1109,
-    764,
-    1504
+    1,
+    925,
+    763,
+    1505
   ],
   "SCREEN_BOTTOM_REGION": [
-    -21,
-    1109,
-    785,
-    395
+    1,
+    925,
+    762,
+    580
   ],
   "SCROLLING_SKILL_SCREEN_BBOX": [
-    30,
-    621,
-    758,
-    1229
+    1,
+    515,
+    763,
+    1305
   ],
   "SCROLLING_SKILL_SCREEN_REGION": [
-    30,
-    621,
-    728,
-    608
+    1,
+    515,
+    762,
+    790
+  ],
+  "TRAINING_SWIPE_SPD_BBOX": [
+    94,
+    1055,
+    123,
+    1205
+  ],
+  "TRAINING_SWIPE_SPD_REGION": [
+    94,
+    1055,
+    29,
+    150
+  ],
+  "TRAINING_SWIPE_STA_BBOX": [
+    239,
+    1054,
+    267,
+    1204
+  ],
+  "TRAINING_SWIPE_STA_REGION": [
+    239,
+    1054,
+    28,
+    150
+  ],
+  "TRAINING_SWIPE_PWR_BBOX": [
+    370,
+    1062,
+    391,
+    1212
+  ],
+  "TRAINING_SWIPE_PWR_REGION": [
+    370,
+    1062,
+    21,
+    150
+  ],
+  "TRAINING_SWIPE_GUTS_BBOX": [
+    504,
+    1072,
+    532,
+    1222
+  ],
+  "TRAINING_SWIPE_GUTS_REGION": [
+    504,
+    1072,
+    28,
+    150
+  ],
+  "TRAINING_SWIPE_WIT_BBOX": [
+    643,
+    1074,
+    671,
+    1224
+  ],
+  "TRAINING_SWIPE_WIT_REGION": [
+    643,
+    1074,
+    28,
+    150
   ],
   "ENERGY_BBOX": [
     32,
@@ -204,16 +264,16 @@
     6
   ],
   "MANT_FAILURE_BBOX": [
-    4,
-    166,
-    293,
-    202
+    35,
+    1133,
+    744,
+    1160
   ],
   "MANT_FAILURE_REGION": [
-    4,
-    166,
-    289,
-    36
+    35,
+    1133,
+    709,
+    27
   ],
   "YEAR_BBOX": [
     2,
@@ -492,16 +552,16 @@
     132
   ],
   "EVENT_NAME_BBOX": [
-    -2,
-    331,
+    109,
+    377,
     585,
-    471
+    431
   ],
   "EVENT_NAME_REGION": [
-    -2,
-    331,
-    587,
-    140
+    109,
+    377,
+    476,
+    54
   ],
   "CLAW_MACHINE_SPEED_BBOX": [
     221,

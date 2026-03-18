@@ -228,9 +228,9 @@ class Strategy:
   def check_race(self, state, action, grades: list[str] = None):
     date = state["year"]
     if grades is not None:
-      races_on_date = [r for r in constants.RACES[date] if r.get("grade") in grades]
+      races_on_date = [r for r in constants.RACES.get(date, []) if r.get("grade") in grades]
     else:
-      races_on_date = constants.RACES[date]
+      races_on_date = constants.RACES.get(date, [])
 
     if not races_on_date:
       return action
@@ -259,7 +259,7 @@ class Strategy:
   def check_scheduled_races(self, state, action):
     date = state["year"]
 
-    races_on_date = constants.RACES[date]
+    races_on_date = constants.RACES.get(date, [])
 
     if not races_on_date:
       return action

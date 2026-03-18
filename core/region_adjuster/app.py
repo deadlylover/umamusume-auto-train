@@ -29,6 +29,13 @@ SCENARIO_FILTERS = {
   "all": "All Regions",
 }
 SCENARIO_FILTERS_REVERSE = {label: key for key, label in SCENARIO_FILTERS.items()}
+TRAINING_SWIPE_LABELS = {
+  "TRAINING_SWIPE_SPD_BBOX": "spd",
+  "TRAINING_SWIPE_STA_BBOX": "sta",
+  "TRAINING_SWIPE_PWR_BBOX": "pwr",
+  "TRAINING_SWIPE_GUTS_BBOX": "guts",
+  "TRAINING_SWIPE_WIT_BBOX": "wit",
+}
 
 
 def _counterpart_name(name: str) -> Optional[str]:
@@ -360,7 +367,7 @@ class RegionAdjusterApp:
     self.show_training_positions_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
       right_panel,
-      text="Show training positions",
+      text="Show training swipes",
       variable=self.show_training_positions_var,
       command=self._render_overlay,
       fg="white",
@@ -636,12 +643,19 @@ class RegionAdjusterApp:
       for x1, y1, x2, y2 in self._template_matches:
         draw.rectangle((x1, y1, x2, y2), outline=(255, 64, 64, 255), width=2)
 
-    if self.show_training_positions_var.get() and self.training_positions:
+    if self.show_training_positions_var.get():
       draw = ImageDraw.Draw(overlay)
+      for region_name, label in TRAINING_SWIPE_LABELS.items():
+        entry = self.regions.get(region_name)
+        if not entry:
+          continue
+        x1, y1, x2, y2 = self._current_box(region_name)
+        draw.rectangle((x1, y1, x2, y2), outline=(80, 220, 120, 255), width=2)
+        draw.text((x2 + 4, y1), label, fill=(80, 220, 120, 255))
+
       for name, (x, y) in self.training_positions.items():
-        radius = 6
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(80, 220, 120, 255), width=2)
-        draw.text((x + radius + 2, y - radius - 2), name, fill=(80, 220, 120, 255))
+        radius = 4
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(150, 255, 180, 255), width=1)
 
     self.overlay_image = overlay
     self.photo_image = ImageTk.PhotoImage(overlay)
@@ -959,6 +973,17 @@ class RegionAdjusterApp:
       edges.add("bottom")
     return edges, inside
 
+  def _training_swipe_hit_test(self, x: int, y: int) -> Optional[str]:
+    if not self.show_training_positions_var.get():
+      return None
+    for region_name in TRAINING_SWIPE_LABELS.keys():
+      if region_name not in self.regions:
+        continue
+      x1, y1, x2, y2 = self._current_box(region_name)
+      if x1 <= x <= x2 and y1 <= y <= y2:
+        return region_name
+    return None
+
   def _set_canvas_cursor(self, cursor: str):
     if cursor == self._active_cursor:
       return
@@ -978,6 +1003,18 @@ class RegionAdjusterApp:
 
   def _on_canvas_press(self, event):
     x, y = self._canvas_coords(event)
+    training_swipe_name = self._training_swipe_hit_test(x, y)
+    if training_swipe_name and training_swipe_name != self.selected_name:
+      self.selected_name = training_swipe_name
+      if training_swipe_name in self.visible_region_order:
+        selected_index = self.visible_region_order.index(training_swipe_name)
+        self.region_listbox.selection_clear(0, tk.END)
+        self.region_listbox.selection_set(selected_index)
+        self.region_listbox.see(selected_index)
+      self._set_coord_text()
+      self._update_region_preview()
+      self._refresh_template_list()
+      self._render_overlay()
     edges, inside = self._region_hit_test(x, y)
     if edges:
       self._drag_mode = "resize"

@@ -93,6 +93,9 @@ def reload_config(print_config=True):
     load_var('SCENARIO_GIMMICK_WEIGHT', config["scenario_gimmick_weight"])
     load_var('USE_SKIP_CLAW_MACHINE', config["use_skip_claw_machine"])
     load_var('EXECUTION_MODE', config.get("execution_mode", "auto"))
+    load_var('SKIP_SCENARIO_DETECTION', bool(config.get("skip_scenario_detection", True)))
+    load_var('STARTUP_SCENARIO_OVERRIDE', config.get("startup_scenario_override", "trackblazer") or "")
+    load_var('SKIP_FULL_STATS_APTITUDE_CHECK', bool(config.get("skip_full_stats_aptitude_check", True)))
     
     # macOS-specific platform settings (optional, with defaults)
     platform_config = config.get("platform", {})
