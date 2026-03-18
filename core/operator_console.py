@@ -21,6 +21,8 @@ PHASES = [
   "focusing_window",
   "scanning_lobby",
   "collecting_main_state",
+  "checking_inventory",
+  "checking_shop",
   "collecting_training_state",
   "pre_training",
   "evaluating_strategy",
@@ -56,6 +58,7 @@ class OperatorConsole:
     self._phase_labels = {}
     self._summary_text = None
     self._training_text = None
+    self._inventory_text = None
     self._ocr_debug_entries = []
     self._ocr_debug_listbox = None
     self._ocr_debug_meta = None
@@ -225,7 +228,7 @@ class OperatorConsole:
     right.grid(row=2, column=1, sticky="nsew", padx=(4, 8), pady=6)
     right.columnconfigure(0, weight=1)
     right.rowconfigure(1, weight=1)
-    right.rowconfigure(3, weight=0)
+    right.rowconfigure(3, weight=1)
     right.rowconfigure(5, weight=3)
 
     for phase in PHASES:
@@ -255,10 +258,27 @@ class OperatorConsole:
     training_header = tk.Frame(right, bg="#101418")
     training_header.grid(row=2, column=0, sticky="ew")
     training_header.columnconfigure(0, weight=1)
+    training_header.columnconfigure(1, weight=0)
+    training_header.columnconfigure(2, weight=1)
+    training_header.columnconfigure(3, weight=0)
     tk.Label(training_header, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e")
-    self._training_text = scrolledtext.ScrolledText(right, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._training_text.grid(row=3, column=0, sticky="nsew", pady=(2, 6))
+    tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e", padx=(0, 12))
+    tk.Label(training_header, text="Inventory", fg="white", bg="#101418", anchor="w").grid(row=0, column=2, sticky="w")
+    tk.Button(training_header, text="Copy Inventory", command=lambda: self._copy_widget(self._inventory_text)).grid(row=0, column=3, sticky="e")
+    training_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
+    training_panel.grid(row=3, column=0, sticky="nsew", pady=(2, 6))
+    training_frame = tk.Frame(training_panel, bg="#101418")
+    training_frame.rowconfigure(0, weight=1)
+    training_frame.columnconfigure(0, weight=1)
+    self._training_text = scrolledtext.ScrolledText(training_frame, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._training_text.grid(row=0, column=0, sticky="nsew")
+    training_panel.add(training_frame, minsize=220)
+    inventory_frame = tk.Frame(training_panel, bg="#101418")
+    inventory_frame.rowconfigure(0, weight=1)
+    inventory_frame.columnconfigure(0, weight=1)
+    self._inventory_text = scrolledtext.ScrolledText(inventory_frame, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._inventory_text.grid(row=0, column=0, sticky="nsew")
+    training_panel.add(inventory_frame, minsize=220)
 
     ocr_header = tk.Frame(right, bg="#101418")
     ocr_header.grid(row=4, column=0, sticky="ew")
@@ -391,6 +411,13 @@ class OperatorConsole:
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
+    inventory_payload = {
+      "summary": state_summary.get("trackblazer_inventory_summary"),
+      "controls": state_summary.get("trackblazer_inventory_controls"),
+      "flow": state_summary.get("trackblazer_inventory_flow"),
+      "items": snapshot.get("trackblazer_inventory"),
+    }
+    self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
     self._render_ocr_debug_entries()
 

@@ -167,6 +167,59 @@ MANT_GRADE_POINT_REGION = convert_xyxy_to_xywh(MANT_GRADE_POINT_BBOX)
 MANT_SHOP_BUTTON_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (600, 785, -90, -190))
 MANT_SHOP_BUTTON_REGION = convert_xyxy_to_xywh(MANT_SHOP_BUTTON_BBOX)
 
+# Trackblazer inventory/item region — covers the item list area on the training items screen.
+# Placeholder offsets; tune with the region adjuster once the screen is accessible.
+MANT_INVENTORY_ITEMS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (50, 250, -50, -200))
+MANT_INVENTORY_ITEMS_REGION = convert_xyxy_to_xywh(MANT_INVENTORY_ITEMS_BBOX)
+
+# Trackblazer item icon templates — used for inventory and shop recognition.
+TRACKBLAZER_ITEM_TEMPLATES = {
+  "grilled_carrots": "assets/trackblazer/items/grilled_carrots.png",
+  "yumy_cat_food": "assets/trackblazer/items/yumy_cat_food.png",
+  "miracle_cure": "assets/trackblazer/items/miracle_cure.png",
+  "motivating_megaphone": "assets/trackblazer/items/motivating_megaphone.png",
+  "good_luck_charm": "assets/trackblazer/items/good_luck_charm.png",
+  "guts_notepad": "assets/trackblazer/items/guts_notepad.png",
+  "stamina_ankle_weights": "assets/trackblazer/items/stamina_ankle_weights.png",
+  "wit_manual": "assets/trackblazer/items/wit_manual.png",
+}
+
+# Trackblazer item categories for decision logic.
+TRACKBLAZER_ITEM_CATEGORIES = {
+  "grilled_carrots": "energy",
+  "yumy_cat_food": "energy",
+  "miracle_cure": "condition",
+  "motivating_megaphone": "mood",
+  "good_luck_charm": "training_boost",
+  "guts_notepad": "training_boost",
+  "stamina_ankle_weights": "training_boost",
+  "wit_manual": "training_boost",
+}
+
+# Trackblazer shop purchase flow UI templates.
+TRACKBLAZER_SHOP_UI_TEMPLATES = {
+  "shop_confirm": "assets/trackblazer/shop_confirm.png",
+  "shop_aftersale_close": "assets/trackblazer/shop_aftersale_close.png",
+  "shop_aftersale_confirm_use_available": "assets/trackblazer/shop_aftersale_confirm_use_available.png",
+  "shop_aftersale_confirm_use_unavailable": "assets/trackblazer/shop_aftersale_confirm_use_unavailable.png",
+  "shop_aftersale_confirm_use_increment_item": "assets/trackblazer/shop_aftersale_confirm_use_increment_item.png",
+}
+
+# Trackblazer item use flow UI templates.
+TRACKBLAZER_ITEM_USE_TEMPLATES = {
+  "use_training_items": "assets/trackblazer/shop_use_training_items.png",
+  "use_back": "assets/trackblazer/shop_use_back.png",
+  "training_items_tab": "assets/trackblazer/training_items.png",
+  "select_checked": "assets/trackblazer/select_checked.png",
+  "select_unchecked": "assets/trackblazer/select_unchecked.png",
+}
+
+# Trackblazer shop entry templates.
+TRACKBLAZER_SHOP_ENTRY_TEMPLATES = {
+  "shop_enter_lobby": "assets/buttons/shop_enter_lobby.png",
+  "shop_refresh_shop_button": "assets/buttons/shop_refresh_shop_button.png",
+}
+
 UNITY_TEAM_MATCHUP_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (130, 565, -130, -475))
 UNITY_TEAM_MATCHUP_REGION = convert_xyxy_to_xywh(UNITY_TEAM_MATCHUP_BBOX)
 
@@ -502,6 +555,8 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_GRADE_POINT_REGION",
   "MANT_SHOP_BUTTON_BBOX",
   "MANT_SHOP_BUTTON_REGION",
+  "MANT_INVENTORY_ITEMS_BBOX",
+  "MANT_INVENTORY_ITEMS_REGION",
   "EVENT_NAME_BBOX",
   "EVENT_NAME_REGION",
   "CLAW_MACHINE_SPEED_BBOX",

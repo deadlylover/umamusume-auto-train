@@ -42,13 +42,52 @@ Implemented in support of Trackblazer bring-up:
   - `preview_skill_purchase`
   - `confirm_skill_purchase`
 
+Shop-related template assets added:
+
+- `assets/icons/shop_refresh.png` (264x235px) — detects the shop refresh popup during lobby scanning. Wired into `career_lobby()` in `core/skeleton.py`: when detected, the bot logs the refresh and dismisses the popup with cancel.
+- `assets/buttons/shop_refresh_shop_button.png` (118x50px) — the "Shop" button on the shop refresh popup. Not yet wired; needed when implementing "enter shop from popup" logic.
+- `assets/buttons/shop_enter_lobby.png` (123x81px) — the shop button on the main lobby screen. Not yet wired; needed for entering the shop from the lobby when the bot decides to spend coins.
+
+Trackblazer shop item assets added under `assets/trackblazer/`:
+
+**Shop items (item icon templates for inventory/shop recognition):**
+
+- `grilled_carrots.png` — Grilled Carrots. Energy recovery item (restores energy/vitality).
+- `guts_notepad.png` — Guts Notepad. Training item that boosts Guts training gains.
+- `miracle_cure.png` — Miracle Cure. Condition recovery item (cures status ailments / bad conditions).
+- `motivating_megaphone.png` — Motivating Megaphone. Motivation/mood booster item.
+- `stamina_ankle_weights.png` — Stamina Ankle Weights. Training item that boosts Stamina training gains.
+- `wit_manual.png` — Wit Manual. Training item that boosts Wit/Intelligence training gains.
+- `yumy_cat_food.png` — Yumy Cat Food. Energy recovery item (restores energy/vitality).
+
+**Shop purchase flow UI templates:**
+
+- `shop_confirm.png` — Green "Confirm" button on the shop purchase dialog. Used to confirm buying an item.
+- `shop_aftersale_close.png` — "Close" button on the post-purchase dialog. Dismisses the after-sale screen without using the item.
+- `shop_aftersale_confirm_use_available.png` — Green "Confirm Use" button (active/available state). Appears post-purchase when the item can be used immediately.
+- `shop_aftersale_confirm_use_unavailable.png` — Grey/dimmed "Confirm Use" button (unavailable state). Appears post-purchase when the item cannot be used right now (e.g. not applicable to current state).
+- `shop_aftersale_confirm_use_increment_item.png` — Green "+" increment arrow on the post-purchase use dialog. Used to increase quantity of the item to use.
+
+**Item use flow UI templates:**
+
+- `shop_use_training_items.png` — Green "Use Training Items" button. Enters the training-item use screen from inventory.
+- `shop_use_back.png` — "Back" button on the item-use screen. Returns to the previous screen.
+- `training_items.png` — "Training Items" tab/label text. Identifies the training items section in the inventory/use UI.
+
+**Item selection UI templates:**
+
+- `select_checked.png` — Green checkmark (selected state). Indicates an item row is currently selected for use.
+- `select_unchecked.png` — Grey/empty checkbox (unselected state). Indicates an item row is not selected.
+
 Not implemented yet:
 
 - real Trackblazer OCR extraction for grade points / shop coins / shop state
 - real Trackblazer inventory extraction
 - Trackblazer scoring
-- Trackblazer shop/item logic
+- Trackblazer shop/item logic (shop refresh popup is detected and dismissed; shop entry, purchasing, and item use not yet implemented)
 - Trackblazer-specific action routing
+- Item price/cost OCR for shop decision-making
+- Inventory quantity OCR for owned item counts
 
 ## Why This Exists
 
@@ -264,6 +303,47 @@ The console flow should be expanded beyond generic "collect state" and "execute 
 
 For OCR tuning, each of these should be able to run in a non-committing path where the bot reads and evaluates but does not finalize the click sequence.
 
+## Trackblazer Shop & Item Flows
+
+The shop and item-use flows have been mapped from in-game screenshots. Template assets cover the full purchase-and-use cycle.
+
+### Shop Purchase Flow
+
+1. **Enter shop** — via lobby button (`shop_enter_lobby.png`) or shop refresh popup (`shop_refresh_shop_button.png`).
+2. **Browse items** — item icons (grilled_carrots, guts_notepad, miracle_cure, motivating_megaphone, stamina_ankle_weights, wit_manual, yumy_cat_food) are used to identify what's available and match against a buy priority list.
+3. **Confirm purchase** — tap `shop_confirm.png` on the purchase dialog.
+4. **After-sale dialog** — the game shows a post-purchase screen with options:
+   - **Use now** — `shop_aftersale_confirm_use_available.png` (green, active) if the item is usable in the current context. Tap the `+` increment (`shop_aftersale_confirm_use_increment_item.png`) to adjust quantity, then confirm.
+   - **Cannot use now** — `shop_aftersale_confirm_use_unavailable.png` (grey, dimmed) when the item doesn't apply right now.
+   - **Close** — `shop_aftersale_close.png` to dismiss and bank the item for later.
+
+### Item Use Flow (from inventory)
+
+1. **Enter item use** — tap `shop_use_training_items.png` ("Use Training Items" button).
+2. **Select training items tab** — match `training_items.png` label to confirm correct tab.
+3. **Select/deselect items** — use `select_checked.png` / `select_unchecked.png` to detect and toggle item rows.
+4. **Go back** — `shop_use_back.png` to return to previous screen.
+
+### Known Item Categories
+
+| Item | Category | Effect |
+|------|----------|--------|
+| Grilled Carrots | Energy | Restores energy/vitality |
+| Yumy Cat Food | Energy | Restores energy/vitality |
+| Miracle Cure | Condition | Cures bad conditions/ailments |
+| Motivating Megaphone | Mood | Boosts motivation/mood |
+| Guts Notepad | Training boost | Boosts Guts training gains |
+| Stamina Ankle Weights | Training boost | Boosts Stamina training gains |
+| Wit Manual | Training boost | Boosts Wit/Intelligence training gains |
+
+### Not Yet Captured
+
+- Speed / Power training boost item icons (if they exist in the shop rotation)
+- Whistle / finals-specific item icons
+- Item price regions for OCR
+- Item quantity/stock indicators
+- Shop coin balance on the shop screen itself
+
 ## Architecture Requirements
 
 ### Preferred File Boundaries
@@ -295,7 +375,8 @@ For OCR tuning, each of these should be able to run in a non-committing path whe
 - [x] Add scenario banner asset(s).
 - [x] Extend scenario detection to return the new scenario name.
 - [ ] Verify default runs and Unity runs still detect correctly.
-- [ ] Ensure unknown Trackblazer screens do not cause infinite `non_match_count` looping without logs.
+- [x] Ensure unknown Trackblazer screens do not cause infinite `non_match_count` looping without logs.
+  - Shop refresh popup is now detected and auto-dismissed with cancel in `career_lobby()`.
 
 Acceptance:
 
@@ -360,7 +441,14 @@ Acceptance:
 
 - [x] Decide canonical scenario key: `trackblazer` with `mant` accepted as a legacy alias where needed.
 - [x] Add `assets/scenario_banner/<name>.png`.
-- [ ] Add any new scenario assets under a dedicated `assets/trackblazer/` directory.
+- [x] Add shop item icon templates under `assets/trackblazer/` (grilled_carrots, guts_notepad, miracle_cure, motivating_megaphone, stamina_ankle_weights, wit_manual, yumy_cat_food).
+- [x] Add shop purchase flow UI templates under `assets/trackblazer/` (shop_confirm, shop_aftersale_close, shop_aftersale_confirm_use_available, shop_aftersale_confirm_use_unavailable, shop_aftersale_confirm_use_increment_item).
+- [x] Add item use flow UI templates under `assets/trackblazer/` (shop_use_training_items, shop_use_back, training_items).
+- [x] Add item selection UI templates under `assets/trackblazer/` (select_checked, select_unchecked).
+- [x] Add shop refresh popup detection and dismissal in `core/skeleton.py` lobby loop.
+  - `assets/icons/shop_refresh.png` — detect popup
+  - `assets/buttons/shop_refresh_shop_button.png` — shop entry from popup (not yet wired)
+  - `assets/buttons/shop_enter_lobby.png` — shop entry from lobby (not yet wired)
 - [ ] Update `core/skeleton.py` detection/routing.
 - [ ] Update `utils/constants.py` with Trackblazer-specific regions if needed.
 - [ ] Update `core/state.py` to read Trackblazer state.

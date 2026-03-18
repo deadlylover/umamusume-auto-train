@@ -4,7 +4,7 @@ import cv2
 from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
-from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, clear_aptitudes_cache
+from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache
 from utils.shared import CleanDefaultDict
 import core.config as config
 from PIL import ImageGrab
@@ -50,7 +50,8 @@ templates = {
   "tazuna": "assets/ui/tazuna_hint.png",
   "infirmary": "assets/buttons/infirmary_btn.png",
   "claw_btn": "assets/buttons/claw_btn.png",
-  "ok_2_btn": "assets/buttons/ok_2_btn.png"
+  "ok_2_btn": "assets/buttons/ok_2_btn.png",
+  "shop_refresh": "assets/icons/shop_refresh.png"
 }
 
 cached_templates = cache_templates(templates)
@@ -591,11 +592,22 @@ def _base_ocr_debug_entries(state_obj):
     _region_debug_entry("energy", "UNITY_ENERGY_REGION" if scenario_name == "unity" else "MANT_ENERGY_REGION" if scenario_name == "trackblazer" else "ENERGY_REGION", parsed_value=f"{state_obj.get('energy_level', '?')}/{state_obj.get('max_energy', '?')}"),
   ]
   if scenario_name == "trackblazer":
+    inv_summary = state_obj.get("trackblazer_inventory_summary") or {}
     entries.extend(
       [
         _region_debug_entry("trackblazer_grade_points", "MANT_GRADE_POINT_REGION", parsed_value=state_obj.get("grade_points")),
         _region_debug_entry("trackblazer_shop_coins", "MANT_SHOP_COIN_REGION", parsed_value=state_obj.get("shop_coins")),
         _region_debug_entry("trackblazer_shop_button", "MANT_SHOP_BUTTON_REGION"),
+        _region_debug_entry(
+          "trackblazer_inventory",
+          "MANT_INVENTORY_ITEMS_REGION",
+          parsed_value=inv_summary.get("items_detected", []),
+          source_type="template_match",
+          extra={
+            "total_detected": inv_summary.get("total_detected", 0),
+            "by_category": inv_summary.get("by_category", {}),
+          },
+        ),
       ]
     )
   aptitudes = state_obj.get("aptitudes") or {}
@@ -746,6 +758,10 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "screenshot_backend": backend_state.get("screenshot_backend"),
     "device_id": backend_state.get("device_id"),
   }
+  if (constants.SCENARIO_NAME or "default") == "trackblazer":
+    state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
+    state_summary["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
+    state_summary["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
   selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,
@@ -794,6 +810,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "selected_action": selected_action,
     "available_actions": list(getattr(action, "available_actions", [])),
     "ranked_trainings": ranked_trainings,
+    "trackblazer_inventory": state_obj.get("trackblazer_inventory") if isinstance(state_obj, dict) else None,
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
     "backend_state": backend_state,
@@ -1134,6 +1151,18 @@ def career_lobby(dry_run_turn=False):
         info("Pressed next2.")
         non_match_count = 0
         continue
+      if matches.get("shop_refresh", False):
+        info("Shop refresh popup detected — shop has been refreshed.")
+        # TODO: persist shop_refreshed state for future shop-visit logic
+        cancel_match = device_action.match_template("assets/buttons/cancel_btn.png", region_ltrb=constants.GAME_WINDOW_BBOX, threshold=0.9)
+        if cancel_match:
+          x, y, w, h = cancel_match[0]
+          device_action.click(target=(x + w // 2, y + h // 2), text="Dismissed shop refresh popup.")
+          info("Dismissed shop refresh popup.")
+          non_match_count = 0
+        else:
+          non_match_count += 1
+        continue
       if matches.get("cancel", False):
         clock_icon = device_action.match_template("assets/icons/clock_icon.png", screenshot=screenshot, threshold=0.9)
         if clock_icon:
@@ -1197,6 +1226,7 @@ def career_lobby(dry_run_turn=False):
             _template_debug_entry("next_button_alt", "assets/buttons/next2_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("next2", []))),
             _template_debug_entry("event_choice", "assets/icons/event_choice_1.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("event", []))),
             _template_debug_entry("cancel_button", "assets/buttons/cancel_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("cancel", []))),
+            _template_debug_entry("shop_refresh_icon", "assets/icons/shop_refresh.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("shop_refresh", []))),
           ],
           reasoning_notes=f"Stable screen anchors were not found yet. anchor_counts={stable_anchor_counts}",
         )
@@ -1232,6 +1262,10 @@ def career_lobby(dry_run_turn=False):
       action = Action()
       update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
       state_obj = collect_main_state()
+
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
+        state_obj = collect_trackblazer_inventory(state_obj)
 
       if state_obj["turn"] == "Race Day":
         action.func = "do_race"

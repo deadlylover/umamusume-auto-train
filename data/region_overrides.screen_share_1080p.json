@@ -516,28 +516,28 @@
     7
   ],
   "MANT_SHOP_COIN_BBOX": [
-    399,
-    604,
-    517,
-    683
+    432,
+    1390,
+    530,
+    1415
   ],
   "MANT_SHOP_COIN_REGION": [
-    399,
-    604,
-    118,
-    79
+    432,
+    1390,
+    98,
+    25
   ],
   "MANT_GRADE_POINT_BBOX": [
-    281,
-    492,
-    415,
-    596
+    21,
+    391,
+    165,
+    437
   ],
   "MANT_GRADE_POINT_REGION": [
-    281,
-    492,
-    134,
-    104
+    21,
+    391,
+    144,
+    46
   ],
   "MANT_SHOP_BUTTON_BBOX": [
     385,
@@ -550,6 +550,18 @@
     1277,
     175,
     132
+  ],
+  "MANT_INVENTORY_ITEMS_BBOX": [
+    28,
+    234,
+    751,
+    1287
+  ],
+  "MANT_INVENTORY_ITEMS_REGION": [
+    28,
+    234,
+    723,
+    1053
   ],
   "EVENT_NAME_BBOX": [
     109,

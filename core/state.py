@@ -175,6 +175,105 @@ def collect_main_state():
   debug(f"Main state collection done.")
   return state_object
 
+
+def collect_trackblazer_inventory(state_object):
+  """Open, scan, and close the Trackblazer training items inventory."""
+  from scenarios.trackblazer import (
+    scan_training_items_inventory,
+    build_inventory_summary,
+    open_training_items_inventory,
+    close_training_items_inventory,
+    detect_inventory_screen,
+    detect_inventory_controls,
+  )
+
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    debug("[STATE] Skipping Trackblazer inventory scan — wrong scenario.")
+    return state_object
+
+  inventory = CleanDefaultDict()
+  controls = {}
+  summary = {
+    "items_detected": [],
+    "by_category": {},
+    "total_detected": 0,
+    "actionable_items": [],
+  }
+  flow = {
+    "execution_intent": bot.get_execution_intent(),
+    "opened": False,
+    "already_open": False,
+    "closed": False,
+    "skipped": False,
+    "reason": "",
+    "open_result": None,
+    "close_result": None,
+  }
+
+  inventory_screen_open, _, precheck_entries = detect_inventory_screen()
+  flow["precheck"] = precheck_entries
+
+  if inventory_screen_open:
+    flow["opened"] = True
+    flow["already_open"] = True
+  elif bot.get_execution_intent() != "execute":
+    flow["skipped"] = True
+    flow["reason"] = "inventory_open_requires_execute_intent"
+    debug("[STATE] Skipping Trackblazer inventory open in non-execute intent.")
+  else:
+    debug("[STATE] Opening Trackblazer training items inventory.")
+    open_result = open_training_items_inventory()
+    flow["open_result"] = open_result
+    flow["opened"] = bool(open_result.get("opened"))
+    flow["already_open"] = bool(open_result.get("already_open"))
+    if not flow["opened"]:
+      flow["reason"] = "failed_to_open_inventory"
+      warning("[STATE] Failed to open Trackblazer inventory.")
+
+  if flow["opened"]:
+    debug("[STATE] Scanning Trackblazer training items inventory.")
+    inventory = scan_training_items_inventory()
+    controls = detect_inventory_controls()
+    summary = build_inventory_summary(inventory)
+
+    if flow["already_open"]:
+      flow["closed"] = False
+      flow["reason"] = flow["reason"] or "inventory_was_already_open"
+    else:
+      close_result = close_training_items_inventory()
+      flow["close_result"] = close_result
+      flow["closed"] = bool(close_result.get("closed"))
+      if not flow["closed"]:
+        warning("[STATE] Inventory scan completed but close-backout failed.")
+        flow["reason"] = flow["reason"] or "failed_to_close_inventory"
+
+  state_object["trackblazer_inventory"] = inventory
+  state_object["trackblazer_inventory_controls"] = controls
+  state_object["trackblazer_inventory_summary"] = summary
+  state_object["trackblazer_inventory_flow"] = flow
+
+  detected = summary.get("items_detected", [])
+  if detected:
+    info(f"[STATE] Trackblazer items detected: {detected}")
+  else:
+    debug("[STATE] No Trackblazer items detected in inventory scan.")
+
+  record_runtime_ocr_debug(
+    "trackblazer_inventory",
+    extra={
+      "region_key": "MANT_INVENTORY_ITEMS_REGION",
+      "region_xywh": list(constants.MANT_INVENTORY_ITEMS_REGION),
+      "items_detected": detected,
+      "total_detected": summary.get("total_detected", 0),
+      "by_category": summary.get("by_category", {}),
+      "controls": controls,
+      "flow": flow,
+    },
+  )
+
+  return state_object
+
+
 def collect_training_state(state_object, training_function_name):
   check_stat_gains = False
   if training_function_name == "meta_training" or training_function_name == "most_stat_gain":
@@ -775,6 +874,36 @@ def get_aptitudes():
   warning(f"Parsed aptitude values: {aptitudes}. If these values are wrong, please stop and start the bot again with the hotkey.")
   return aptitudes
 
+def _find_bar_start_offset(strip_bgr):
+  """Find the x offset where the energy bar interior begins in a 1px-high strip.
+
+  The energy region may include non-bar pixels (e.g. "Energy" text label,
+  decorations) to the left of the actual bar. This function skips those by
+  scanning left-to-right for the first pixel that looks like bar content:
+  either gray (empty bar ~115,115,115) or a high-saturation fill color.
+
+  If accuracy is still off, consider tightening the energy OCR region in the
+  region adjuster to exclude as much non-bar content as possible.
+  """
+  gray_target = 115
+  gray_tolerance = 5
+  hsv = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2HSV)
+
+  for x in range(strip_bgr.shape[1]):
+    bgr = strip_bgr[0, x].astype(int)
+    # Gray (empty bar): all channels ~115
+    if all(abs(int(c) - gray_target) <= gray_tolerance for c in bgr):
+      return x
+    # Saturated fill color with high brightness (bar fill).
+    # Anti-aliased text edges can reach S~70, V~196 so thresholds must be
+    # high enough to skip those. Actual fill has S>130, V>228.
+    s, v = int(hsv[0, x, 1]), int(hsv[0, x, 2])
+    if s > 80 and v > 200:
+      return x
+
+  return 0  # fallback: assume bar starts at beginning
+
+
 def _expand_energy_region(region_xywh, min_height=24, vertical_padding=12):
   x, y, w, h = region_xywh
   if h >= min_height:
@@ -816,19 +945,30 @@ def get_energy_level(threshold=0.85):
   if right_bar_match:
     x, y, w, h = right_bar_match[0]
     energy_bar_length = x
-    debug(f"Energy bar length: {energy_bar_length}")
+    debug(f"Energy bar right end at x={energy_bar_length}")
 
     x, y, w, h = region_xywh
     top_bottom_middle_pixel = int(y + h // 2)
     debug(f"Top bottom middle pixel: {top_bottom_middle_pixel}")
-    MAX_ENERGY_REGION = (x, top_bottom_middle_pixel, x + energy_bar_length, top_bottom_middle_pixel+1)
+
+    # Find where the actual bar starts by scanning the middle pixel row.
+    # The energy region may include text labels or decorations to the left
+    # of the bar that would otherwise inflate the energy reading.
+    full_strip_region = (x, top_bottom_middle_pixel, x + energy_bar_length, top_bottom_middle_pixel + 1)
+    full_strip = device_action.screenshot(region_ltrb=full_strip_region)
+    bar_start_offset = _find_bar_start_offset(full_strip)
+    if bar_start_offset > 0:
+      debug(f"Bar start offset: {bar_start_offset}px (skipping non-bar pixels)")
+
+    bar_left_absolute = x + bar_start_offset
+    MAX_ENERGY_REGION = (bar_left_absolute, top_bottom_middle_pixel, x + energy_bar_length, top_bottom_middle_pixel + 1)
     debug_window(device_action.screenshot(region_ltrb=MAX_ENERGY_REGION), save_name="MAX_ENERGY_REGION")
     debug(f"MAX_ENERGY_REGION: {MAX_ENERGY_REGION}")
     #[117,117,117] is gray for missing energy, region templating for this one is a problem, so we do this
     empty_energy_pixel_count = count_pixels_of_color([115,115,115], MAX_ENERGY_REGION, tolerance=5)
 
     #use the energy_bar_length (a few extra pixels from the outside are remaining so we subtract that)
-    total_energy_length = energy_bar_length - 1
+    total_energy_length = energy_bar_length - bar_start_offset - 1
     hundred_energy_pixel_constant = 236 #counted pixels from one end of the bar to the other, should be fine since we're working in only 1080p
 
     energy_level = ((total_energy_length - empty_energy_pixel_count) / hundred_energy_pixel_constant) * 100
