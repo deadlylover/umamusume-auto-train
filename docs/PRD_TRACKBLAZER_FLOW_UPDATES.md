@@ -2,14 +2,25 @@
 
 ## Status
 
-Proposed. The repo now has:
+In progress. The repo now has:
 
 - partial Trackblazer detection scaffolding
 - an operator console with phase/sub-phase support
 - a prose bot flow reference in `docs/BOT_FLOW.md`
 - a gameplay/mechanics brief in `docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md`
+- Trackblazer inventory scan / item-use scaffolding and console timing visibility
 
 What is still missing is a Trackblazer-specific flow model that the code can follow.
+
+## Current Progress
+
+- [x] `docs/BOT_FLOW.md` already carries the canonical Trackblazer flow vocabulary.
+- [x] The operator console exposes phase, sub-phase, execution intent, and timing/debug panes.
+- [x] Trackblazer inventory open/scan/close flow exists with inventory summary and debug provenance.
+- [x] Trackblazer item-use test scaffolding exists for non-destructive manual verification.
+- [x] Trackblazer shop-entry detection exists at the lobby/refresh-popup level.
+- [x] Generic race selection preview clicks exist for the main snapshot flow.
+- [ ] Dedicated Trackblazer flow boundaries for checkpoint progress, Grade Points, Shop Coins, fatigue, and Twinkle Star Climax are still not modeled as first-class runtime sub-phases.
 
 ## Why This Exists
 

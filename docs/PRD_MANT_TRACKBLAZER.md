@@ -2,25 +2,25 @@
 
 ## Status
 
-In progress. Initial Trackblazer detection scaffolding and scenario-specific placeholder regions are in the branch, but scoring and exclusive flow handling are still incomplete.
+In progress. Trackblazer detection, console visibility, and inventory/item-use scaffolding are in the branch, but real scenario scoring and full shop/action routing are still incomplete.
 
 ## Current Progress
 
 Implemented in support of Trackblazer bring-up:
 
-- Operator/debug console now exists and can be used while tuning a new scenario.
-- OCR region adjuster can be launched directly from that console.
-- Scenario banner asset was added at `assets/scenario_banner/trackblazer.png`.
-- `core/skeleton.py` now treats banner filenames as scenario keys and uses `trackblazer` as the canonical internal name, with `mant` retained only as a legacy alias in some branches/comments.
-- Operator console/runtime state now supports execution intents:
+- [x] Operator/debug console now exists and can be used while tuning a new scenario.
+- [x] OCR region adjuster can be launched directly from that console.
+- [x] Scenario banner asset was added at `assets/scenario_banner/trackblazer.png`.
+- [x] `core/skeleton.py` now treats banner filenames as scenario keys and uses `trackblazer` as the canonical internal name, with `mant` retained only as a legacy alias in some branches/comments.
+- [x] Operator console/runtime state now supports execution intents:
   - `check_only`
   - `preview_clicks`
   - `execute`
-- Operator console now includes:
+- [x] Operator console now includes:
   - sub-phase display
   - OCR debug pane
   - copy-to-clipboard actions for summary/trainings/OCR debug
-- Separate placeholder MANT/Trackblazer region entries were added so the scenario can be tuned independently from default/Unity:
+- [x] Separate placeholder MANT/Trackblazer region entries were added so the scenario can be tuned independently from default/Unity:
   - energy
   - turn
   - year
@@ -29,18 +29,21 @@ Implemented in support of Trackblazer bring-up:
   - stat gains
   - support card icon region
   - initial grade point / shop coin / shop button placeholders
-- `core/state.py` now recognizes `mant` / `trackblazer` as a separate scenario branch for those placeholder regions.
-- Scenario detection is now wired through the main loop and logs the detected scenario before main state collection begins.
-- Trackblazer placeholder OCR provenance now appears in the console snapshot for:
+- [x] `core/state.py` now recognizes `mant` / `trackblazer` as a separate scenario branch for those placeholder regions.
+- [x] Scenario detection is now wired through the main loop and logs the detected scenario before main state collection begins.
+- [x] Trackblazer placeholder OCR provenance now appears in the console snapshot for:
   - grade points
   - shop coins
   - shop button region
-- Planned-click preview payloads now exist for race actions and skill-buy flow, so the console can show intended clicks without committing them in non-execute intents.
-- Skill purchase review is now a distinct inspectable console path with sub-phases such as:
+- [x] Planned-click preview payloads now exist for race actions and skill-buy flow, so the console can show intended clicks without committing them in non-execute intents.
+- [x] Skill purchase review is now a distinct inspectable console path with sub-phases such as:
   - `evaluate_skill_purchase`
   - `scan_skill_list`
   - `preview_skill_purchase`
   - `confirm_skill_purchase`
+- [x] Trackblazer inventory open/scan/close and the non-destructive item-use test flow are implemented in `scenarios/trackblazer.py`.
+- [x] Inventory scan timing, held-quantity OCR, and per-item debug provenance are surfaced in the operator console snapshot.
+- [x] Shop entry detection and refresh-popup dismissal are wired into the lobby loop.
 
 Shop-related template assets added:
 
@@ -82,12 +85,10 @@ Trackblazer shop item assets added under `assets/trackblazer/`:
 Not implemented yet:
 
 - real Trackblazer OCR extraction for grade points / shop coins / shop state
-- real Trackblazer inventory extraction
 - Trackblazer scoring
-- Trackblazer shop/item logic (shop refresh popup is detected and dismissed; shop entry, purchasing, and item use not yet implemented)
+- Trackblazer shop/item logic beyond the current refresh-popup dismissal and inventory test scaffolding (shop entry, purchasing, and production item use are not yet implemented)
 - Trackblazer-specific action routing
 - Item price/cost OCR for shop decision-making
-- Inventory quantity OCR for owned item counts
 
 ## Why This Exists
 
@@ -449,12 +450,12 @@ Acceptance:
   - `assets/icons/shop_refresh.png` — detect popup
   - `assets/buttons/shop_refresh_shop_button.png` — shop entry from popup (not yet wired)
   - `assets/buttons/shop_enter_lobby.png` — shop entry from lobby (not yet wired)
-- [ ] Update `core/skeleton.py` detection/routing.
-- [ ] Update `utils/constants.py` with Trackblazer-specific regions if needed.
-- [ ] Update `core/state.py` to read Trackblazer state.
+- [x] Update `utils/constants.py` with Trackblazer-specific regions and template maps.
+- [x] Update `core/state.py` to read Trackblazer inventory state and surface debug/timing data.
+- [x] Update `core/skeleton.py` detection/routing for scenario-aware inventory handling and console snapshots.
 - [ ] Update `core/trainings.py` with scenario score function and debug fields.
-- [ ] Add `scenarios/trackblazer.py` if scenario actions exist.
-- [ ] Ensure Trackblazer fields are included in the operator/debug console snapshot.
+- [x] Add `scenarios/trackblazer.py` for inventory scanning, item-use testing, and shop-entry helpers.
+- [x] Ensure Trackblazer fields are included in the operator/debug console snapshot.
 - [ ] Add Trackblazer console sub-phases for shop, inventory, and race selection.
 - [x] Add skill-buy console sub-phases and review flow.
 - [x] Add Trackblazer OCR provenance entries showing region key and adjusted bounds.
