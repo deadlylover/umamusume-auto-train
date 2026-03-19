@@ -587,6 +587,42 @@
     723,
     1053
   ],
+  "SKILL_SCROLLBAR_BBOX": [
+    745,
+    634,
+    769,
+    1226
+  ],
+  "SKILL_SCROLLBAR_REGION": [
+    745,
+    634,
+    24,
+    592
+  ],
+  "SKILL_NAME_BAND_BBOX": [
+    130,
+    622,
+    534,
+    1215
+  ],
+  "SKILL_NAME_BAND_REGION": [
+    130,
+    622,
+    404,
+    593
+  ],
+  "SKILL_POINTS_BBOX": [
+    564,
+    554,
+    685,
+    599
+  ],
+  "SKILL_POINTS_REGION": [
+    564,
+    554,
+    121,
+    45
+  ],
   "EVENT_NAME_BBOX": [
     109,
     377,

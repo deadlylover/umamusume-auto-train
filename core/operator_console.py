@@ -24,6 +24,7 @@ PHASES = [
   "checking_inventory",
   "checking_inventory_selection",
   "checking_shop",
+  "checking_skill_purchase",
   "collecting_training_state",
   "pre_training",
   "evaluating_strategy",
@@ -37,6 +38,7 @@ PHASE_CONTROL_CALLBACKS = {
   "checking_inventory": "check_inventory",
   "checking_inventory_selection": "check_inventory_selection",
   "checking_shop": "check_shop",
+  "checking_skill_purchase": "check_skill_purchase",
 }
 
 
@@ -498,6 +500,7 @@ class OperatorConsole:
       "shop_summary": state_summary.get("trackblazer_shop_summary"),
       "shop_flow": state_summary.get("trackblazer_shop_flow"),
       "shop_items": snapshot.get("trackblazer_shop_items"),
+      "skill_purchase_flow": state_summary.get("skill_purchase_flow"),
     }
     self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
@@ -512,15 +515,21 @@ class OperatorConsole:
   def _format_timing(self, snapshot):
     state_summary = snapshot.get("state_summary") or {}
     sub_phase = snapshot.get("sub_phase") or ""
-    if sub_phase == "manual_shop_check":
+    if sub_phase == "manual_skill_purchase_check":
+      flow = state_summary.get("skill_purchase_flow") or {}
+      title = "Skill Purchase Flow"
+    elif sub_phase == "manual_shop_check":
       flow = state_summary.get("trackblazer_shop_flow") or {}
       title = "Shop Flow"
     elif sub_phase in ("manual_inventory_check", "manual_inventory_selection_test"):
       flow = state_summary.get("trackblazer_inventory_flow") or {}
       title = "Inventory Flow"
     else:
-      flow = state_summary.get("trackblazer_inventory_flow") or {}
-      title = "Inventory Flow"
+      flow = state_summary.get("skill_purchase_flow") or {}
+      title = "Skill Purchase Flow"
+      if not flow:
+        flow = state_summary.get("trackblazer_inventory_flow") or {}
+        title = "Inventory Flow"
       if not flow:
         flow = state_summary.get("trackblazer_shop_flow") or {}
         title = "Shop Flow"

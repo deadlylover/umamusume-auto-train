@@ -356,6 +356,43 @@ def trigger_manual_shop_check():
 
   _start_manual_console_check("manual shop check", _run)
 
+
+def trigger_manual_skill_purchase_check():
+  def _run():
+    bot.set_phase("checking_skill_purchase", message="Running manual skill purchase check.")
+    publish_runtime_state()
+    snapshot = _manual_console_snapshot()
+    snapshot["sub_phase"] = "manual_skill_purchase_check"
+    snapshot["selected_action"] = {"func": "check_skill_purchase"}
+    snapshot["reasoning_notes"] = "Manual skill purchase check triggered from the operator console."
+    # Clear previous skill purchase data.
+    snapshot["state_summary"]["skill_purchase_flow"] = None
+    try:
+      config.reload_config(print_config=False)
+      resolve_control_backend()
+      focus_target_window()
+      bot.set_manual_control_active(True)
+
+      from core.skill_scanner import collect_skill_purchase
+
+      purchase_result = collect_skill_purchase(trigger="manual_console", dry_run=True)
+      snapshot["state_summary"]["skill_purchase_flow"] = purchase_result.get("skill_purchase_flow")
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_skill_purchase", status="complete", message="Manual skill purchase check complete.")
+    except Exception as exc:
+      snapshot["state_summary"]["skill_purchase_flow"] = {
+        "trigger": "manual_console",
+        "error": str(exc),
+      }
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_skill_purchase", status="error", message="Manual skill purchase check failed.", error=str(exc))
+    finally:
+      bot.set_manual_control_active(False)
+    publish_runtime_state()
+
+  _start_manual_console_check("manual skill purchase check", _run)
+
+
 def trigger_debug_capture():
   debug(f"Hotkey '{capture_hotkey}' pressed; capturing OCR regions for calibration.")
 
@@ -492,6 +529,7 @@ if __name__ == "__main__":
   bot.register_control_callback("check_inventory", trigger_manual_inventory_check)
   bot.register_control_callback("check_inventory_selection", trigger_manual_inventory_selection_test)
   bot.register_control_callback("check_shop", trigger_manual_shop_check)
+  bot.register_control_callback("check_skill_purchase", trigger_manual_skill_purchase_check)
   ensure_operator_console()
   publish_runtime_state()
   

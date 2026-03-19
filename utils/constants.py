@@ -54,6 +54,20 @@ SCREEN_BOTTOM_REGION = convert_xyxy_to_xywh(SCREEN_BOTTOM_BBOX)
 SCROLLING_SKILL_SCREEN_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 390, 0, -200))
 SCROLLING_SKILL_SCREEN_REGION = convert_xyxy_to_xywh(SCROLLING_SKILL_SCREEN_BBOX)
 
+# Skill scrollbar — narrow vertical strip containing only the scrollbar track and thumb.
+# Initial offsets are rough estimates; tune with the region adjuster on the open skills page.
+SKILL_SCROLLBAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (705, 390, -18, -200))
+SKILL_SCROLLBAR_REGION = convert_xyxy_to_xywh(SKILL_SCROLLBAR_BBOX)
+
+# Skill name band — horizontal strip where skill titles appear (top portion of each card).
+# Intentionally excludes the description text below the title line.
+SKILL_NAME_BAND_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (50, 390, -80, -200))
+SKILL_NAME_BAND_REGION = convert_xyxy_to_xywh(SKILL_NAME_BAND_BBOX)
+
+# Skill points display — the SP counter shown near the top of the skills page.
+SKILL_POINTS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (560, 85, -130, -950))
+SKILL_POINTS_REGION = convert_xyxy_to_xywh(SKILL_POINTS_BBOX)
+
 ENERGY_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (292, 120, -150, -920))
 ENERGY_REGION = convert_xyxy_to_xywh(ENERGY_BBOX)
 
@@ -655,6 +669,12 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_SHOP_SCROLLBAR_REGION",
   "MANT_INVENTORY_ITEMS_BBOX",
   "MANT_INVENTORY_ITEMS_REGION",
+  "SKILL_SCROLLBAR_BBOX",
+  "SKILL_SCROLLBAR_REGION",
+  "SKILL_NAME_BAND_BBOX",
+  "SKILL_NAME_BAND_REGION",
+  "SKILL_POINTS_BBOX",
+  "SKILL_POINTS_REGION",
   "EVENT_NAME_BBOX",
   "EVENT_NAME_REGION",
   "CLAW_MACHINE_SPEED_BBOX",
