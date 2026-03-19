@@ -197,6 +197,21 @@ def _manual_console_snapshot():
   return snapshot
 
 
+def _clear_manual_trackblazer_result(snapshot, result_type):
+  state_summary = snapshot["state_summary"]
+  if result_type == "inventory":
+    snapshot["trackblazer_shop_items"] = None
+    state_summary["trackblazer_shop_summary"] = None
+    state_summary["trackblazer_shop_flow"] = None
+    state_summary["trackblazer_shop_enter"] = None
+    return
+  if result_type == "shop":
+    snapshot["trackblazer_inventory"] = None
+    state_summary["trackblazer_inventory_summary"] = None
+    state_summary["trackblazer_inventory_controls"] = None
+    state_summary["trackblazer_inventory_flow"] = None
+
+
 def _start_manual_console_check(name, worker):
   if bot.is_bot_running:
     bot.set_phase(
@@ -217,6 +232,7 @@ def trigger_manual_inventory_check():
     snapshot = _manual_console_snapshot()
     snapshot["scenario_name"] = "trackblazer"
     snapshot["sub_phase"] = "manual_inventory_check"
+    _clear_manual_trackblazer_result(snapshot, "inventory")
     snapshot["selected_action"] = {"func": "check_inventory"}
     snapshot["reasoning_notes"] = "Manual Trackblazer inventory check triggered from the operator console."
     try:
@@ -257,6 +273,7 @@ def trigger_manual_inventory_selection_test():
     snapshot = _manual_console_snapshot()
     snapshot["scenario_name"] = "trackblazer"
     snapshot["sub_phase"] = "manual_inventory_selection_test"
+    _clear_manual_trackblazer_result(snapshot, "inventory")
     snapshot["selected_action"] = {"func": "prepare_training_items_for_use"}
     snapshot["reasoning_notes"] = (
       "Manual Trackblazer item-selection test triggered from the operator console. "
@@ -306,6 +323,7 @@ def trigger_manual_shop_check():
     snapshot = _manual_console_snapshot()
     snapshot["scenario_name"] = "trackblazer"
     snapshot["sub_phase"] = "manual_shop_check"
+    _clear_manual_trackblazer_result(snapshot, "shop")
     snapshot["selected_action"] = {"func": "check_shop"}
     snapshot["reasoning_notes"] = "Manual Trackblazer shop check triggered from the operator console."
     try:

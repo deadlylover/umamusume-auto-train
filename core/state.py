@@ -212,6 +212,106 @@ def _build_trackblazer_inventory_debug_entries(flow, controls, inventory):
     deduped.append(entry)
   return deduped
 
+
+def _build_trackblazer_shop_debug_entries(flow, ocr_runtime_debug=None):
+  entries = []
+
+  entry_result = flow.get("entry_result") or {}
+  shop_check = entry_result.get("shop_check") or {}
+  for method_name, method in (shop_check.get("methods") or {}).items():
+    for key, check in ((method or {}).get("checks") or {}).items():
+      template_path = (check or {}).get("template")
+      if not template_path:
+        continue
+      entries.append(
+        _inventory_template_debug_entry(
+          f"shop_entry_{method_name}_{key}",
+          template_path,
+          check,
+        )
+      )
+
+  for idx, check in enumerate(entry_result.get("verification_checks") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"shop_entry_verify_{idx}", template_path, check))
+
+  scan_result = flow.get("scan_result") or {}
+  for page in scan_result.get("pages") or []:
+    page_index = page.get("page_index", 0)
+    for row in page.get("rows") or []:
+      item_name = row.get("item_name")
+      template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+      if not template_path:
+        continue
+      entries.append(
+        _inventory_template_debug_entry(
+          f"shop_item_page_{page_index}_{item_name}",
+          template_path,
+          {
+            "threshold": row.get("threshold"),
+            "passed_threshold": bool(row.get("detected")),
+            "matched": bool(row.get("detected")),
+          },
+          extra={
+            "category": row.get("category"),
+            "match_rect": row.get("match"),
+            "row_center_y": row.get("row_center_y"),
+            "checkbox_match": row.get("checkbox_match"),
+            "checkbox_target": row.get("checkbox_target"),
+            "search_image_path": row.get("search_image_path"),
+          },
+        )
+      )
+    confirm_entry = page.get("confirm") or {}
+    confirm_template = confirm_entry.get("template")
+    if confirm_template:
+      entries.append(
+        _inventory_template_debug_entry(
+          f"shop_confirm_page_{page_index}",
+          confirm_template,
+          confirm_entry,
+        )
+      )
+
+  close_result = flow.get("close_result") or {}
+  for idx, check in enumerate(close_result.get("attempts") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"shop_close_attempt_{idx}", template_path, check))
+  for idx, check in enumerate(close_result.get("verification_checks") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"shop_close_verify_{idx}", template_path, check))
+
+  shop_coins_debug = (ocr_runtime_debug or {}).get("trackblazer_shop_coins") or {}
+  if shop_coins_debug:
+    entries.append(
+      {
+        "field": "shop_coins_ocr",
+        "source_type": "ocr",
+        "search_image_path": shop_coins_debug.get("search_image_path"),
+        "parsed_value": shop_coins_debug.get("parsed_value"),
+        "raw_text": shop_coins_debug.get("raw_text"),
+        "region_key": shop_coins_debug.get("region_key"),
+        "region_xywh": shop_coins_debug.get("region_xywh"),
+      }
+    )
+
+  deduped = []
+  seen = set()
+  for entry in entries:
+    dedupe_key = (
+      entry.get("field"),
+      entry.get("template"),
+      entry.get("search_image_path"),
+    )
+    if dedupe_key in seen:
+      continue
+    seen.add(dedupe_key)
+    deduped.append(entry)
+  return deduped
+
 def clear_aptitudes_cache():
   global aptitudes_cache
   aptitudes_cache = {}

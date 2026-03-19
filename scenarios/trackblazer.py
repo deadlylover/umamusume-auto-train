@@ -9,6 +9,7 @@ import core.bot as bot
 from core.state import (
     _save_training_scan_debug_image,
     _build_trackblazer_inventory_debug_entries,
+    _build_trackblazer_shop_debug_entries,
     get_trackblazer_shop_coins,
     clear_runtime_ocr_debug,
     record_runtime_ocr_debug,
@@ -44,6 +45,8 @@ _HELD_ROW_TOLERANCE = 26
 _HELD_COUNT_REGION_WIDTH = 116
 _HELD_COUNT_REGION_PADDING_Y = 4
 _ITEM_ICON_SEARCH_WIDTH = 200
+_SHOP_ICON_SEARCH_TOP_TRIM = 500
+_SHOP_ICON_SEARCH_BOTTOM_TRIM = 330
 _HELD_LABEL_SEARCH_X = 120
 _HELD_LABEL_SEARCH_WIDTH = 180
 _HELD_QUANTITY_OFFSET_FROM_ICON_RIGHT = 122
@@ -212,6 +215,26 @@ def _item_icon_search_crop(screenshot):
     screenshot_h, screenshot_w = screenshot.shape[:2]
     crop_width = max(1, min(int(_ITEM_ICON_SEARCH_WIDTH), int(screenshot_w)))
     return screenshot[0:screenshot_h, 0:crop_width].copy(), 0
+
+
+def _shop_icon_search_crop(screenshot):
+    """Return a cropped region for shop item icon matching.
+
+    Like ``_item_icon_search_crop`` but also trims vertically — the shop
+    header art and bottom confirm/back area never contain item icons, so
+    excluding them shrinks the matchTemplate search space significantly.
+
+    Returns ``(cropped_image, y_offset)`` where *y_offset* is the number of
+    pixels trimmed from the top so callers can translate matches back to
+    full-screenshot coordinates.
+    """
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None, 0
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    crop_width = max(1, min(int(_ITEM_ICON_SEARCH_WIDTH), int(screenshot_w)))
+    top = min(int(_SHOP_ICON_SEARCH_TOP_TRIM), screenshot_h - 1)
+    bottom = max(top + 1, screenshot_h - int(_SHOP_ICON_SEARCH_BOTTOM_TRIM))
+    return screenshot[top:bottom, 0:crop_width].copy(), top
 
 
 def _held_label_search_crop(screenshot):
@@ -1026,7 +1049,7 @@ def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confi
     t_total = _time()
     region_ltrb = _trackblazer_ui_region()
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
-    icon_screenshot, icon_offset_x = _item_icon_search_crop(screenshot)
+    icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
     icon_search_image_path = _save_training_scan_debug_image(
         icon_screenshot,
         "trackblazer_shop",
@@ -1044,7 +1067,7 @@ def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confi
             template_scaling=_INVERSE_GLOBAL_SCALE,
         )
         raw_matches[item_name] = [
-            (int(x + icon_offset_x), int(y), int(w), int(h))
+            (int(x), int(y + icon_offset_y), int(w), int(h))
             for (x, y, w, h) in matches
         ]
     t_templates = _time() - t0
@@ -2101,6 +2124,10 @@ def check_trackblazer_shop_inventory(
             },
         )
         result["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+        result["inventory_ocr_debug_entries"] = _build_trackblazer_shop_debug_entries(
+            flow,
+            result["ocr_runtime_debug"],
+        )
 
     info(
         f"[TB_SHOP] manual shop check timing: total={flow.get('timing_total', '?')}s "

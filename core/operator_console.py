@@ -488,7 +488,7 @@ class OperatorConsole:
       "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
-    self._set_text(self._timing_text, self._format_timing(state_summary))
+    self._set_text(self._timing_text, self._format_timing(snapshot))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
     inventory_payload = {
       "summary": state_summary.get("trackblazer_inventory_summary"),
@@ -509,12 +509,21 @@ class OperatorConsole:
     widget.insert("1.0", value)
     widget.configure(state=tk.DISABLED)
 
-  def _format_timing(self, state_summary):
-    flow = state_summary.get("trackblazer_inventory_flow") or {}
-    title = "Inventory Flow"
-    if not flow:
+  def _format_timing(self, snapshot):
+    state_summary = snapshot.get("state_summary") or {}
+    sub_phase = snapshot.get("sub_phase") or ""
+    if sub_phase == "manual_shop_check":
       flow = state_summary.get("trackblazer_shop_flow") or {}
       title = "Shop Flow"
+    elif sub_phase in ("manual_inventory_check", "manual_inventory_selection_test"):
+      flow = state_summary.get("trackblazer_inventory_flow") or {}
+      title = "Inventory Flow"
+    else:
+      flow = state_summary.get("trackblazer_inventory_flow") or {}
+      title = "Inventory Flow"
+      if not flow:
+        flow = state_summary.get("trackblazer_shop_flow") or {}
+        title = "Shop Flow"
     if not flow:
       return "No timing data"
     lines = []
