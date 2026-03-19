@@ -212,6 +212,8 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     "close_result": None,
   }
 
+  t_flow_start = time.time()
+
   inventory_screen_open, _, precheck_entries = detect_inventory_screen()
   flow["precheck"] = precheck_entries
 
@@ -224,7 +226,9 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     debug("[STATE] Skipping Trackblazer inventory open in non-execute intent.")
   else:
     debug("[STATE] Opening Trackblazer training items inventory.")
+    t0 = time.time()
     open_result = open_training_items_inventory()
+    flow["timing_open"] = round(time.time() - t0, 3)
     flow["open_result"] = open_result
     flow["opened"] = bool(open_result.get("opened"))
     flow["already_open"] = bool(open_result.get("already_open"))
@@ -234,20 +238,31 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
 
   if flow["opened"]:
     debug("[STATE] Scanning Trackblazer training items inventory.")
+    t0 = time.time()
     inventory = scan_training_items_inventory()
+    flow["timing_scan"] = round(time.time() - t0, 3)
+    t0 = time.time()
     controls = detect_inventory_controls()
+    flow["timing_controls"] = round(time.time() - t0, 3)
     summary = build_inventory_summary(inventory)
 
     if flow["already_open"]:
       flow["closed"] = False
       flow["reason"] = flow["reason"] or "inventory_was_already_open"
     else:
+      t0 = time.time()
       close_result = close_training_items_inventory()
+      flow["timing_close"] = round(time.time() - t0, 3)
       flow["close_result"] = close_result
       flow["closed"] = bool(close_result.get("closed"))
       if not flow["closed"]:
         warning("[STATE] Inventory scan completed but close-backout failed.")
         flow["reason"] = flow["reason"] or "failed_to_close_inventory"
+
+  flow["timing_total"] = round(time.time() - t_flow_start, 3)
+  info(f"[STATE] Trackblazer inventory flow timing: {flow.get('timing_total', '?')}s "
+       f"(open={flow.get('timing_open', '-')} scan={flow.get('timing_scan', '-')} "
+       f"controls={flow.get('timing_controls', '-')} close={flow.get('timing_close', '-')})")
 
   state_object["trackblazer_inventory"] = inventory
   state_object["trackblazer_inventory_controls"] = controls

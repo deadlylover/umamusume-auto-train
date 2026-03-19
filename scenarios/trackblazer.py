@@ -12,6 +12,7 @@ from utils.tools import get_secs, sleep
 from utils.screenshot import enhance_image_for_ocr
 from utils.shared import CleanDefaultDict
 from PIL import Image
+from time import time as _time
 import re
 
 # Trackblazer item/shop assets are captured at the game's native screen
@@ -33,6 +34,12 @@ _ITEM_CLUSTER_PADDING = 10
 _HELD_ROW_TOLERANCE = 26
 _HELD_COUNT_REGION_WIDTH = 116
 _HELD_COUNT_REGION_PADDING_Y = 4
+_ITEM_ICON_SEARCH_WIDTH = 200
+_HELD_LABEL_SEARCH_X = 120
+_HELD_LABEL_SEARCH_WIDTH = 180
+_HELD_QUANTITY_OFFSET_FROM_ICON_RIGHT = 122
+_HELD_QUANTITY_SLICE_WIDTH = 52
+_HELD_QUANTITY_SLICE_HEIGHT = 35
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -170,6 +177,71 @@ def _cluster_bounds(cluster, screenshot_shape, padding=_ITEM_CLUSTER_PADDING):
     return left, top, right, bottom
 
 
+def _item_icon_search_crop(screenshot):
+    """Return a left-column crop that contains the inventory item icons.
+
+    The Trackblazer inventory layout places item icons in a narrow vertical
+    strip on the left. Matching all item templates against the full inventory
+    panel wastes most of the matchTemplate work. We keep OCR and increment
+    pairing on the full screenshot, but crop the icon-matching search space.
+    """
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None, 0
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    crop_width = max(1, min(int(_ITEM_ICON_SEARCH_WIDTH), int(screenshot_w)))
+    return screenshot[0:screenshot_h, 0:crop_width].copy(), 0
+
+
+def _held_label_search_crop(screenshot):
+    """Return the narrow vertical slice where the inventory 'Held' labels live."""
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None, 0
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    left = max(0, min(int(_HELD_LABEL_SEARCH_X), int(screenshot_w) - 1))
+    right = max(left + 1, min(int(left + _HELD_LABEL_SEARCH_WIDTH), int(screenshot_w)))
+    return screenshot[0:screenshot_h, left:right].copy(), left
+
+
+def _held_quantity_crop_for_row(screenshot, item_match):
+    """Crop the left held-count digit area for a resolved item row.
+
+    Anchor the crop to the resolved item match so vertical scroll only affects
+    Y and small horizontal drift between captures still keeps the quantity
+    slice aligned. A fixed-X fallback is applied by the caller if needed.
+    """
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None, None
+    if item_match is None or len(item_match) != 4:
+        return None, None
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    item_x, item_y, item_w, item_h = [int(v) for v in item_match]
+    row_center_y = int(item_y + item_h // 2)
+    left = int(item_x + item_w + _HELD_QUANTITY_OFFSET_FROM_ICON_RIGHT)
+    left = max(0, min(left, int(screenshot_w) - 1))
+    right = max(left + 1, min(int(left + _HELD_QUANTITY_SLICE_WIDTH), int(screenshot_w)))
+    height = max(1, int(_HELD_QUANTITY_SLICE_HEIGHT))
+    top = max(0, min(int(round(row_center_y - height / 2)), max(0, screenshot_h - height)))
+    bottom = min(screenshot_h, top + height)
+    crop = screenshot[top:bottom, left:right].copy()
+    region = [int(left), int(top), int(max(0, right - left)), int(max(0, bottom - top))]
+    return crop, region
+
+
+def _held_quantity_crop_fixed_fallback(screenshot, row_center_y):
+    """Fallback crop using the previously tuned fixed X slice."""
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None, None
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    left = max(0, min(238, int(screenshot_w) - 1))
+    right = max(left + 1, min(int(left + _HELD_QUANTITY_SLICE_WIDTH), int(screenshot_w)))
+    height = max(1, int(_HELD_QUANTITY_SLICE_HEIGHT))
+    top = max(0, min(int(round(row_center_y - height / 2)), max(0, screenshot_h - height)))
+    bottom = min(screenshot_h, top + height)
+    crop = screenshot[top:bottom, left:right].copy()
+    region = [int(left), int(top), int(max(0, right - left)), int(max(0, bottom - top))]
+    return crop, region
+
+
 def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
     left, top, right, bottom = _cluster_bounds(cluster, screenshot.shape)
     cluster_crop = screenshot[top:bottom, left:right].copy()
@@ -212,20 +284,25 @@ def _extract_inventory_quantity_from_crop(crop):
             "remaining_quantity": None,
         }
     pil = Image.fromarray(crop)
-    candidates = [
-        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=None), allowlist="0123456789>"),
-        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=220), allowlist="0123456789>"),
-        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=180), allowlist="0123456789>"),
-    ]
+    # Try thresholds lazily — stop as soon as we get two digit groups
+    # (the expected "X > Y" format).  Fall back to more aggressive
+    # binarization only when the simpler pass fails.
+    thresholds = [None, 220, 180]
     best_text = ""
     best_score = -1
-    for candidate in candidates:
+    for binarize_threshold in thresholds:
+        candidate = extract_text(
+            enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold),
+            allowlist="0123456789>",
+        )
         candidate = (candidate or "").strip()
         digits = re.findall(r"\d+", candidate)
         score = len(digits) * 10 + len(candidate)
         if score > best_score:
             best_text = candidate
             best_score = score
+        if len(digits) >= 2:
+            break
     digits = re.findall(r"\d+", best_text)
     held_quantity = int(digits[0]) if digits else None
     remaining_quantity = int(digits[1]) if len(digits) > 1 else None
@@ -236,21 +313,56 @@ def _extract_inventory_quantity_from_crop(crop):
     }
 
 
+def _extract_inventory_held_quantity_from_crop(crop):
+    """Read only the held quantity from the left side of the count strip."""
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return {
+            "raw_text": "",
+            "held_quantity": None,
+            "remaining_quantity": None,
+        }
+    pil = Image.fromarray(crop)
+    thresholds = [None, 220, 180]
+    best_text = ""
+    best_score = -1
+    for binarize_threshold in thresholds:
+        candidate = extract_text(
+            enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold),
+            allowlist="0123456789",
+        )
+        candidate = (candidate or "").strip()
+        digits = re.findall(r"\d+", candidate)
+        score = len(digits) * 10 + len(candidate)
+        if score > best_score:
+            best_text = candidate
+            best_score = score
+        if len(digits) >= 1:
+            break
+    digits = re.findall(r"\d+", best_text)
+    held_quantity = int(digits[0]) if digits else None
+    return {
+        "raw_text": best_text,
+        "held_quantity": held_quantity,
+        "remaining_quantity": None,
+    }
+
+
 def _detect_inventory_held_rows(screenshot=None):
     if screenshot is None:
         screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
     held_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("inventory_held")
     if not held_template:
         return []
+    held_search_crop, held_search_offset_x = _held_label_search_crop(screenshot)
     matches = device_action.match_template(
         held_template,
-        screenshot,
+        held_search_crop,
         threshold=0.95,
         template_scaling=_INVERSE_GLOBAL_SCALE,
     )
     rows = []
     for (x, y, w, h) in matches:
-        x = int(x)
+        x = int(x + held_search_offset_x)
         y = int(y)
         w = int(w)
         h = int(h)
@@ -579,11 +691,10 @@ def scan_training_items_inventory(threshold=0.8):
         row's increment button, in absolute screen coordinates
       - "increment_match": [x, y, w, h] | None — raw region-relative match
     """
+    t_total = _time()
     region_xywh = constants.MANT_INVENTORY_ITEMS_REGION
     screenshot = device_action.screenshot(region_xywh=region_xywh)
-    # Detect held labels in the SAME screenshot so coordinates are in the
-    # same space as item matches (both relative to MANT_INVENTORY_ITEMS_REGION).
-    held_rows = _detect_inventory_held_rows(screenshot=screenshot)
+    icon_screenshot, icon_offset_x = _item_icon_search_crop(screenshot)
 
     # Find all increment buttons in the region first so we can pair them.
     # Use inverse global scale since these assets are at native resolution.
@@ -600,20 +711,24 @@ def scan_training_items_inventory(threshold=0.8):
         (int(x), int(y), int(w), int(h))
         for (x, y, w, h) in increment_matches
     ]
-    debug(
-        f"[TB_INV] Increment buttons found: {len(increment_matches)} "
-        f"in region {region_xywh}"
-    )
 
+    t0 = _time()
     raw_matches = {}
     for item_name, template_path in constants.TRACKBLAZER_ITEM_TEMPLATES.items():
         item_threshold = _item_threshold(item_name, threshold)
         matches = device_action.match_template(
-            template_path, screenshot, item_threshold,
+            template_path, icon_screenshot, item_threshold,
             template_scaling=_INVERSE_GLOBAL_SCALE,
         )
-        raw_matches[item_name] = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in matches]
+        raw_matches[item_name] = [
+            (int(x + icon_offset_x), int(y), int(w), int(h))
+            for (x, y, w, h) in matches
+        ]
+    t_templates = _time() - t0
 
+    t0 = _time()
+    families_resolved = 0
+    families_skipped = 0
     resolved_matches = {item_name: list(matches) for item_name, matches in raw_matches.items()}
     for family_name, family_items in _ITEM_VARIANT_FAMILIES:
         family_candidates = []
@@ -631,6 +746,13 @@ def scan_training_items_inventory(threshold=0.8):
         for item_name in family_items:
             resolved_matches[item_name] = []
         for cluster in _cluster_matches_by_row(family_candidates):
+            # Skip expensive re-match when only one family member is in the cluster.
+            unique_names = set(entry["item_name"] for entry in cluster)
+            if len(unique_names) == 1:
+                entry = max(cluster, key=lambda e: e.get("score", 0) if "score" in e else 0)
+                resolved_matches[entry["item_name"]].append(entry["match"])
+                families_skipped += 1
+                continue
             winner = _resolve_family_cluster(cluster, family_items, screenshot, threshold)
             if winner is None:
                 debug(
@@ -639,9 +761,10 @@ def scan_training_items_inventory(threshold=0.8):
                 )
                 continue
             resolved_matches[winner["item_name"]].append(winner["match"])
+            families_resolved += 1
+    t_families = _time() - t0
 
-    # Build a list of detected items with their row center for rank-based
-    # pairing with held rows.  Both are in MANT_INVENTORY_ITEMS_REGION coords.
+    # Build a list of detected items with their row center.
     detected_items_for_pairing = []
     for item_name, matches in resolved_matches.items():
         if matches:
@@ -649,7 +772,33 @@ def scan_training_items_inventory(threshold=0.8):
                 "item_name": item_name,
                 "row_center_y": int(_match_center_y(matches[0])),
             })
-    held_pairs = _pair_items_to_held_rows_by_rank(detected_items_for_pairing, held_rows)
+
+    # Read held quantities directly from the resolved item rows instead of
+    # matching the separate "Held" label and pairing by rank.
+    t0 = _time()
+    held_quantities = {}
+    for item_entry in detected_items_for_pairing:
+        quantity_crop, quantity_region = _held_quantity_crop_for_row(
+            screenshot,
+            resolved_matches.get(item_entry["item_name"], [None])[0],
+        )
+        quantity = _extract_inventory_held_quantity_from_crop(quantity_crop)
+        if quantity.get("held_quantity") is None:
+            fallback_crop, fallback_region = _held_quantity_crop_fixed_fallback(
+                screenshot,
+                item_entry["row_center_y"],
+            )
+            fallback_quantity = _extract_inventory_held_quantity_from_crop(fallback_crop)
+            if fallback_quantity.get("held_quantity") is not None:
+                quantity = fallback_quantity
+                quantity_region = fallback_region
+        held_quantities[item_entry["item_name"]] = {
+            "held_quantity": quantity.get("held_quantity"),
+            "remaining_quantity": None,
+            "raw_text": quantity.get("raw_text", ""),
+            "count_region": quantity_region,
+        }
+    t_held = _time() - t0
 
     inventory = CleanDefaultDict()
     for item_name, template_path in constants.TRACKBLAZER_ITEM_TEMPLATES.items():
@@ -672,12 +821,12 @@ def scan_training_items_inventory(threshold=0.8):
                 increment_target = _to_absolute_click_target(region_xywh, paired)
                 increment_target = (int(increment_target[0]), int(increment_target[1]))
                 increment_match_raw = [int(v) for v in paired]
-            held_row = held_pairs.get(item_name)
-            if held_row is not None:
-                held_quantity = held_row.get("held_quantity")
-                remaining_quantity = held_row.get("remaining_quantity")
-                quantity_text = held_row.get("raw_text", "")
-                quantity_region = held_row.get("count_region")
+            quantity_entry = held_quantities.get(item_name)
+            if quantity_entry is not None:
+                held_quantity = quantity_entry.get("held_quantity")
+                remaining_quantity = quantity_entry.get("remaining_quantity")
+                quantity_text = quantity_entry.get("raw_text", "")
+                quantity_region = quantity_entry.get("count_region")
 
         inventory[item_name] = {
             "detected": len(matches) > 0,
@@ -693,6 +842,14 @@ def scan_training_items_inventory(threshold=0.8):
             "quantity_text": quantity_text,
             "quantity_region": quantity_region,
         }
+
+    t_total_elapsed = _time() - t_total
+    info(
+        f"[TB_INV] scan timing: total={t_total_elapsed:.2f}s "
+        f"held_ocr={t_held:.2f}s templates={t_templates:.2f}s "
+        f"families={t_families:.2f}s (resolved={families_resolved} skipped={families_skipped}) "
+        f"items_detected={len(detected_items_for_pairing)} quantity_reads={len(held_quantities)}"
+    )
     return inventory
 
 

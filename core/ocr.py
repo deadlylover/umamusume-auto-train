@@ -5,6 +5,9 @@ import re
 from utils.log import debug, info
 import core.config as config
 
+# Keep OCR on CPU while profiling and optimizing the scan pipeline itself.
+# EasyOCR can use Apple Silicon MPS when gpu=True, but that should stay as a
+# later opt-in once the CPU path is tuned well enough to measure cleanly.
 reader = easyocr.Reader(["en"], gpu=False)
 
 def _log_ocr(tag, text, allowlist, threshold):

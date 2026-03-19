@@ -737,8 +737,7 @@ class OperatorConsole:
       capture_bbox = game_window_bbox
       full_screenshot = device_action.screenshot()
       if full_screenshot is not None:
-        left, top, right, bottom = game_window_bbox
-        screenshot = Image.fromarray(full_screenshot[top:bottom, left:right]).convert("RGBA")
+        screenshot = Image.fromarray(full_screenshot).convert("RGBA")
         context["capture_space"] = "game_window_bbox"
         context["game_window_bbox"] = str(game_window_bbox)
     except Exception:

@@ -118,22 +118,42 @@ def _resize_template(template: np.ndarray, scale: float):
 def _effective_template_scale(template_scaling: float = 1.0):
   return float(GLOBAL_TEMPLATE_SCALING) * float(template_scaling)
 
-def _load_template_image(template_path: str, grayscale=False):
-  if grayscale:
-    return cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
-  template = cv2.imread(template_path, cv2.IMREAD_COLOR)
-  if template is None:
-    return None
-  if len(template.shape) == 3 and template.shape[2] == 4:
-    template = cv2.cvtColor(template, cv2.COLOR_BGRA2BGR)
-  return cv2.cvtColor(template, cv2.COLOR_RGB2BGR)
+_template_image_cache = {}
+_scaled_template_cache = {}
 
-def best_template_match(template_path: str, screenshot: np.ndarray, grayscale=False, template_scales=None):
+def _load_template_image(template_path: str, grayscale=False):
+  cache_key = (template_path, grayscale)
+  cached = _template_image_cache.get(cache_key)
+  if cached is not None:
+    return cached
+  if grayscale:
+    img = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+  else:
+    img = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    if img is None:
+      return None
+    if len(img.shape) == 3 and img.shape[2] == 4:
+      img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+  _template_image_cache[cache_key] = img
+  return img
+
+def _load_scaled_template(template_path: str, scale: float, grayscale=False):
+  cache_key = (template_path, round(scale, 6), grayscale)
+  cached = _scaled_template_cache.get(cache_key)
+  if cached is not None:
+    return cached
   template = _load_template_image(template_path, grayscale=grayscale)
   if template is None:
-    error(f"Template '{template_path}' could not be loaded.")
     return None
+  if abs(scale - 1.0) < 1e-6:
+    _scaled_template_cache[cache_key] = template
+    return template
+  scaled = _resize_template(template, scale)
+  _scaled_template_cache[cache_key] = scaled
+  return scaled
 
+def best_template_match(template_path: str, screenshot: np.ndarray, grayscale=False, template_scales=None):
   if grayscale:
     screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
 
@@ -141,7 +161,10 @@ def best_template_match(template_path: str, screenshot: np.ndarray, grayscale=Fa
   best_match = None
 
   for scale in scales:
-    resized_template = template if abs(scale - 1.0) < 1e-6 else _resize_template(template, scale)
+    resized_template = _load_scaled_template(template_path, scale, grayscale=grayscale)
+    if resized_template is None:
+      error(f"Template '{template_path}' could not be loaded.")
+      return None
 
     screenshot_h, screenshot_w = screenshot.shape[:2]
     template_h, template_w = resized_template.shape[:2]
@@ -212,15 +235,13 @@ def multi_match_templates(templates, screenshot: np.ndarray, threshold=0.85, tex
 def match_template(template_path : str, screenshot : np.ndarray, threshold=0.85, text: str = "", grayscale=False, template_scaling=1.0):
   if text and args.device_debug:
     debug(text)
-  template = _load_template_image(template_path, grayscale=grayscale)
+  effective_scale = _effective_template_scale(template_scaling)
+  template = _load_scaled_template(template_path, effective_scale, grayscale=grayscale)
   if template is None:
     error(f"Template '{template_path}' could not be loaded.")
     return []
   if grayscale:
     screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2GRAY)
-  effective_scale = _effective_template_scale(template_scaling)
-  if effective_scale != 1.0:
-    template = _resize_template(template, effective_scale)
   if args.save_images:
     template_name = template_path.split("/")[-1].split(".")[0]
     debug_window(template, save_name=f"{template_name}_template")
