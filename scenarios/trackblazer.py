@@ -23,6 +23,9 @@ from utils.shared import CleanDefaultDict
 from PIL import Image
 from time import time as _time
 from pathlib import Path
+from queue import Queue
+import numpy as np
+import threading
 import re
 
 # Trackblazer item/shop assets are captured at the game's native screen
@@ -52,6 +55,18 @@ _HELD_LABEL_SEARCH_WIDTH = 180
 _HELD_QUANTITY_OFFSET_FROM_ICON_RIGHT = 122
 _HELD_QUANTITY_SLICE_WIDTH = 52
 _HELD_QUANTITY_SLICE_HEIGHT = 35
+_SHOP_SCROLLBAR_WINDOW_HALF_WIDTH = 3
+_SHOP_SCROLLBAR_DARKNESS_DELTA = 18.0
+_SHOP_SCROLLBAR_MIN_SEGMENT_HEIGHT = 8
+_SHOP_SCROLLBAR_MIN_CONTRAST = 18.0
+_SHOP_SCROLLBAR_EDGE_TOLERANCE = 12
+_SHOP_SCROLLBAR_NON_SCROLLABLE_HEIGHT_RATIO = 0.9
+_SHOP_SCROLLBAR_FRAME_INTERVAL_SECONDS = 0.2
+_SHOP_SCROLLBAR_DRAG_DURATION_SECONDS = 3.2
+_SHOP_SCROLLBAR_DRAG_END_PADDING = 10
+_SHOP_SCROLLBAR_RESET_DURATION_SECONDS = 1.4
+_SHOP_SCROLLBAR_ANALYSIS_WORKERS = 3
+_SHOP_SCROLLBAR_SEEK_DURATION_SECONDS = 0.8
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -235,6 +250,203 @@ def _shop_icon_search_crop(screenshot):
     top = min(int(_SHOP_ICON_SEARCH_TOP_TRIM), screenshot_h - 1)
     bottom = max(top + 1, screenshot_h - int(_SHOP_ICON_SEARCH_BOTTOM_TRIM))
     return screenshot[top:bottom, 0:crop_width].copy(), top
+
+
+def _crop_absolute_bbox_from_screenshot(screenshot, target_bbox, base_region_ltrb=None):
+    """Crop an absolute bbox from a screenshot taken over *base_region_ltrb*."""
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+        return None
+    base_left, base_top, _base_right, _base_bottom = base_region_ltrb or _trackblazer_ui_region()
+    target_left, target_top, target_right, target_bottom = [int(v) for v in target_bbox]
+    rel_left = max(0, int(target_left - base_left))
+    rel_top = max(0, int(target_top - base_top))
+    rel_right = min(int(screenshot.shape[1]), int(target_right - base_left))
+    rel_bottom = min(int(screenshot.shape[0]), int(target_bottom - base_top))
+    if rel_right <= rel_left or rel_bottom <= rel_top:
+        return None
+    return screenshot[rel_top:rel_bottom, rel_left:rel_right].copy()
+
+
+def _capture_live_trackblazer_ui_screenshot():
+    """Force a fresh screenshot even while an ADB swipe is still in flight."""
+    device_action.flush_screenshot_cache()
+    return device_action.screenshot(region_ltrb=_trackblazer_ui_region())
+
+
+def inspect_trackblazer_shop_scrollbar(screenshot=None):
+    """Detect the Trackblazer shop scrollbar thumb and current scroll position."""
+    ui_region = _trackblazer_ui_region()
+    screenshot = screenshot if screenshot is not None else _capture_live_trackblazer_ui_screenshot()
+    crop = _crop_absolute_bbox_from_screenshot(
+        screenshot,
+        constants.MANT_SHOP_SCROLLBAR_BBOX,
+        base_region_ltrb=ui_region,
+    )
+    result = {
+        "detected": False,
+        "scrollable": False,
+        "is_at_top": False,
+        "is_at_bottom": False,
+        "bbox": [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX],
+        "track_center_x": None,
+        "thumb_rect": None,
+        "thumb_center": None,
+        "thumb_height": 0,
+        "travel_pixels": 0,
+        "position_ratio": None,
+        "contrast": 0.0,
+    }
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return result
+
+    if len(crop.shape) == 3:
+        gray = np.asarray(Image.fromarray(crop).convert("L"))
+    else:
+        gray = np.asarray(crop)
+    if gray.size == 0 or gray.shape[0] <= 0 or gray.shape[1] <= 0:
+        return result
+
+    col_mean = gray.mean(axis=0)
+    best_col = None
+    for center in range(2, gray.shape[1] - 2):
+        left = max(0, center - 2)
+        right = min(gray.shape[1], center + 3)
+        score = float(col_mean[left:right].mean())
+        if best_col is None or score < best_col[0]:
+            best_col = (score, center)
+    track_center_x = int(best_col[1]) if best_col else int(gray.shape[1] // 2)
+    left = max(0, track_center_x - _SHOP_SCROLLBAR_WINDOW_HALF_WIDTH)
+    right = min(gray.shape[1], track_center_x + _SHOP_SCROLLBAR_WINDOW_HALF_WIDTH + 1)
+    track = gray[:, left:right]
+    row_mean = track.mean(axis=1)
+    baseline = float(np.percentile(row_mean, 70))
+    threshold = baseline - _SHOP_SCROLLBAR_DARKNESS_DELTA
+    mask = row_mean < threshold
+
+    segments = []
+    start = None
+    for idx, is_dark in enumerate(mask):
+        if is_dark and start is None:
+            start = idx
+        elif not is_dark and start is not None:
+            if idx - start >= _SHOP_SCROLLBAR_MIN_SEGMENT_HEIGHT:
+                segments.append((start, idx - 1, float(row_mean[start:idx].mean())))
+            start = None
+    if start is not None and len(mask) - start >= _SHOP_SCROLLBAR_MIN_SEGMENT_HEIGHT:
+        segments.append((start, len(mask) - 1, float(row_mean[start:].mean())))
+    if not segments:
+        return result
+
+    thumb_top, thumb_bottom, thumb_darkness = min(segments, key=lambda entry: entry[2])
+    thumb_height = int(thumb_bottom - thumb_top + 1)
+    contrast = float(max(0.0, baseline - thumb_darkness))
+    if contrast < _SHOP_SCROLLBAR_MIN_CONTRAST:
+        return result
+
+    track_height = int(gray.shape[0])
+    travel_pixels = max(0, track_height - thumb_height)
+    denominator = float(max(1, travel_pixels))
+    position_ratio = min(1.0, max(0.0, float(thumb_top) / denominator))
+    bbox_left, bbox_top, _bbox_right, _bbox_bottom = [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX]
+    thumb_center_y = int(bbox_top + thumb_top + thumb_height // 2)
+    track_center_abs_x = int(bbox_left + track_center_x)
+
+    result.update({
+        "detected": True,
+        "scrollable": bool(thumb_height < int(track_height * _SHOP_SCROLLBAR_NON_SCROLLABLE_HEIGHT_RATIO)),
+        "is_at_top": bool(thumb_top <= _SHOP_SCROLLBAR_EDGE_TOLERANCE),
+        "is_at_bottom": bool((track_height - 1 - thumb_bottom) <= _SHOP_SCROLLBAR_EDGE_TOLERANCE),
+        "track_center_x": track_center_abs_x,
+        "thumb_rect": [
+            int(bbox_left + left),
+            int(bbox_top + thumb_top),
+            int(max(1, right - left)),
+            int(thumb_height),
+        ],
+        "thumb_center": [int(track_center_abs_x), int(thumb_center_y)],
+        "thumb_height": int(thumb_height),
+        "travel_pixels": int(travel_pixels),
+        "position_ratio": round(position_ratio, 4),
+        "contrast": round(contrast, 2),
+    })
+    return result
+
+
+def _drag_trackblazer_shop_scrollbar(scrollbar_state, edge="top", duration=_SHOP_SCROLLBAR_RESET_DURATION_SECONDS):
+    """Drag the resolved shop scrollbar thumb to the requested edge."""
+    edge_name = str(edge or "top").strip().lower()
+    if edge_name not in ("top", "bottom"):
+        raise ValueError(f"Unsupported shop scrollbar edge: {edge}")
+    thumb_center = (scrollbar_state or {}).get("thumb_center")
+    bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX]
+    track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
+    if not thumb_center or track_center_x <= 0:
+        return {
+            "direction": f"scrollbar_{edge_name}",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+        }
+    start = (int(thumb_center[0]), int(thumb_center[1]))
+    end_y = int(bbox[1] + 10) if edge_name == "top" else int(bbox[3] - _SHOP_SCROLLBAR_DRAG_END_PADDING)
+    end = (track_center_x, end_y)
+    swiped = bool(device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Trackblazer shop scrollbar drag to {edge_name}",
+    ))
+    return {
+        "direction": f"scrollbar_{edge_name}",
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": 0.0,
+        "swiped": swiped,
+    }
+
+
+def _drag_trackblazer_shop_scrollbar_to_ratio(scrollbar_state, position_ratio, duration=_SHOP_SCROLLBAR_SEEK_DURATION_SECONDS):
+    """Drag the shop scrollbar thumb to an approximate position ratio."""
+    thumb_center = (scrollbar_state or {}).get("thumb_center")
+    bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX]
+    track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
+    thumb_height = int((scrollbar_state or {}).get("thumb_height") or 0)
+    travel_pixels = int((scrollbar_state or {}).get("travel_pixels") or 0)
+    if not thumb_center or track_center_x <= 0 or thumb_height <= 0:
+        return {
+            "direction": "scrollbar_ratio",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+            "target_ratio": None,
+        }
+    clamped_ratio = min(1.0, max(0.0, float(position_ratio or 0.0)))
+    thumb_top_target = int(round(clamped_ratio * max(0, travel_pixels)))
+    end_y = int(bbox[1] + thumb_top_target + max(1, thumb_height // 2))
+    start = (int(thumb_center[0]), int(thumb_center[1]))
+    end = (track_center_x, end_y)
+    swiped = bool(device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Trackblazer shop scrollbar seek ratio={clamped_ratio:.3f}",
+    ))
+    return {
+        "direction": "scrollbar_ratio",
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": 0.0,
+        "swiped": swiped,
+        "target_ratio": round(clamped_ratio, 4),
+    }
+
+
 
 
 def _held_label_search_crop(screenshot):
@@ -1038,7 +1250,13 @@ def build_inventory_summary(inventory):
     return summary
 
 
-def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confirm_threshold=0.8):
+def scan_trackblazer_shop_inventory(
+    threshold=0.8,
+    checkbox_threshold=0.8,
+    confirm_threshold=0.8,
+    screenshot=None,
+    save_debug_image=True,
+):
     """Scan the currently visible Trackblazer shop item rows without clicking.
 
     This is the first page-only framework. Scrolling will layer on top later.
@@ -1048,13 +1266,17 @@ def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confi
     """
     t_total = _time()
     region_ltrb = _trackblazer_ui_region()
-    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    t0 = _time()
+    screenshot = screenshot if screenshot is not None else device_action.screenshot(region_ltrb=region_ltrb)
+    t_capture = _time() - t0
     icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
-    icon_search_image_path = _save_training_scan_debug_image(
-        icon_screenshot,
-        "trackblazer_shop",
-        "item_icon_search_region",
-    )
+    icon_search_image_path = ""
+    if save_debug_image:
+        icon_search_image_path = _save_training_scan_debug_image(
+            icon_screenshot,
+            "trackblazer_shop",
+            "item_icon_search_region",
+        )
 
     raw_matches = {}
     t0 = _time()
@@ -1160,6 +1382,7 @@ def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confi
 
     timing = {
         "total": round(_time() - t_total, 4),
+        "capture": round(t_capture, 4),
         "templates": round(t_templates, 4),
         "families": round(t_families, 4),
         "families_resolved": families_resolved,
@@ -1219,7 +1442,31 @@ def scroll_trackblazer_shop(direction="down", duration=0.55, settle_seconds=1.0)
     }
 
 
-def scan_all_trackblazer_shop_items(
+def _append_shop_scan_page(flow, page, page_index, seen_items, ordered_items, capture_mode, scrollbar=None, elapsed=None):
+    visible_items = list(page.get("visible_items") or [])
+    signature = tuple(visible_items)
+    new_items = [item_name for item_name in visible_items if item_name not in seen_items]
+    for item_name in new_items:
+        seen_items.add(item_name)
+        ordered_items.append(item_name)
+
+    flow["pages"].append(
+        {
+            "page_index": int(page_index),
+            "capture_mode": str(capture_mode),
+            "elapsed": round(float(elapsed or 0.0), 4),
+            "visible_items": visible_items,
+            "new_items": new_items,
+            "rows": page.get("rows"),
+            "confirm": page.get("confirm"),
+            "timing": page.get("timing"),
+            "scrollbar": scrollbar,
+        }
+    )
+    return signature, new_items
+
+
+def _scan_all_trackblazer_shop_items_paged(
     threshold=0.8,
     checkbox_threshold=0.8,
     confirm_threshold=0.8,
@@ -1238,6 +1485,7 @@ def scan_all_trackblazer_shop_items(
         "forward_swipes": [],
         "pages": [],
         "stop_reason": "",
+        "scan_mode": "paged_swipe_fallback",
     }
 
     # Best-effort reset toward the top so the scan starts from a consistent state.
@@ -1256,22 +1504,13 @@ def scan_all_trackblazer_shop_items(
             checkbox_threshold=checkbox_threshold,
             confirm_threshold=confirm_threshold,
         )
-        visible_items = list(page.get("visible_items") or [])
-        signature = tuple(visible_items)
-        new_items = [item_name for item_name in visible_items if item_name not in seen_items]
-        for item_name in new_items:
-            seen_items.add(item_name)
-            ordered_items.append(item_name)
-
-        flow["pages"].append(
-            {
-                "page_index": page_index,
-                "visible_items": visible_items,
-                "new_items": new_items,
-                "rows": page.get("rows"),
-                "confirm": page.get("confirm"),
-                "timing": page.get("timing"),
-            }
+        signature, new_items = _append_shop_scan_page(
+            flow,
+            page,
+            page_index,
+            seen_items,
+            ordered_items,
+            capture_mode="paged_swipe",
         )
 
         if signature in seen_signatures or (not new_items and last_page == signature):
@@ -1292,11 +1531,529 @@ def scan_all_trackblazer_shop_items(
         flow["forward_swipes"].append(scroll_trackblazer_shop(direction="down"))
 
     flow["timing_total"] = round(_time() - t_total, 4)
+    flow["timing"] = {
+        "mode": flow.get("scan_mode"),
+        "pages": len(flow.get("pages") or []),
+        "reset_swipes": len(flow.get("reset_swipes") or []),
+        "forward_swipes": len(flow.get("forward_swipes") or []),
+        "total": round(flow["timing_total"], 4),
+    }
     return {
         "all_items": ordered_items,
         "pages": flow["pages"],
         "flow": flow,
     }
+
+
+def _capture_shop_frames_during_scrollbar_drag(
+    threshold,
+    checkbox_threshold,
+    confirm_threshold,
+    initial_scrollbar,
+):
+    def _analyze_buffered_frame(frame_payload):
+        frame_scan_t0 = _time()
+        page = scan_trackblazer_shop_inventory(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            screenshot=frame_payload.get("screenshot"),
+            save_debug_image=False,
+        )
+        scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=frame_payload.get("screenshot"))
+        scan_elapsed = _time() - frame_scan_t0
+        return {
+            "index": int(frame_payload.get("index", 0)),
+            "elapsed": frame_payload.get("elapsed"),
+            "page": page,
+            "scrollbar": scrollbar,
+            "final": bool(frame_payload.get("final")),
+            "timing": {
+                "capture": round(frame_payload.get("capture_elapsed", 0.0), 4),
+                "scan": round(scan_elapsed, 4),
+                "wall": round(frame_payload.get("capture_elapsed", 0.0) + scan_elapsed, 4),
+            },
+        }
+
+    def _analysis_worker():
+        while True:
+            frame_payload = analysis_queue.get()
+            if frame_payload is None:
+                analysis_queue.task_done()
+                return
+            try:
+                analyzed = _analyze_buffered_frame(frame_payload)
+                analyzed_frames.append(analyzed)
+            finally:
+                analysis_queue.task_done()
+
+    drag = {
+        "start": None,
+        "end": None,
+        "duration": float(_SHOP_SCROLLBAR_DRAG_DURATION_SECONDS),
+        "swiped": False,
+        "frames": [],
+        "stop_reason": "",
+        "timing": {},
+    }
+    thumb_center = (initial_scrollbar or {}).get("thumb_center")
+    bbox = (initial_scrollbar or {}).get("bbox") or [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX]
+    if not thumb_center:
+        drag["stop_reason"] = "scrollbar_thumb_not_detected"
+        return drag
+
+    drag_start = (int(thumb_center[0]), int(thumb_center[1]))
+    drag_end = (int(initial_scrollbar.get("track_center_x") or thumb_center[0]), int(bbox[3] - _SHOP_SCROLLBAR_DRAG_END_PADDING))
+    drag["start"] = [int(drag_start[0]), int(drag_start[1])]
+    drag["end"] = [int(drag_end[0]), int(drag_end[1])]
+
+    t_drag = _time()
+    capture_total = 0.0
+    frame_count = 0
+    analyzed_frames = []
+    analysis_queue = Queue()
+    analysis_workers = []
+    worker_count = max(1, _SHOP_SCROLLBAR_ANALYSIS_WORKERS)
+    for _ in range(worker_count):
+        worker = threading.Thread(target=_analysis_worker, daemon=True)
+        worker.start()
+        analysis_workers.append(worker)
+
+    def _run_drag():
+        drag["swiped"] = bool(device_action.swipe(
+            drag_start,
+            drag_end,
+            duration=_SHOP_SCROLLBAR_DRAG_DURATION_SECONDS,
+            text="Trackblazer shop scrollbar drag",
+        ))
+
+    drag_thread = threading.Thread(target=_run_drag, daemon=True)
+    drag_thread.start()
+    next_capture_at = _time() + _SHOP_SCROLLBAR_FRAME_INTERVAL_SECONDS
+    while drag_thread.is_alive():
+        now = _time()
+        if now < next_capture_at:
+            sleep(max(0.0, next_capture_at - now))
+        frame_capture_t0 = _time()
+        screenshot = _capture_live_trackblazer_ui_screenshot()
+        capture_elapsed = _time() - frame_capture_t0
+        capture_total += capture_elapsed
+        analysis_queue.put({
+            "index": frame_count,
+            "elapsed": round(_time() - t_drag, 4),
+            "capture_elapsed": capture_elapsed,
+            "screenshot": screenshot,
+        })
+        frame_count += 1
+        next_capture_at = max(next_capture_at + _SHOP_SCROLLBAR_FRAME_INTERVAL_SECONDS, _time() + 0.001)
+
+    drag_thread.join()
+    final_capture_t0 = _time()
+    final_screenshot = _capture_live_trackblazer_ui_screenshot()
+    final_capture_elapsed = _time() - final_capture_t0
+    capture_total += final_capture_elapsed
+    analysis_queue.put({
+        "index": frame_count,
+        "elapsed": round(_time() - t_drag, 4),
+        "capture_elapsed": final_capture_elapsed,
+        "screenshot": final_screenshot,
+        "final": True,
+    })
+    frame_count += 1
+    capture_window = _time() - t_drag
+
+    scan_total = 0.0
+    analysis_queue.join()
+    for _ in analysis_workers:
+        analysis_queue.put(None)
+    for worker in analysis_workers:
+        worker.join()
+    drag["frames"] = sorted(analyzed_frames, key=lambda frame: int(frame.get("index", 0)))
+    for analyzed_frame in drag["frames"]:
+        scan_total += float(((analyzed_frame.get("timing") or {}).get("scan") or 0.0))
+
+    final_scrollbar = (
+        ((drag.get("frames") or [])[-1] or {}).get("scrollbar")
+        if (drag.get("frames") or [])
+        else None
+    ) or {}
+
+    if final_scrollbar.get("is_at_bottom"):
+        drag["stop_reason"] = "scrollbar_bottom_reached"
+    elif drag.get("swiped"):
+        drag["stop_reason"] = "drag_completed_without_bottom_detection"
+    else:
+        drag["stop_reason"] = "scrollbar_drag_failed"
+    wall_total = _time() - t_drag
+    drag["timing"] = {
+        "drag_runtime": round(capture_window, 4),
+        "frame_interval_target": round(_SHOP_SCROLLBAR_FRAME_INTERVAL_SECONDS, 4),
+        "frames": int(frame_count),
+        "capture_total": round(capture_total, 4),
+        "scan_total": round(scan_total, 4),
+        "analysis_total": round(max(0.0, wall_total - capture_window), 4),
+        "wall": round(wall_total, 4),
+    }
+    return drag
+
+
+def scan_all_trackblazer_shop_items(
+    threshold=0.8,
+    checkbox_threshold=0.8,
+    confirm_threshold=0.8,
+    max_reset_swipes=4,
+    max_forward_swipes=12,
+):
+    """Scan the full Trackblazer shop using a scrollbar-thumb drag when available."""
+    t_total = _time()
+    flow = {
+        "reset_swipes": [],
+        "forward_swipes": [],
+        "pages": [],
+        "stop_reason": "",
+        "scan_mode": "scrollbar_drag",
+        "scrollbar_initial": None,
+        "scrollbar_final": None,
+        "continuous_drag": None,
+    }
+
+    pre_reset_screenshot = _capture_live_trackblazer_ui_screenshot()
+    pre_reset_scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=pre_reset_screenshot)
+    if pre_reset_scrollbar.get("detected") and pre_reset_scrollbar.get("scrollable"):
+        if not pre_reset_scrollbar.get("is_at_top"):
+            flow["reset_swipes"].append(_drag_trackblazer_shop_scrollbar(pre_reset_scrollbar, edge="top"))
+    else:
+        for _ in range(max_reset_swipes):
+            flow["reset_swipes"].append(scroll_trackblazer_shop(direction="up"))
+
+    seen_items = set()
+    ordered_items = []
+    seen_signatures = set()
+    stale_pages = 0
+    last_page = None
+
+    initial_capture_t0 = _time()
+    initial_screenshot = _capture_live_trackblazer_ui_screenshot()
+    initial_capture_elapsed = _time() - initial_capture_t0
+    initial_scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=initial_screenshot)
+    flow["scrollbar_initial"] = initial_scrollbar
+
+    initial_page = scan_trackblazer_shop_inventory(
+        threshold=threshold,
+        checkbox_threshold=checkbox_threshold,
+        confirm_threshold=confirm_threshold,
+        screenshot=initial_screenshot,
+        save_debug_image=False,
+    )
+    initial_page_timing = dict(initial_page.get("timing") or {})
+    initial_page_timing["capture"] = round(initial_page_timing.get("capture", 0.0) + initial_capture_elapsed, 4)
+    initial_page_timing["wall"] = round(initial_page_timing.get("total", 0.0) + initial_capture_elapsed, 4)
+    initial_page["timing"] = initial_page_timing
+    initial_signature, _ = _append_shop_scan_page(
+        flow,
+        initial_page,
+        0,
+        seen_items,
+        ordered_items,
+        capture_mode="initial",
+        scrollbar=initial_scrollbar,
+        elapsed=0.0,
+    )
+    seen_signatures.add(initial_signature)
+    last_page = initial_signature
+
+    if not initial_scrollbar.get("detected") or not initial_scrollbar.get("scrollable"):
+        flow["stop_reason"] = "no_scrollbar_detected_or_not_scrollable"
+        flow["scrollbar_final"] = initial_scrollbar
+    else:
+        drag_result = _capture_shop_frames_during_scrollbar_drag(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            initial_scrollbar=initial_scrollbar,
+        )
+        flow["continuous_drag"] = drag_result
+        frame_offset = len(flow["pages"])
+        for frame_index, frame in enumerate(drag_result.get("frames") or [], start=frame_offset):
+            page = dict(frame.get("page") or {})
+            page_timing = dict(page.get("timing") or {})
+            frame_timing = frame.get("timing") or {}
+            page_timing["capture"] = round(frame_timing.get("capture", page_timing.get("capture", 0.0)), 4)
+            page_timing["wall"] = round(frame_timing.get("wall", page_timing.get("total", 0.0)), 4)
+            page["timing"] = page_timing
+            signature, new_items = _append_shop_scan_page(
+                flow,
+                page,
+                frame_index,
+                seen_items,
+                ordered_items,
+                capture_mode="scrollbar_drag_frame",
+                scrollbar=frame.get("scrollbar"),
+                elapsed=frame.get("elapsed"),
+            )
+            if signature in seen_signatures or (not new_items and last_page == signature):
+                stale_pages += 1
+            else:
+                stale_pages = 0
+            seen_signatures.add(signature)
+            last_page = signature
+        flow["scrollbar_final"] = (
+            ((drag_result.get("frames") or [])[-1] or {}).get("scrollbar")
+            if (drag_result.get("frames") or [])
+            else initial_scrollbar
+        )
+
+        if drag_result.get("stop_reason") == "scrollbar_drag_failed":
+            fallback_result = _scan_all_trackblazer_shop_items_paged(
+                threshold=threshold,
+                checkbox_threshold=checkbox_threshold,
+                confirm_threshold=confirm_threshold,
+                max_reset_swipes=0,
+                max_forward_swipes=max_forward_swipes,
+            )
+            fallback_flow = fallback_result.get("flow") or {}
+            flow["scan_mode"] = "paged_swipe_fallback"
+            flow["forward_swipes"] = list(fallback_flow.get("forward_swipes") or [])
+            flow["pages"] = list(flow["pages"]) + list(fallback_flow.get("pages") or [])
+            flow["stop_reason"] = fallback_flow.get("stop_reason") or "paged_fallback_after_drag_failure"
+            flow["scrollbar_final"] = flow.get("scrollbar_final") or initial_scrollbar
+            ordered_items = list(dict.fromkeys(list(ordered_items) + list(fallback_result.get("all_items") or [])))
+        elif flow["scrollbar_final"] and flow["scrollbar_final"].get("is_at_bottom"):
+            flow["stop_reason"] = "scrollbar_bottom_reached"
+        elif stale_pages >= 2:
+            flow["stop_reason"] = "no_new_visible_items_during_drag"
+        else:
+            flow["stop_reason"] = drag_result.get("stop_reason") or "drag_completed"
+
+    flow["timing_total"] = round(_time() - t_total, 4)
+    flow["timing"] = {
+        "mode": flow.get("scan_mode"),
+        "pages": len(flow.get("pages") or []),
+        "reset_swipes": len(flow.get("reset_swipes") or []),
+        "drag": ((flow.get("continuous_drag") or {}).get("timing") or {}),
+        "initial_scrollbar_detected": bool((flow.get("scrollbar_initial") or {}).get("detected")),
+        "initial_scrollbar_scrollable": bool((flow.get("scrollbar_initial") or {}).get("scrollable")),
+        "stale_pages": int(stale_pages),
+        "total": round(flow["timing_total"], 4),
+    }
+    return {
+        "all_items": ordered_items,
+        "pages": flow["pages"],
+        "flow": flow,
+    }
+
+
+def _filter_shop_checkbox_matches(matches):
+    return [
+        (int(x), int(y), int(w), int(h))
+        for (x, y, w, h) in (matches or [])
+        if int(x) >= 560 and int(y) >= 450 and int(y) <= 1100
+    ]
+
+
+def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
+    """Resolve whether a shop row is selected and where its checkbox lives."""
+    state = {
+        "state": "unknown",
+        "checked_match": None,
+        "unchecked_match": None,
+        "click_target": None,
+    }
+    if screenshot is None or row_match is None:
+        return state
+    checked_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("select_checked")
+    unchecked_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("select_unchecked")
+    checked_matches = _filter_shop_checkbox_matches(
+        device_action.match_template(
+            checked_template,
+            screenshot,
+            threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        ) if checked_template else []
+    )
+    unchecked_matches = _filter_shop_checkbox_matches(
+        device_action.match_template(
+            unchecked_template,
+            screenshot,
+            threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        ) if unchecked_template else []
+    )
+    paired_checked = _pair_item_to_increment(row_match, checked_matches, y_tolerance=36)
+    paired_unchecked = _pair_item_to_increment(row_match, unchecked_matches, y_tolerance=36)
+    if paired_checked:
+        state["state"] = "selected"
+        state["checked_match"] = [int(v) for v in paired_checked]
+    if paired_unchecked:
+        state["unchecked_match"] = [int(v) for v in paired_unchecked]
+        state["click_target"] = list(_to_absolute_click_target(constants.GAME_WINDOW_REGION, paired_unchecked))
+        if state["state"] != "selected":
+            state["state"] = "unselected"
+    return state
+
+
+def prepare_trackblazer_shop_item_selection(
+    item_name,
+    quantity=1,
+    threshold=0.7,
+    checkbox_threshold=0.8,
+    confirm_threshold=0.7,
+):
+    """Find a shop item, select its row checkbox once, and stop before confirm."""
+    requested_item = str(item_name or "").strip()
+    t_total = _time()
+    flow = {
+        "requested_item": requested_item,
+        "requested_quantity": int(max(1, quantity or 1)),
+        "selection_only": True,
+        "confirm_pressed": False,
+        "scan_result": None,
+        "scan_timing": {},
+        "target_page": None,
+        "seek_result": None,
+        "attempts": [],
+        "selected": False,
+        "already_selected": False,
+        "reason": "",
+    }
+    if not requested_item:
+        flow["reason"] = "missing_item_name"
+        flow["timing_total"] = round(_time() - t_total, 4)
+        return flow
+
+    scan_result = scan_all_trackblazer_shop_items(
+        threshold=threshold,
+        checkbox_threshold=checkbox_threshold,
+        confirm_threshold=confirm_threshold,
+    )
+    flow["scan_result"] = scan_result
+    flow["scan_timing"] = (scan_result.get("flow") or {}).get("timing") or {}
+
+    target_candidates = []
+    for page in (scan_result.get("pages") or []):
+        for row in (page.get("rows") or []):
+            if row.get("item_name") != requested_item:
+                continue
+            target_candidates.append({
+                "page_index": page.get("page_index"),
+                "capture_mode": page.get("capture_mode"),
+                "scrollbar": page.get("scrollbar") or {},
+                "row": row,
+            })
+    if not target_candidates:
+        flow["reason"] = "item_not_found_in_shop_scan"
+        flow["timing_total"] = round(_time() - t_total, 4)
+        return flow
+
+    target_page = min(
+        target_candidates,
+        key=lambda entry: (
+            999 if (entry.get("scrollbar") or {}).get("position_ratio") is None else float((entry.get("scrollbar") or {}).get("position_ratio")),
+            int(entry.get("page_index") or 0),
+        ),
+    )
+    flow["target_page"] = {
+        "page_index": target_page.get("page_index"),
+        "capture_mode": target_page.get("capture_mode"),
+        "scrollbar_ratio": (target_page.get("scrollbar") or {}).get("position_ratio"),
+        "row": target_page.get("row"),
+    }
+
+    ratio_candidates = []
+    primary_ratio = (target_page.get("scrollbar") or {}).get("position_ratio")
+    if primary_ratio is not None:
+        ratio_candidates.append(float(primary_ratio))
+        for delta in (-0.04, 0.04, -0.08, 0.08):
+            ratio_candidates.append(min(1.0, max(0.0, float(primary_ratio) + delta)))
+    else:
+        ratio_candidates.append(0.0)
+
+    seen_ratios = set()
+    ratio_candidates = [
+        ratio for ratio in ratio_candidates
+        if not (round(float(ratio), 4) in seen_ratios or seen_ratios.add(round(float(ratio), 4)))
+    ]
+
+    for ratio in ratio_candidates:
+        current_scrollbar = inspect_trackblazer_shop_scrollbar()
+        seek_result = _drag_trackblazer_shop_scrollbar_to_ratio(current_scrollbar, ratio)
+        flow["seek_result"] = seek_result
+        live_screenshot = _capture_live_trackblazer_ui_screenshot()
+        live_scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=live_screenshot)
+        live_page = scan_trackblazer_shop_inventory(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            screenshot=live_screenshot,
+            save_debug_image=False,
+        )
+        matched_row = next(
+            (row for row in (live_page.get("rows") or []) if row.get("item_name") == requested_item),
+            None,
+        )
+        attempt = {
+            "target_ratio": round(float(ratio), 4),
+            "scrollbar": live_scrollbar,
+            "visible_items": list(live_page.get("visible_items") or []),
+            "row_found": bool(matched_row),
+            "row": matched_row,
+            "checkbox_state": None,
+            "click_result": None,
+        }
+        if not matched_row:
+            flow["attempts"].append(attempt)
+            continue
+
+        checkbox_state = _resolve_shop_row_checkbox_state(live_screenshot, matched_row.get("match"), threshold=checkbox_threshold)
+        attempt["checkbox_state"] = checkbox_state
+        if checkbox_state.get("state") == "selected":
+            flow["already_selected"] = True
+            flow["selected"] = True
+            flow["attempts"].append(attempt)
+            break
+        click_target = checkbox_state.get("click_target") or matched_row.get("checkbox_target")
+        if not click_target:
+            flow["attempts"].append(attempt)
+            continue
+
+        click_result = device_action.click_with_metrics(
+            click_target,
+            text=f"[TB_SHOP] Select '{requested_item}' once without confirm.",
+        )
+        attempt["click_result"] = click_result
+        verify_screenshot = _capture_live_trackblazer_ui_screenshot()
+        verify_page = scan_trackblazer_shop_inventory(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            screenshot=verify_screenshot,
+            save_debug_image=False,
+        )
+        verify_row = next(
+            (row for row in (verify_page.get("rows") or []) if row.get("item_name") == requested_item),
+            None,
+        )
+        verify_state = _resolve_shop_row_checkbox_state(
+            verify_screenshot,
+            verify_row.get("match") if verify_row else None,
+            threshold=checkbox_threshold,
+        )
+        attempt["verify_checkbox_state"] = verify_state
+        flow["attempts"].append(attempt)
+        flow["selected"] = bool(click_result.get("clicked"))
+        if verify_state.get("state") == "selected":
+            flow["selected"] = True
+        if flow["selected"]:
+            break
+
+    if not flow["selected"] and not flow["reason"]:
+        flow["reason"] = "failed_to_select_item_checkbox"
+    elif flow["selected"] and not flow["already_selected"]:
+        flow["reason"] = "item_checkbox_selected"
+    elif flow["already_selected"]:
+        flow["reason"] = "item_already_selected"
+    flow["timing_total"] = round(_time() - t_total, 4)
+    return flow
 
 
 def prepare_training_items_for_use(

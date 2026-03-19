@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress. Trackblazer detection, console visibility, and inventory/item-use scaffolding are in the branch, but real scenario scoring and full shop/action routing are still incomplete.
+In progress. Trackblazer detection, console visibility, inventory/item-use scaffolding, and a fast shop scan path are in the branch, but real scenario scoring and full shop commit routing are still incomplete.
 
 ## Current Progress
 
@@ -44,6 +44,9 @@ Implemented in support of Trackblazer bring-up:
 - [x] Trackblazer inventory open/scan/close and the non-destructive item-use test flow are implemented in `scenarios/trackblazer.py`.
 - [x] Inventory scan timing, held-quantity OCR, and per-item debug provenance are surfaced in the operator console snapshot.
 - [x] Shop entry detection and refresh-popup dismissal are wired into the lobby loop.
+- [x] Trackblazer shop scan now uses scrollbar-aware reset/seek plus buffered frame capture during a continuous scrollbar drag.
+- [x] Shop scan timing now separates drag runtime, buffered capture, overlapped analysis, and total wall time in the flow snapshot.
+- [x] Shop row selection scaffolding now exists for "find item while scrolling, seek back to its band, and click only that row checkbox without pressing confirm".
 
 Shop-related template assets added:
 
@@ -86,7 +89,7 @@ Not implemented yet:
 
 - real Trackblazer OCR extraction for grade points / shop coins / shop state
 - Trackblazer scoring
-- Trackblazer shop/item logic beyond the current refresh-popup dismissal and inventory test scaffolding (shop entry, purchasing, and production item use are not yet implemented)
+- Trackblazer shop/item commit logic beyond the current refresh-popup dismissal, buffered scan, and row-selection scaffolding (price OCR, confirm purchase, after-sale handling, and production item use are not yet implemented)
 - Trackblazer-specific action routing
 - Item price/cost OCR for shop decision-making
 

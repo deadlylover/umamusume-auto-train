@@ -19,6 +19,8 @@ What is still missing is a Trackblazer-specific flow model that the code can fol
 - [x] Trackblazer inventory open/scan/close flow exists with inventory summary and debug provenance.
 - [x] Trackblazer item-use test scaffolding exists for non-destructive manual verification.
 - [x] Trackblazer shop-entry detection exists at the lobby/refresh-popup level.
+- [x] Trackblazer shop scan now has a scrollbar-aware read-only flow with top reset, bottom detection, buffered drag capture, and overlapped frame analysis.
+- [x] Shop scan output now preserves per-frame visible rows, scrollbar ratios, and timing slices that are usable as a search index for later purchase routing.
 - [x] Generic race selection preview clicks exist for the main snapshot flow.
 - [ ] Dedicated Trackblazer flow boundaries for checkpoint progress, Grade Points, Shop Coins, fatigue, and Twinkle Star Climax are still not modeled as first-class runtime sub-phases.
 
