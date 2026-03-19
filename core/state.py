@@ -73,6 +73,125 @@ def record_runtime_ocr_debug(field, image=None, extra=None, image_path=None):
     entry.update(extra)
   _runtime_ocr_debug[field] = entry
 
+def _inventory_template_debug_entry(field, template_path, result=None, extra=None):
+  result = result or {}
+  entry = {
+    "field": field,
+    "source_type": "template_match",
+    "template": template_path,
+    "template_image_path": template_path,
+  }
+  if isinstance(result, dict):
+    if result.get("score") is not None:
+      entry["best_match_score"] = result.get("score")
+    if result.get("threshold") is not None:
+      entry["threshold"] = result.get("threshold")
+    if result.get("passed_threshold") is not None:
+      entry["passed_threshold"] = result.get("passed_threshold")
+    if result.get("matched") is not None:
+      entry["matched"] = result.get("matched")
+    if result.get("key") is not None:
+      entry["template_key"] = result.get("key")
+    if result.get("location") is not None:
+      entry["match_location"] = result.get("location")
+    if result.get("size") is not None:
+      entry["match_size"] = result.get("size")
+    if result.get("click_target") is not None:
+      entry["click_target"] = result.get("click_target")
+  if extra:
+    entry.update(extra)
+  return entry
+
+def _build_trackblazer_inventory_debug_entries(flow, controls, inventory):
+  entries = []
+
+  for idx, check in enumerate(flow.get("precheck") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_precheck_{idx}", template_path, check))
+
+  open_result = flow.get("open_result") or {}
+  open_button = open_result.get("button") or {}
+  if open_button.get("template"):
+    entries.append(
+      _inventory_template_debug_entry(
+        "inventory_open_button",
+        open_button.get("template"),
+        {
+          "threshold": open_button.get("threshold"),
+          "passed_threshold": True,
+          "matched": True,
+          "click_target": open_button.get("click_target"),
+        },
+        extra={
+          "match_rect": open_button.get("match"),
+          "search_image_path": open_button.get("search_image_path"),
+        },
+      )
+    )
+  for idx, check in enumerate(open_result.get("verification_checks") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_open_verify_{idx}", template_path, check))
+
+  for key in ("close", "confirm_use"):
+    control_entry = controls.get(key) or {}
+    template_path = control_entry.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_controls_{key}", template_path, control_entry))
+
+  for key, control_entry in (controls.get("confirm_candidates") or {}).items():
+    template_path = (control_entry or {}).get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_confirm_candidate_{key}", template_path, control_entry))
+
+  for item_name, item_data in (inventory or {}).items():
+    if item_name == "_timing":
+      continue
+    template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+    if not template_path:
+      continue
+    entries.append(
+      _inventory_template_debug_entry(
+        f"inventory_item_{item_name}",
+        template_path,
+        {
+          "threshold": item_data.get("threshold"),
+          "passed_threshold": bool(item_data.get("detected")),
+          "matched": bool(item_data.get("detected")),
+        },
+        extra={
+          "parsed_value": item_data.get("match_count", 0),
+          "match_count": item_data.get("match_count", 0),
+          "matches": item_data.get("matches"),
+          "search_image_path": item_data.get("search_image_path"),
+          "held_quantity": item_data.get("held_quantity"),
+          "increment_match": item_data.get("increment_match"),
+          "increment_target": item_data.get("increment_target"),
+        },
+      )
+    )
+
+  close_result = flow.get("close_result") or {}
+  for idx, check in enumerate(close_result.get("attempts") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_close_attempt_{idx}", template_path, check))
+  for idx, check in enumerate(close_result.get("verification_checks") or []):
+    template_path = check.get("template")
+    if template_path:
+      entries.append(_inventory_template_debug_entry(f"inventory_close_verify_{idx}", template_path, check))
+
+  deduped = []
+  seen = set()
+  for entry in entries:
+    dedupe_key = (entry.get("field"), entry.get("template"))
+    if dedupe_key in seen:
+      continue
+    seen.add(dedupe_key)
+    deduped.append(entry)
+  return deduped
+
 def clear_aptitudes_cache():
   global aptitudes_cache
   aptitudes_cache = {}
@@ -191,6 +310,8 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     debug("[STATE] Skipping Trackblazer inventory scan — wrong scenario.")
     return state_object
 
+  clear_runtime_ocr_debug()
+
   inventory = CleanDefaultDict()
   controls = {}
   summary = {
@@ -227,7 +348,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
   else:
     debug("[STATE] Opening Trackblazer training items inventory.")
     t0 = time.time()
-    open_result = open_training_items_inventory()
+    open_result = open_training_items_inventory(skip_precheck=True)
     flow["timing_open"] = round(time.time() - t0, 3)
     flow["open_result"] = open_result
     flow["opened"] = bool(open_result.get("opened"))
@@ -241,6 +362,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     t0 = time.time()
     inventory = scan_training_items_inventory()
     flow["timing_scan"] = round(time.time() - t0, 3)
+    flow["scan_timing"] = inventory.pop("_timing", None)
     t0 = time.time()
     controls = detect_inventory_controls()
     flow["timing_controls"] = round(time.time() - t0, 3)
@@ -287,6 +409,8 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
       "flow": flow,
     },
   )
+  state_object["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+  state_object["inventory_ocr_debug_entries"] = _build_trackblazer_inventory_debug_entries(flow, controls, inventory)
 
   return state_object
 

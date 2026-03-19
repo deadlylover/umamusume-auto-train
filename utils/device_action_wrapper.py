@@ -13,6 +13,7 @@ from time import sleep, time
 # only be correct for some assets. If template matching regresses in isolated places, verify
 # whether this global scale is masking an asset-specific sizing problem instead.
 GLOBAL_TEMPLATE_SCALING = 1.26
+ADB_CLICK_PRE_DELAY_SECONDS = 0.04
 
 class BotStopException(Exception):
   #Exception raised to immediately stop the bot
@@ -27,44 +28,130 @@ def stop_bot():
 Pos = tuple[int, int]                     # (x, y)
 Box = tuple[int, int, int, int]           # (x, y, w, h)
 
-def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
+LAST_CLICK_METRICS = {}
+
+def get_last_click_metrics():
+  return dict(LAST_CLICK_METRICS or {})
+
+def _resolve_click_point(target: Pos | Box):
+  if target is None or len(target) == 0:
+    return None, None, None
+  if len(target) == 2:
+    x, y = target
+    return int(x), int(y), "point"
+  if len(target) == 4:
+    x, y, w, h = target
+    return int(x + w // 2), int(y + h // 2), "box"
+  raise TypeError(f"Expected (x, y) or (x, y, w, h) tuple, got type {type(target)}: {target}")
+
+def _adb_pre_click_delay(duration: float):
+  """Return a small pacing gap before ADB taps.
+
+  Host-input clicks use ``duration`` as cursor move time. ADB has no matching
+  pointer-move concept, so the old behavior of sleeping the full duration was
+  effectively an unnecessary fixed delay. Keep a small, explicit buffer here so
+  we can later randomize it if needed without reworking call sites.
+  """
+  requested_duration = max(0.0, float(duration))
+  return min(requested_duration, float(ADB_CLICK_PRE_DELAY_SECONDS))
+
+def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
+  """Dispatch a click and return structured timing for the whole wrapper path.
+
+  This intentionally measures more than the backend tap call itself. The
+  wrapper adds pacing before and after input dispatch, and those waits are
+  often the dominant source of perceived click latency. Capturing them here
+  makes open/close timing easier to interpret and lets other flows reuse the
+  same breakdown without reimplementing ad-hoc timers.
+  """
+  global LAST_CLICK_METRICS
   if text:
     debug(text)
   if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
-  if target is None or len(target) == 0:
-    return False
-  elif len(target) == 2:
-    x, y = target
-    if bot.is_adb_input_active():
-      sleep(duration)
-      for _ in range(clicks):
-        if not adb_actions.click(x, y):
-          error(f"[INPUT][ADB] Click dispatch failed at ({x}, {y}).")
-          return False
-        sleep(interval)
-    else:
-      pyautogui_actions.click(x_y=(x, y), clicks=clicks, interval=interval, duration=duration)
-  elif len(target) == 4:
-    x, y, w, h = target
-    cx = x + w // 2
-    cy = y + h // 2
-    if bot.is_adb_input_active():
-      sleep(duration)
-      for _ in range(clicks):
-        if not adb_actions.click(cx, cy):
-          error(f"[INPUT][ADB] Click dispatch failed at ({cx}, {cy}).")
-          return False
-        sleep(interval)
-    else:
-      pyautogui_actions.click(x_y=(cx, cy), clicks=clicks, interval=interval, duration=duration)
+  x, y, target_kind = _resolve_click_point(target)
+  if x is None or y is None:
+    LAST_CLICK_METRICS = {
+      "clicked": False,
+      "target_kind": "empty",
+      "target": list(target) if target is not None else None,
+      "backend": "adb" if bot.is_adb_input_active() else "host",
+    }
+    return LAST_CLICK_METRICS
+
+  backend_name = "adb" if bot.is_adb_input_active() else "host"
+  t_total = time()
+  metrics = {
+    "clicked": False,
+    "backend": backend_name,
+    "target_kind": target_kind,
+    "target": [int(v) for v in target],
+    "resolved_click_point": [int(x), int(y)],
+    "clicks_requested": int(clicks),
+    "duration_requested": round(float(duration), 4),
+    "interval_requested": round(float(interval), 4),
+    "pre_click_delay": 0.0,
+    "dispatch_total": 0.0,
+    "inter_click_wait_total": 0.0,
+    "post_click_settle": 0.0,
+    "flush_cache": 0.0,
+    "backend_debug": None,
+  }
+
+  if bot.is_adb_input_active():
+    pre_click_delay = _adb_pre_click_delay(duration)
+    t0 = time()
+    sleep(pre_click_delay)
+    metrics["pre_click_delay"] = round(time() - t0, 4)
+
+    tap_dispatches = []
+    clicks_completed = 0
+    t_dispatch = time()
+    for _ in range(clicks):
+      t_tap = time()
+      if not adb_actions.click(x, y):
+        metrics["dispatch_total"] = round(time() - t_dispatch, 4)
+        metrics["clicks_completed"] = clicks_completed
+        metrics["backend_debug"] = adb_actions.get_last_input_debug()
+        metrics["total"] = round(time() - t_total, 4)
+        LAST_CLICK_METRICS = metrics
+        error(f"[INPUT][ADB] Click dispatch failed at ({x}, {y}).")
+        return metrics
+      tap_dispatches.append(round(time() - t_tap, 4))
+      clicks_completed += 1
+      t_wait = time()
+      sleep(interval)
+      metrics["inter_click_wait_total"] = round(metrics["inter_click_wait_total"] + (time() - t_wait), 4)
+    metrics["dispatch_total"] = round(time() - t_dispatch, 4)
+    metrics["dispatch_calls"] = tap_dispatches
+    metrics["clicks_completed"] = clicks_completed
+    metrics["backend_debug"] = adb_actions.get_last_input_debug()
   else:
-    raise TypeError(f"Expected (x, y) or (x, y, w, h) tuple, got type {type(target)}: {target}")
+    t_dispatch = time()
+    clicked = bool(pyautogui_actions.click(x_y=(x, y), clicks=clicks, interval=interval, duration=duration))
+    metrics["dispatch_total"] = round(time() - t_dispatch, 4)
+    metrics["clicks_completed"] = int(clicks if clicked else 0)
+    metrics["backend_debug"] = dict(getattr(pyautogui_actions, "LAST_CLICK_DEBUG", {}) or {})
+    if not clicked:
+      metrics["total"] = round(time() - t_total, 4)
+      LAST_CLICK_METRICS = metrics
+      return metrics
+
   if args.device_debug:
     debug(f"We clicked on {target}, screen might change, flushing screenshot cache.")
+  t0 = time()
   flush_screenshot_cache()
+  metrics["flush_cache"] = round(time() - t0, 4)
+  t0 = time()
   sleep(0.35)
-  return True
+  metrics["post_click_settle"] = round(time() - t0, 4)
+  metrics["clicked"] = True
+  metrics["total"] = round(time() - t_total, 4)
+  LAST_CLICK_METRICS = metrics
+  return metrics
+
+def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
+  return bool(click_with_metrics(target, clicks=clicks, interval=interval, duration=duration, text=text).get("clicked"))
 
 def swipe(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.3, text: str = ""):
   if text and args.device_debug:

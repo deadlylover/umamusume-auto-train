@@ -42,6 +42,8 @@ class OperatorConsole:
   DEFAULT_GEOMETRY = "960x760+40+40"
   MIN_WINDOW_SIZE = (820, 560)
   FLOW_PANE_MIN_WIDTH = 220
+  NARROW_PANE_MIN_WIDTH = 154
+  NARROW_TEXT_WIDTH = 56
 
   def __init__(self):
     self._queue = queue.Queue()
@@ -63,6 +65,7 @@ class OperatorConsole:
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._phase_labels = {}
+    self._timing_text = None
     self._summary_text = None
     self._training_text = None
     self._inventory_text = None
@@ -262,10 +265,34 @@ class OperatorConsole:
     summary_header = tk.Frame(right, bg="#101418")
     summary_header.grid(row=0, column=0, sticky="ew")
     summary_header.columnconfigure(0, weight=1)
-    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=1, sticky="e")
-    self._summary_text = scrolledtext.ScrolledText(right, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._summary_text.grid(row=1, column=0, sticky="nsew", pady=(2, 6))
+    summary_header.columnconfigure(1, weight=0)
+    summary_header.columnconfigure(2, weight=1)
+    summary_header.columnconfigure(3, weight=0)
+    tk.Label(summary_header, text="Timing", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=1, sticky="e", padx=(0, 12))
+    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=2, sticky="w")
+    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=3, sticky="e")
+    summary_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
+    summary_panel.grid(row=1, column=0, sticky="nsew", pady=(2, 6))
+    timing_frame = tk.Frame(summary_panel, bg="#101418")
+    timing_frame.rowconfigure(0, weight=1)
+    timing_frame.columnconfigure(0, weight=1)
+    self._timing_text = scrolledtext.ScrolledText(
+      timing_frame,
+      height=8,
+      width=self.NARROW_TEXT_WIDTH,
+      bg="#192028",
+      fg="#d6dde5",
+      insertbackground="white",
+    )
+    self._timing_text.grid(row=0, column=0, sticky="nsew")
+    summary_panel.add(timing_frame, minsize=self.NARROW_PANE_MIN_WIDTH)
+    summary_frame = tk.Frame(summary_panel, bg="#101418")
+    summary_frame.rowconfigure(0, weight=1)
+    summary_frame.columnconfigure(0, weight=1)
+    self._summary_text = scrolledtext.ScrolledText(summary_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._summary_text.grid(row=0, column=0, sticky="nsew")
+    summary_panel.add(summary_frame, minsize=220)
 
     training_header = tk.Frame(right, bg="#101418")
     training_header.grid(row=2, column=0, sticky="ew")
@@ -282,9 +309,16 @@ class OperatorConsole:
     training_frame = tk.Frame(training_panel, bg="#101418")
     training_frame.rowconfigure(0, weight=1)
     training_frame.columnconfigure(0, weight=1)
-    self._training_text = scrolledtext.ScrolledText(training_frame, height=6, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._training_text = scrolledtext.ScrolledText(
+      training_frame,
+      height=6,
+      width=self.NARROW_TEXT_WIDTH,
+      bg="#192028",
+      fg="#d6dde5",
+      insertbackground="white",
+    )
     self._training_text.grid(row=0, column=0, sticky="nsew")
-    training_panel.add(training_frame, minsize=220)
+    training_panel.add(training_frame, minsize=self.NARROW_PANE_MIN_WIDTH)
     inventory_frame = tk.Frame(training_panel, bg="#101418")
     inventory_frame.rowconfigure(0, weight=1)
     inventory_frame.columnconfigure(0, weight=1)
@@ -422,6 +456,7 @@ class OperatorConsole:
       "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
+    self._set_text(self._timing_text, self._format_timing(state_summary))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
     inventory_payload = {
       "summary": state_summary.get("trackblazer_inventory_summary"),
@@ -438,6 +473,59 @@ class OperatorConsole:
     widget.delete("1.0", tk.END)
     widget.insert("1.0", value)
     widget.configure(state=tk.DISABLED)
+
+  def _format_timing(self, state_summary):
+    flow = state_summary.get("trackblazer_inventory_flow") or {}
+    if not flow:
+      return "No timing data"
+    lines = []
+    # Flow-level totals
+    lines.append("=== Inventory Flow ===")
+    for key in ("timing_open", "timing_scan", "timing_controls", "timing_close", "timing_total"):
+      val = flow.get(key)
+      if val is not None:
+        label = key.replace("timing_", "")
+        lines.append(f"  {label:10s} {val:.3f}s")
+    # Open breakdown
+    open_result = flow.get("open_result") or {}
+    open_timing = open_result.get("timing") or {}
+    if open_timing:
+      lines.append("")
+      lines.append("=== Open Breakdown ===")
+      lines.extend(self._format_timing_mapping(open_timing))
+    # Scan breakdown (from inventory scan info log)
+    scan_timing = flow.get("scan_timing") or {}
+    if scan_timing:
+      lines.append("")
+      lines.append("=== Scan Breakdown ===")
+      lines.extend(self._format_timing_mapping(scan_timing))
+    # Close breakdown
+    close_result = flow.get("close_result") or {}
+    close_timing = close_result.get("timing") or {}
+    if close_timing:
+      lines.append("")
+      lines.append("=== Close Breakdown ===")
+      lines.extend(self._format_timing_mapping(close_timing))
+    return "\n".join(lines)
+
+  def _format_timing_mapping(self, mapping, indent="  "):
+    lines = []
+    for key, val in mapping.items():
+      lines.extend(self._format_timing_entry(key, val, indent=indent))
+    return lines
+
+  def _format_timing_entry(self, key, val, indent="  "):
+    if isinstance(val, dict):
+      lines = [f"{indent}{key}:"]
+      lines.extend(self._format_timing_mapping(val, indent=indent + "  "))
+      return lines
+    if isinstance(val, bool):
+      return [f"{indent}{key:14s} {val}"]
+    if isinstance(val, float):
+      return [f"{indent}{key:14s} {val:.4f}s"]
+    if isinstance(val, int):
+      return [f"{indent}{key:14s} {val}"]
+    return [f"{indent}{key:14s} {val}"]
 
   def _copy_ocr_debug(self):
     if self._root is None:

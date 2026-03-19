@@ -6,6 +6,7 @@ import utils.constants as constants
 import utils.device_action_wrapper as device_action
 import core.config as config
 import core.bot as bot
+from core.state import _save_training_scan_debug_image
 from core.ocr import extract_text
 from utils.log import info, warning, debug
 from utils.tools import get_secs, sleep
@@ -406,10 +407,11 @@ def _pair_items_to_held_rows_by_rank(detected_items, held_rows):
     return pairs
 
 
-def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_scaling=_INVERSE_GLOBAL_SCALE):
+def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_scaling=_INVERSE_GLOBAL_SCALE, screenshot=None):
     """Return a single best-match payload for a Trackblazer UI template."""
     region_ltrb = region_ltrb or _trackblazer_ui_region()
-    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     best_match = device_action.best_template_match(
         template_path,
         screenshot,
@@ -453,7 +455,7 @@ def detect_inventory_controls(threshold=0.6):
 
     close_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close")
     if close_template:
-        close_entry = _best_match_entry(close_template, region_ltrb=controls_region, threshold=threshold)
+        close_entry = _best_match_entry(close_template, region_ltrb=controls_region, threshold=threshold, screenshot=screenshot)
         close_entry["key"] = "close"
         controls["close"] = close_entry
 
@@ -466,6 +468,7 @@ def detect_inventory_controls(threshold=0.6):
             template_path,
             region_ltrb=controls_region,
             threshold=_INVENTORY_CONFIRM_USE_STATE_THRESHOLD,
+            screenshot=screenshot,
         )
         entry["key"] = key
         inventory_state_entries[key] = entry
@@ -476,7 +479,7 @@ def detect_inventory_controls(threshold=0.6):
         if not template_path:
             continue
         entry_threshold = _CONFIRM_USE_SCORE_THRESHOLD if "confirm_use" in key else threshold
-        entry = _best_match_entry(template_path, region_ltrb=controls_region, threshold=entry_threshold)
+        entry = _best_match_entry(template_path, region_ltrb=controls_region, threshold=entry_threshold, screenshot=screenshot)
         entry["key"] = key
         confirm_candidates[key] = entry
     confirm_candidates.update(inventory_state_entries)
@@ -550,6 +553,11 @@ def detect_training_items_button(threshold=0.8):
 
     region_ltrb = _trackblazer_ui_region()
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    search_image_path = _save_training_scan_debug_image(
+        screenshot,
+        "trackblazer_inventory",
+        "open_button_search_region",
+    )
     matches = device_action.match_template(
         template_path,
         screenshot,
@@ -565,6 +573,7 @@ def detect_training_items_button(threshold=0.8):
         "template": template_path,
         "threshold": threshold,
         "match": [int(x), int(y), int(w), int(h)],
+        "search_image_path": search_image_path,
         "click_target": (
             int(region_ltrb[0] + x + w // 2),
             int(region_ltrb[1] + y + h // 2),
@@ -574,12 +583,14 @@ def detect_training_items_button(threshold=0.8):
 
 def detect_inventory_screen(threshold=0.8):
     """Check whether the Trackblazer inventory/item-use screen is open."""
+    region_ltrb = _trackblazer_ui_region()
+    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     checks = []
     for key in ("use_training_items", "use_back"):
         template_path = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get(key)
         if not template_path:
             continue
-        entry = _best_match_entry(template_path, threshold=threshold)
+        entry = _best_match_entry(template_path, region_ltrb=region_ltrb, threshold=threshold, screenshot=screenshot)
         entry["key"] = key
         checks.append(entry)
         if entry["passed_threshold"]:
@@ -595,33 +606,60 @@ def detect_inventory_screen(threshold=0.8):
     return False, None, checks
 
 
-def open_training_items_inventory(threshold=0.8, verify_threshold=0.8):
+def open_training_items_inventory(threshold=0.8, verify_threshold=0.8, skip_precheck=False):
     """Open the Trackblazer inventory screen from the lobby button."""
-    already_open, verified_entry, checks = detect_inventory_screen(threshold=verify_threshold)
-    if already_open:
-        return {
-            "opened": True,
-            "already_open": True,
-            "clicked": False,
-            "button": None,
-            "verification": verified_entry,
-            "verification_checks": checks,
-        }
+    t_total = _time()
+    timing = {}
 
+    if not skip_precheck:
+        t0 = _time()
+        already_open, verified_entry, checks = detect_inventory_screen(threshold=verify_threshold)
+        timing["precheck"] = round(_time() - t0, 4)
+        if already_open:
+            timing["total"] = round(_time() - t_total, 4)
+            info(f"[TB_INV] open timing: already_open — {timing}")
+            return {
+                "opened": True,
+                "already_open": True,
+                "clicked": False,
+                "button": None,
+                "verification": verified_entry,
+                "verification_checks": checks,
+                "timing": timing,
+            }
+
+    t0 = _time()
     button = detect_training_items_button(threshold=threshold)
+    timing["detect_button"] = round(_time() - t0, 4)
     if not button:
+        timing["total"] = round(_time() - t_total, 4)
+        info(f"[TB_INV] open timing: no_button — {timing}")
         return {
             "opened": False,
             "already_open": False,
             "clicked": False,
             "button": None,
             "verification": None,
-            "verification_checks": checks,
+            "verification_checks": [],
+            "timing": timing,
         }
 
-    clicked = device_action.click(button["click_target"])
-    sleep(0.6)
+    t0 = _time()
+    click_metrics = device_action.click_with_metrics(button["click_target"])
+    clicked = bool(click_metrics.get("clicked"))
+    timing["click_total"] = round(_time() - t0, 4)
+    timing["click_breakdown"] = click_metrics
+
+    t0 = _time()
+    sleep(0.25)
+    timing["sleep"] = round(_time() - t0, 4)
+
+    t0 = _time()
     opened, verified_entry, verify_checks = detect_inventory_screen(threshold=verify_threshold)
+    timing["verify"] = round(_time() - t0, 4)
+
+    timing["total"] = round(_time() - t_total, 4)
+    info(f"[TB_INV] open timing: {timing}")
     return {
         "opened": bool(clicked and opened),
         "already_open": False,
@@ -629,45 +667,87 @@ def open_training_items_inventory(threshold=0.8, verify_threshold=0.8):
         "button": button,
         "verification": verified_entry,
         "verification_checks": verify_checks,
+        "timing": timing,
     }
 
 
 def close_training_items_inventory(threshold=0.8):
     """Close the Trackblazer inventory screen with Trackblazer-first fallbacks."""
+    t_total = _time()
+    timing = {}
+
     attempts = [
         ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
         ("close_btn", "assets/buttons/close_btn.png", 1.0),
         ("back_btn", "assets/buttons/back_btn.png", 1.0),
     ]
+    # Single screenshot for all close-button attempts
+    region_ltrb = _trackblazer_ui_region()
+    t0 = _time()
+    close_screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    timing["screenshot"] = round(_time() - t0, 4)
+
     attempt_entries = []
+    t0 = _time()
     for key, template_path, template_scaling in attempts:
         if not template_path:
             continue
         entry = _best_match_entry(
             template_path,
+            region_ltrb=region_ltrb,
             threshold=threshold,
             template_scaling=template_scaling,
+            screenshot=close_screenshot,
         )
         entry["key"] = key
         attempt_entries.append(entry)
         if not entry["passed_threshold"]:
             continue
-        clicked = device_action.click(entry["click_target"])
-        sleep(0.5)
-        still_open, _, checks = detect_inventory_screen(threshold=threshold)
+        timing["match_attempts"] = round(_time() - t0, 4)
+        timing["matched_key"] = key
+
+        t0 = _time()
+        click_metrics = device_action.click_with_metrics(entry["click_target"])
+        clicked = bool(click_metrics.get("clicked"))
+        timing["click_total"] = round(_time() - t0, 4)
+        timing["click_breakdown"] = click_metrics
+
+        t0 = _time()
+        sleep(0.15)
+        timing["sleep"] = round(_time() - t0, 4)
+
+        # Lightweight verification: just check if the header is still visible
+        t0 = _time()
+        header_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_training_items")
+        if header_template:
+            header_entry = _best_match_entry(header_template, threshold=threshold)
+            still_open = header_entry["passed_threshold"]
+            checks = [header_entry]
+        else:
+            still_open, _, checks = detect_inventory_screen(threshold=threshold)
+        timing["verify"] = round(_time() - t0, 4)
+
+        timing["total"] = round(_time() - t_total, 4)
+        info(f"[TB_INV] close timing: {timing}")
         return {
             "closed": bool(clicked and not still_open),
             "clicked": bool(clicked),
             "attempt": entry,
             "attempts": attempt_entries,
             "verification_checks": checks,
+            "timing": timing,
         }
+
+    timing["match_attempts"] = round(_time() - t0, 4)
+    timing["total"] = round(_time() - t_total, 4)
+    info(f"[TB_INV] close timing: no_match — {timing}")
     return {
         "closed": False,
         "clicked": False,
         "attempt": None,
         "attempts": attempt_entries,
         "verification_checks": [],
+        "timing": timing,
     }
 
 
@@ -695,6 +775,11 @@ def scan_training_items_inventory(threshold=0.8):
     region_xywh = constants.MANT_INVENTORY_ITEMS_REGION
     screenshot = device_action.screenshot(region_xywh=region_xywh)
     icon_screenshot, icon_offset_x = _item_icon_search_crop(screenshot)
+    icon_search_image_path = _save_training_scan_debug_image(
+        icon_screenshot,
+        "trackblazer_inventory",
+        "item_icon_search_region",
+    )
 
     # Find all increment buttons in the region first so we can pair them.
     # Use inverse global scale since these assets are at native resolution.
@@ -834,6 +919,7 @@ def scan_training_items_inventory(threshold=0.8):
             "threshold": item_threshold,
             "match_count": len(matches),
             "matches": [[int(v) for v in m] for m in matches],
+            "search_image_path": icon_search_image_path,
             "increment_target": increment_target,
             "increment_match": increment_match_raw,
             "row_center_y": row_center_y,
@@ -844,12 +930,23 @@ def scan_training_items_inventory(threshold=0.8):
         }
 
     t_total_elapsed = _time() - t_total
+    scan_timing = {
+        "total": round(t_total_elapsed, 4),
+        "held_ocr": round(t_held, 4),
+        "templates": round(t_templates, 4),
+        "families": round(t_families, 4),
+        "families_resolved": families_resolved,
+        "families_skipped": families_skipped,
+        "items_detected": len(detected_items_for_pairing),
+        "quantity_reads": len(held_quantities),
+    }
     info(
         f"[TB_INV] scan timing: total={t_total_elapsed:.2f}s "
         f"held_ocr={t_held:.2f}s templates={t_templates:.2f}s "
         f"families={t_families:.2f}s (resolved={families_resolved} skipped={families_skipped}) "
         f"items_detected={len(detected_items_for_pairing)} quantity_reads={len(held_quantities)}"
     )
+    inventory["_timing"] = scan_timing
     return inventory
 
 

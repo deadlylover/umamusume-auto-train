@@ -231,6 +231,7 @@ def trigger_manual_inventory_check():
       snapshot["state_summary"]["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
       snapshot["state_summary"]["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
       snapshot["state_summary"]["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
+      snapshot["ocr_debug"] = state_obj.get("inventory_ocr_debug_entries") or []
       bot.set_snapshot(snapshot)
       bot.set_phase("checking_inventory", status="complete", message="Manual Trackblazer inventory check complete.")
     except Exception as exc:
