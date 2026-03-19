@@ -6,19 +6,59 @@ import utils.constants as constants
 import utils.device_action_wrapper as device_action
 import core.config as config
 import core.bot as bot
+from core.ocr import extract_text
 from utils.log import info, warning, debug
 from utils.tools import get_secs, sleep
+from utils.screenshot import enhance_image_for_ocr
 from utils.shared import CleanDefaultDict
+from PIL import Image
+import re
 
 # Trackblazer item/shop assets are captured at the game's native screen
 # resolution.  The bot applies a global template scale (currently 1.26x) to
 # all templates by default, which makes these assets too large to match.
 # This inverse factor cancels the global scale so they match 1:1.
 _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+_INVENTORY_CONFIRM_USE_STATE_THRESHOLD = 0.98
+_CONFIRM_USE_SCORE_THRESHOLD = 0.98
+_CONFIRM_USE_AVAILABLE_BRIGHT_RATIO_THRESHOLD = 0.05
+_STRICT_ITEM_THRESHOLDS = {
+    "speed_ankle_weights": 0.88,
+    "stamina_ankle_weights": 0.88,
+    "power_ankle_weights": 0.88,
+    "guts_ankle_weights": 0.88,
+}
+_ITEM_ROW_CLUSTER_TOLERANCE = 28
+_ITEM_CLUSTER_PADDING = 10
+_HELD_ROW_TOLERANCE = 26
+_HELD_COUNT_REGION_WIDTH = 116
+_HELD_COUNT_REGION_PADDING_Y = 4
+_ITEM_VARIANT_FAMILIES = (
+    ("megaphone", (
+        "motivating_megaphone",
+        "coaching_megaphone",
+        "empowering_megaphone",
+    )),
+    ("ankle_weights", (
+        "speed_ankle_weights",
+        "stamina_ankle_weights",
+        "power_ankle_weights",
+        "guts_ankle_weights",
+    )),
+    ("cleat_hammer", (
+        "artisan_cleat_hammer",
+        "master_cleat_hammer",
+    )),
+)
 
 
 def _trackblazer_ui_region():
     return constants.GAME_WINDOW_BBOX
+
+
+def _trackblazer_inventory_controls_region():
+    left, top, right, bottom = constants.GAME_WINDOW_BBOX
+    return (left, max(top, bottom - 220), right, bottom)
 
 
 def _match_center_y(match):
@@ -78,6 +118,182 @@ def _green_ratio(rgb_crop):
     return round(float(green_mask.mean()), 4)
 
 
+def _bright_ratio(rgb_crop, brightness_threshold=170):
+    if rgb_crop is None or getattr(rgb_crop, "size", 0) == 0:
+        return 0.0
+    brightness = rgb_crop.mean(axis=2)
+    return round(float((brightness >= brightness_threshold).mean()), 4)
+
+
+def _item_threshold(item_name, threshold):
+    return max(float(threshold), _STRICT_ITEM_THRESHOLDS.get(item_name, 0.0))
+
+
+def _item_family_name(item_name):
+    for family_name, items in _ITEM_VARIANT_FAMILIES:
+        if item_name in items:
+            return family_name
+    return None
+
+
+def _item_family_members(item_name):
+    family_name = _item_family_name(item_name)
+    if family_name is None:
+        return (item_name,)
+    for current_family_name, items in _ITEM_VARIANT_FAMILIES:
+        if current_family_name == family_name:
+            return items
+    return (item_name,)
+
+
+def _cluster_matches_by_row(candidates, tolerance=_ITEM_ROW_CLUSTER_TOLERANCE):
+    clusters = []
+    for candidate in sorted(candidates, key=lambda current: current["row_center_y"]):
+        if not clusters:
+            clusters.append([candidate])
+            continue
+        cluster = clusters[-1]
+        anchor_y = sum(entry["row_center_y"] for entry in cluster) / len(cluster)
+        if abs(candidate["row_center_y"] - anchor_y) <= tolerance:
+            cluster.append(candidate)
+        else:
+            clusters.append([candidate])
+    return clusters
+
+
+def _cluster_bounds(cluster, screenshot_shape, padding=_ITEM_CLUSTER_PADDING):
+    screenshot_h, screenshot_w = screenshot_shape[:2]
+    left = max(0, min(entry["match"][0] for entry in cluster) - padding)
+    top = max(0, min(entry["match"][1] for entry in cluster) - padding)
+    right = min(screenshot_w, max(entry["match"][0] + entry["match"][2] for entry in cluster) + padding)
+    bottom = min(screenshot_h, max(entry["match"][1] + entry["match"][3] for entry in cluster) + padding)
+    return left, top, right, bottom
+
+
+def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
+    left, top, right, bottom = _cluster_bounds(cluster, screenshot.shape)
+    cluster_crop = screenshot[top:bottom, left:right].copy()
+    effective_scale = device_action._effective_template_scale(_INVERSE_GLOBAL_SCALE)
+    best_resolution = None
+    for item_name in family_items:
+        template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+        if not template_path:
+            continue
+        match = device_action.best_template_match(
+            template_path,
+            cluster_crop,
+            template_scales=[effective_scale],
+        )
+        if match is None:
+            continue
+        score = float(match["score"])
+        item_threshold = _item_threshold(item_name, threshold)
+        if score < item_threshold:
+            continue
+        mx, my = match["location"]
+        mw, mh = match["size"]
+        candidate = {
+            "item_name": item_name,
+            "score": score,
+            "threshold": item_threshold,
+            "match": (int(left + mx), int(top + my), int(mw), int(mh)),
+            "row_center_y": int(top + my + mh // 2),
+        }
+        if best_resolution is None or candidate["score"] > best_resolution["score"]:
+            best_resolution = candidate
+    return best_resolution
+
+
+def _extract_inventory_quantity_from_crop(crop):
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return {
+            "raw_text": "",
+            "held_quantity": None,
+            "remaining_quantity": None,
+        }
+    pil = Image.fromarray(crop)
+    candidates = [
+        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=None), allowlist="0123456789>"),
+        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=220), allowlist="0123456789>"),
+        extract_text(enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=180), allowlist="0123456789>"),
+    ]
+    best_text = ""
+    best_score = -1
+    for candidate in candidates:
+        candidate = (candidate or "").strip()
+        digits = re.findall(r"\d+", candidate)
+        score = len(digits) * 10 + len(candidate)
+        if score > best_score:
+            best_text = candidate
+            best_score = score
+    digits = re.findall(r"\d+", best_text)
+    held_quantity = int(digits[0]) if digits else None
+    remaining_quantity = int(digits[1]) if len(digits) > 1 else None
+    return {
+        "raw_text": best_text,
+        "held_quantity": held_quantity,
+        "remaining_quantity": remaining_quantity,
+    }
+
+
+def _detect_inventory_held_rows(screenshot=None):
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
+    held_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("inventory_held")
+    if not held_template:
+        return []
+    matches = device_action.match_template(
+        held_template,
+        screenshot,
+        threshold=0.95,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+    rows = []
+    for (x, y, w, h) in matches:
+        x = int(x)
+        y = int(y)
+        w = int(w)
+        h = int(h)
+        count_left = min(screenshot.shape[1], x + w + 4)
+        count_right = min(screenshot.shape[1], count_left + _HELD_COUNT_REGION_WIDTH)
+        count_top = max(0, y - _HELD_COUNT_REGION_PADDING_Y)
+        count_bottom = min(screenshot.shape[0], y + h + _HELD_COUNT_REGION_PADDING_Y)
+        count_crop = screenshot[count_top:count_bottom, count_left:count_right].copy()
+        quantity = _extract_inventory_quantity_from_crop(count_crop)
+        rows.append(
+            {
+                "match": [x, y, w, h],
+                "row_center_y": int(y + h // 2),
+                "count_region": [int(count_left), int(count_top), int(max(0, count_right - count_left)), int(max(0, count_bottom - count_top))],
+                "raw_text": quantity["raw_text"],
+                "held_quantity": quantity["held_quantity"],
+                "remaining_quantity": quantity["remaining_quantity"],
+            }
+        )
+    return sorted(rows, key=lambda r: r["row_center_y"])
+
+
+def _pair_items_to_held_rows_by_rank(detected_items, held_rows):
+    """Pair detected items to held rows by Y-rank order.
+
+    Both lists must be in the same coordinate space.  Items and held rows
+    are each sorted by center-Y, then paired 1-to-1 by position (first
+    item row gets first held row, etc.).
+    """
+    sorted_items = sorted(detected_items, key=lambda d: d["row_center_y"])
+    sorted_held = sorted(held_rows, key=lambda r: r["row_center_y"])
+    pairs = {}
+    for idx, item_entry in enumerate(sorted_items):
+        if idx < len(sorted_held):
+            pairs[item_entry["item_name"]] = sorted_held[idx]
+        else:
+            debug(
+                f"[TB_INV] No held row for rank {idx} item "
+                f"'{item_entry['item_name']}' (only {len(sorted_held)} held rows)"
+            )
+    return pairs
+
+
 def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_scaling=_INVERSE_GLOBAL_SCALE):
     """Return a single best-match payload for a Trackblazer UI template."""
     region_ltrb = region_ltrb or _trackblazer_ui_region()
@@ -119,40 +335,91 @@ def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_s
 
 def detect_inventory_controls(threshold=0.6):
     """Detect bottom-row inventory controls on the current Trackblazer screen."""
-    screenshot = device_action.screenshot(region_ltrb=_trackblazer_ui_region())
+    controls_region = _trackblazer_inventory_controls_region()
+    screenshot = device_action.screenshot(region_ltrb=controls_region)
     controls = {}
 
     close_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close")
     if close_template:
-        close_entry = _best_match_entry(close_template, threshold=threshold)
+        close_entry = _best_match_entry(close_template, region_ltrb=controls_region, threshold=threshold)
         close_entry["key"] = "close"
         controls["close"] = close_entry
 
-    confirm_candidates = {}
-    for key in (
-        "shop_confirm",
-        "shop_aftersale_confirm_use_available",
-        "shop_aftersale_confirm_use_unavailable",
-    ):
+    inventory_state_entries = {}
+    for key in ("inventory_confirm_use_available", "inventory_confirm_use_unavailable"):
         template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
         if not template_path:
             continue
-        entry = _best_match_entry(template_path, threshold=threshold)
+        entry = _best_match_entry(
+            template_path,
+            region_ltrb=controls_region,
+            threshold=_INVENTORY_CONFIRM_USE_STATE_THRESHOLD,
+        )
+        entry["key"] = key
+        inventory_state_entries[key] = entry
+
+    confirm_candidates = {}
+    for key in ("shop_confirm", "shop_aftersale_confirm_use_available", "shop_aftersale_confirm_use_unavailable"):
+        template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
+        if not template_path:
+            continue
+        entry_threshold = _CONFIRM_USE_SCORE_THRESHOLD if "confirm_use" in key else threshold
+        entry = _best_match_entry(template_path, region_ltrb=controls_region, threshold=entry_threshold)
         entry["key"] = key
         confirm_candidates[key] = entry
+    confirm_candidates.update(inventory_state_entries)
 
+    available_entry = confirm_candidates.get("shop_aftersale_confirm_use_available")
+    unavailable_entry = confirm_candidates.get("shop_aftersale_confirm_use_unavailable")
+    button_state = None
+    state_reason = ""
     best_confirm = None
-    passed_candidates = [entry for entry in confirm_candidates.values() if entry.get("passed_threshold")]
-    if passed_candidates:
-        best_confirm = max(passed_candidates, key=lambda entry: entry.get("score") or 0.0)
-    elif confirm_candidates:
-        best_confirm = max(confirm_candidates.values(), key=lambda entry: entry.get("score") or 0.0)
+
+    inventory_available_entry = inventory_state_entries.get("inventory_confirm_use_available")
+    inventory_unavailable_entry = inventory_state_entries.get("inventory_confirm_use_unavailable")
+    passed_inventory_state_entries = [entry for entry in (inventory_available_entry, inventory_unavailable_entry) if entry and entry.get("passed_threshold")]
+
+    if passed_inventory_state_entries:
+        best_confirm = max(passed_inventory_state_entries, key=lambda entry: entry.get("score") or 0.0)
+        crop = _crop_from_match(screenshot, best_confirm.get("location"), best_confirm.get("size"))
+        best_confirm["green_ratio"] = _green_ratio(crop)
+        best_confirm["bright_ratio"] = _bright_ratio(crop)
+        if best_confirm.get("key") == "inventory_confirm_use_available":
+            best_confirm["button_state"] = "available"
+        else:
+            best_confirm["button_state"] = "unavailable"
+        best_confirm["button_state_reason"] = "inventory_specific_template"
+    else:
+        passed_state_candidates = [entry for entry in (available_entry, unavailable_entry) if entry and entry.get("passed_threshold")]
+        if passed_state_candidates:
+            best_state_candidate = max(passed_state_candidates, key=lambda entry: entry.get("score") or 0.0)
+            crop = _crop_from_match(screenshot, best_state_candidate.get("location"), best_state_candidate.get("size"))
+            green_ratio = _green_ratio(crop)
+            bright_ratio = _bright_ratio(crop)
+            button_state = "available" if bright_ratio >= _CONFIRM_USE_AVAILABLE_BRIGHT_RATIO_THRESHOLD else "unavailable"
+            state_reason = "bright_ratio" if button_state == "available" else "low_bright_ratio"
+            best_confirm = available_entry if button_state == "available" else unavailable_entry
+            if best_confirm is None:
+                best_confirm = best_state_candidate
+            best_confirm["green_ratio"] = green_ratio
+            best_confirm["bright_ratio"] = bright_ratio
+            best_confirm["button_state"] = button_state
+            best_confirm["button_state_reason"] = state_reason
+            if available_entry is not None:
+                available_entry["bright_ratio"] = bright_ratio
+                available_entry["button_state"] = button_state
+                available_entry["button_state_reason"] = state_reason
+            if unavailable_entry is not None:
+                unavailable_entry["bright_ratio"] = bright_ratio
+                unavailable_entry["button_state"] = button_state
+                unavailable_entry["button_state_reason"] = state_reason
+
+    if best_confirm is None:
+        generic_confirm = confirm_candidates.get("shop_confirm")
+        if generic_confirm and generic_confirm.get("passed_threshold"):
+            best_confirm = generic_confirm
 
     if best_confirm:
-        crop = _crop_from_match(screenshot, best_confirm.get("location"), best_confirm.get("size"))
-        green_ratio = _green_ratio(crop)
-        best_confirm["green_ratio"] = green_ratio
-        best_confirm["button_state"] = "available" if green_ratio >= 0.18 else "unavailable"
         controls["confirm_use"] = best_confirm
 
     controls["confirm_candidates"] = confirm_candidates
@@ -314,6 +581,9 @@ def scan_training_items_inventory(threshold=0.8):
     """
     region_xywh = constants.MANT_INVENTORY_ITEMS_REGION
     screenshot = device_action.screenshot(region_xywh=region_xywh)
+    # Detect held labels in the SAME screenshot so coordinates are in the
+    # same space as item matches (both relative to MANT_INVENTORY_ITEMS_REGION).
+    held_rows = _detect_inventory_held_rows(screenshot=screenshot)
 
     # Find all increment buttons in the region first so we can pair them.
     # Use inverse global scale since these assets are at native resolution.
@@ -335,18 +605,65 @@ def scan_training_items_inventory(threshold=0.8):
         f"in region {region_xywh}"
     )
 
-    inventory = CleanDefaultDict()
+    raw_matches = {}
     for item_name, template_path in constants.TRACKBLAZER_ITEM_TEMPLATES.items():
+        item_threshold = _item_threshold(item_name, threshold)
         matches = device_action.match_template(
-            template_path, screenshot, threshold,
+            template_path, screenshot, item_threshold,
             template_scaling=_INVERSE_GLOBAL_SCALE,
         )
-        matches = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in matches]
+        raw_matches[item_name] = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in matches]
+
+    resolved_matches = {item_name: list(matches) for item_name, matches in raw_matches.items()}
+    for family_name, family_items in _ITEM_VARIANT_FAMILIES:
+        family_candidates = []
+        for item_name in family_items:
+            for match in raw_matches.get(item_name, []):
+                family_candidates.append(
+                    {
+                        "item_name": item_name,
+                        "match": match,
+                        "row_center_y": int(_match_center_y(match)),
+                    }
+                )
+        if not family_candidates:
+            continue
+        for item_name in family_items:
+            resolved_matches[item_name] = []
+        for cluster in _cluster_matches_by_row(family_candidates):
+            winner = _resolve_family_cluster(cluster, family_items, screenshot, threshold)
+            if winner is None:
+                debug(
+                    f"[TB_INV] No winner resolved for family '{family_name}' "
+                    f"cluster at rows {[entry['row_center_y'] for entry in cluster]}"
+                )
+                continue
+            resolved_matches[winner["item_name"]].append(winner["match"])
+
+    # Build a list of detected items with their row center for rank-based
+    # pairing with held rows.  Both are in MANT_INVENTORY_ITEMS_REGION coords.
+    detected_items_for_pairing = []
+    for item_name, matches in resolved_matches.items():
+        if matches:
+            detected_items_for_pairing.append({
+                "item_name": item_name,
+                "row_center_y": int(_match_center_y(matches[0])),
+            })
+    held_pairs = _pair_items_to_held_rows_by_rank(detected_items_for_pairing, held_rows)
+
+    inventory = CleanDefaultDict()
+    for item_name, template_path in constants.TRACKBLAZER_ITEM_TEMPLATES.items():
+        item_threshold = _item_threshold(item_name, threshold)
+        matches = resolved_matches.get(item_name, [])
         category = constants.TRACKBLAZER_ITEM_CATEGORIES.get(item_name, "unknown")
 
         increment_target = None
         increment_match_raw = None
         row_center_y = None
+        held_quantity = None
+        remaining_quantity = None
+        quantity_text = ""
+        quantity_region = None
         if matches:
             # Use the first (topmost) match for pairing.
             paired = _pair_item_to_increment(matches[0], increment_matches)
@@ -355,15 +672,26 @@ def scan_training_items_inventory(threshold=0.8):
                 increment_target = _to_absolute_click_target(region_xywh, paired)
                 increment_target = (int(increment_target[0]), int(increment_target[1]))
                 increment_match_raw = [int(v) for v in paired]
+            held_row = held_pairs.get(item_name)
+            if held_row is not None:
+                held_quantity = held_row.get("held_quantity")
+                remaining_quantity = held_row.get("remaining_quantity")
+                quantity_text = held_row.get("raw_text", "")
+                quantity_region = held_row.get("count_region")
 
         inventory[item_name] = {
             "detected": len(matches) > 0,
             "category": category,
+            "threshold": item_threshold,
             "match_count": len(matches),
             "matches": [[int(v) for v in m] for m in matches],
             "increment_target": increment_target,
             "increment_match": increment_match_raw,
             "row_center_y": row_center_y,
+            "held_quantity": held_quantity,
+            "remaining_quantity": remaining_quantity,
+            "quantity_text": quantity_text,
+            "quantity_region": quantity_region,
         }
     return inventory
 
@@ -382,6 +710,7 @@ def build_inventory_summary(inventory):
         "by_category": {},
         "total_detected": 0,
         "actionable_items": [],
+        "held_quantities": {},
     }
     for item_name, data in inventory.items():
         if not data.get("detected"):
@@ -392,6 +721,8 @@ def build_inventory_summary(inventory):
         summary["by_category"].setdefault(cat, []).append(item_name)
         if data.get("increment_target"):
             summary["actionable_items"].append(item_name)
+        if data.get("held_quantity") is not None:
+            summary["held_quantities"][item_name] = data.get("held_quantity")
     return summary
 
 
@@ -418,3 +749,31 @@ def detect_shop_entry_button(threshold=0.8):
         if match:
             return key, match
     return None, None
+
+
+def inspect_shop_entry_state(threshold=0.8):
+    """Collect a debug-friendly summary of Trackblazer shop entry detection."""
+    checks = {}
+    for key, template_path in constants.TRACKBLAZER_SHOP_ENTRY_TEMPLATES.items():
+        entry = _best_match_entry(
+            template_path,
+            threshold=threshold,
+            template_scaling=1.0,
+        )
+        entry["key"] = key
+        checks[key] = entry
+
+    passed = [entry for entry in checks.values() if entry.get("passed_threshold")]
+    best_entry = None
+    if passed:
+        best_entry = max(passed, key=lambda entry: entry.get("score") or 0.0)
+    elif checks:
+        best_entry = max(checks.values(), key=lambda entry: entry.get("score") or 0.0)
+
+    return {
+        "threshold": threshold,
+        "matched": bool(best_entry and best_entry.get("passed_threshold")),
+        "button_key": best_entry.get("key") if best_entry else None,
+        "best_match": best_entry,
+        "checks": checks,
+    }

@@ -57,6 +57,7 @@ operator_console = None
 pause_requested = False
 execution_intent = "execute"
 control_callbacks = {}
+manual_control_active = False
 
 
 def set_phase(phase, status="active", message="", error=""):
@@ -79,6 +80,7 @@ def get_runtime_state():
       "updated_at": runtime_updated_at,
       "review_waiting": review_waiting,
       "pause_requested": pause_requested,
+      "manual_control_active": manual_control_active,
       "execution_intent": execution_intent,
       "is_bot_running": is_bot_running,
       "backend_state": get_backend_state(),
@@ -144,6 +146,18 @@ def set_execution_intent(intent):
 def get_execution_intent():
   with runtime_lock:
     return execution_intent
+
+
+def set_manual_control_active(active):
+  global manual_control_active, runtime_updated_at
+  with runtime_lock:
+    manual_control_active = bool(active)
+    runtime_updated_at = time.time()
+
+
+def is_manual_control_active():
+  with runtime_lock:
+    return manual_control_active
 
 
 def set_control_backend_state(

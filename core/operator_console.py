@@ -32,9 +32,16 @@ PHASES = [
   "recovering",
 ]
 
+PHASE_CONTROL_CALLBACKS = {
+  "checking_inventory": "check_inventory",
+  "checking_shop": "check_shop",
+}
+
 
 class OperatorConsole:
   DEFAULT_GEOMETRY = "960x760+40+40"
+  MIN_WINDOW_SIZE = (820, 560)
+  FLOW_PANE_MIN_WIDTH = 220
 
   def __init__(self):
     self._queue = queue.Queue()
@@ -132,7 +139,8 @@ class OperatorConsole:
 
   def _build_layout(self):
     root = self._root
-    root.columnconfigure(0, weight=1)
+    root.minsize(*self.MIN_WINDOW_SIZE)
+    root.columnconfigure(0, weight=0, minsize=self.FLOW_PANE_MIN_WIDTH)
     root.columnconfigure(1, weight=1)
     root.rowconfigure(2, weight=1)
 
@@ -244,6 +252,10 @@ class OperatorConsole:
       )
       label.pack(fill=tk.X, pady=1)
       self._phase_labels[phase] = label
+      callback_name = PHASE_CONTROL_CALLBACKS.get(phase)
+      if callback_name:
+        label.configure(cursor="hand2")
+        label.bind("<Button-1>", lambda _event, name=callback_name: self._run_phase_check(name))
 
     self._message_value = tk.StringVar(value="")
     self._error_value = tk.StringVar(value="")
@@ -740,6 +752,11 @@ class OperatorConsole:
   def _toggle_bot(self):
     bot.invoke_control_callback("toggle_bot")
     self.publish()
+
+  def _run_phase_check(self, callback_name):
+    triggered = bot.invoke_control_callback(callback_name)
+    if not triggered:
+      self._message_value.set(f"Manual check callback '{callback_name}' is not registered.")
 
   def _request_pause(self):
     bot.request_pause()

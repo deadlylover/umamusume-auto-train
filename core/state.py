@@ -176,7 +176,7 @@ def collect_main_state():
   return state_object
 
 
-def collect_trackblazer_inventory(state_object):
+def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, trigger="automatic"):
   """Open, scan, and close the Trackblazer training items inventory."""
   from scenarios.trackblazer import (
     scan_training_items_inventory,
@@ -187,7 +187,7 @@ def collect_trackblazer_inventory(state_object):
     detect_inventory_controls,
   )
 
-  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer") and trigger != "manual_console":
     debug("[STATE] Skipping Trackblazer inventory scan — wrong scenario.")
     return state_object
 
@@ -200,7 +200,9 @@ def collect_trackblazer_inventory(state_object):
     "actionable_items": [],
   }
   flow = {
+    "trigger": trigger,
     "execution_intent": bot.get_execution_intent(),
+    "allow_open_non_execute": bool(allow_open_non_execute),
     "opened": False,
     "already_open": False,
     "closed": False,
@@ -216,7 +218,7 @@ def collect_trackblazer_inventory(state_object):
   if inventory_screen_open:
     flow["opened"] = True
     flow["already_open"] = True
-  elif bot.get_execution_intent() != "execute":
+  elif bot.get_execution_intent() != "execute" and not allow_open_non_execute:
     flow["skipped"] = True
     flow["reason"] = "inventory_open_requires_execute_intent"
     debug("[STATE] Skipping Trackblazer inventory open in non-execute intent.")

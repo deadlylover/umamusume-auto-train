@@ -165,6 +165,119 @@ def toggle_bot():
       bot.bot_thread.start()
   publish_runtime_state()
 
+
+def _manual_console_snapshot():
+  runtime_state = bot.get_runtime_state()
+  snapshot = runtime_state.get("snapshot")
+  if isinstance(snapshot, dict) and snapshot:
+    snapshot = dict(snapshot)
+  else:
+    snapshot = {
+      "scenario_name": constants.SCENARIO_NAME or "trackblazer",
+      "turn_label": "",
+      "energy_label": "",
+      "sub_phase": "manual_console_check",
+      "execution_intent": bot.get_execution_intent(),
+      "state_summary": {},
+      "selected_action": {},
+      "available_actions": [],
+      "ranked_trainings": [],
+      "trackblazer_inventory": None,
+      "reasoning_notes": "",
+      "min_scores": None,
+      "backend_state": bot.get_backend_state(),
+      "ocr_debug": [],
+      "planned_clicks": [],
+    }
+  snapshot["state_summary"] = dict(snapshot.get("state_summary") or {})
+  snapshot["selected_action"] = dict(snapshot.get("selected_action") or {})
+  snapshot["backend_state"] = bot.get_backend_state()
+  snapshot["execution_intent"] = bot.get_execution_intent()
+  return snapshot
+
+
+def _start_manual_console_check(name, worker):
+  if bot.is_bot_running:
+    bot.set_phase(
+      "recovering",
+      status="error",
+      message=f"Skipped {name}.",
+      error="Stop the bot before running a manual operator-console check.",
+    )
+    publish_runtime_state()
+    return
+  threading.Thread(target=worker, daemon=True).start()
+
+
+def trigger_manual_inventory_check():
+  def _run():
+    bot.set_phase("checking_inventory", message="Running manual Trackblazer inventory check.")
+    publish_runtime_state()
+    snapshot = _manual_console_snapshot()
+    snapshot["scenario_name"] = "trackblazer"
+    snapshot["sub_phase"] = "manual_inventory_check"
+    snapshot["selected_action"] = {"func": "check_inventory"}
+    snapshot["reasoning_notes"] = "Manual Trackblazer inventory check triggered from the operator console."
+    try:
+      config.reload_config(print_config=False)
+      resolve_control_backend()
+      focus_target_window()
+      bot.set_manual_control_active(True)
+
+      from core.state import collect_trackblazer_inventory
+
+      state_obj = collect_trackblazer_inventory({}, allow_open_non_execute=True, trigger="manual_console")
+      snapshot["trackblazer_inventory"] = state_obj.get("trackblazer_inventory")
+      snapshot["state_summary"]["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
+      snapshot["state_summary"]["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
+      snapshot["state_summary"]["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_inventory", status="complete", message="Manual Trackblazer inventory check complete.")
+    except Exception as exc:
+      snapshot["state_summary"]["trackblazer_inventory_flow"] = {
+        "trigger": "manual_console",
+        "error": str(exc),
+      }
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_inventory", status="error", message="Manual inventory check failed.", error=str(exc))
+    finally:
+      bot.set_manual_control_active(False)
+    publish_runtime_state()
+
+  _start_manual_console_check("manual inventory check", _run)
+
+
+def trigger_manual_shop_check():
+  def _run():
+    bot.set_phase("checking_shop", message="Running manual Trackblazer shop check.")
+    publish_runtime_state()
+    snapshot = _manual_console_snapshot()
+    snapshot["scenario_name"] = "trackblazer"
+    snapshot["sub_phase"] = "manual_shop_check"
+    snapshot["selected_action"] = {"func": "check_shop"}
+    snapshot["reasoning_notes"] = "Manual Trackblazer shop check triggered from the operator console."
+    try:
+      config.reload_config(print_config=False)
+      resolve_control_backend()
+      focus_target_window()
+      bot.set_manual_control_active(True)
+
+      from scenarios.trackblazer import inspect_shop_entry_state
+
+      shop_check = inspect_shop_entry_state()
+      snapshot["state_summary"]["trackblazer_shop_check"] = shop_check
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop check complete.")
+    except Exception as exc:
+      snapshot["state_summary"]["trackblazer_shop_check"] = {"error": str(exc)}
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_shop", status="error", message="Manual shop check failed.", error=str(exc))
+    finally:
+      bot.set_manual_control_active(False)
+    publish_runtime_state()
+
+  _start_manual_console_check("manual shop check", _run)
+
 def trigger_debug_capture():
   debug(f"Hotkey '{capture_hotkey}' pressed; capturing OCR regions for calibration.")
 
@@ -298,6 +411,8 @@ if __name__ == "__main__":
   update_config()
   config.reload_config(print_config=False)
   bot.register_control_callback("toggle_bot", toggle_bot)
+  bot.register_control_callback("check_inventory", trigger_manual_inventory_check)
+  bot.register_control_callback("check_shop", trigger_manual_shop_check)
   ensure_operator_console()
   publish_runtime_state()
   

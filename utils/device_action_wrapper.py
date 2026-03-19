@@ -30,7 +30,7 @@ Box = tuple[int, int, int, int]           # (x, y, w, h)
 def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
   if text:
     debug(text)
-  if not bot.is_bot_running:
+  if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
   if target is None or len(target) == 0:
     return False
@@ -70,7 +70,7 @@ def swipe(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.3, 
   if text and args.device_debug:
     debug(text)
   # Swipe from start to end coordinates
-  if not bot.is_bot_running:
+  if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
   if bot.is_adb_input_active():
     if not adb_actions.swipe(start_x_y[0], start_x_y[1], end_x_y[0], end_x_y[1], duration):
@@ -87,7 +87,7 @@ def drag(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.5, t
   if text and args.device_debug:
     debug(text)
   # Swipe from start to end coordinates and click at the end
-  if not bot.is_bot_running:
+  if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
   swipe(start_x_y, end_x_y, duration)
   click(end_x_y)
@@ -100,7 +100,7 @@ def long_press(mouse_x_y : tuple[int, int], duration=2.0, text: str = ""):
   if text and args.device_debug:
     debug(text)
   # Long press at coordinates
-  if not bot.is_bot_running:
+  if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
   swipe(mouse_x_y, mouse_x_y, duration)
   if args.device_debug:
@@ -283,7 +283,7 @@ def deduplicate_boxes(boxes_xywh : list[tuple[int, int, int, int]], min_dist=5):
   return filtered
 
 def screenshot(region_xywh : tuple[int, int, int, int] = None, region_ltrb : tuple[int, int, int, int] = None):
-  if not bot.is_bot_running:
+  if not bot.is_bot_running and not bot.is_manual_control_active():
     stop_bot()
 
   screenshot = None
