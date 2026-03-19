@@ -314,18 +314,24 @@ def trigger_manual_shop_check():
       focus_target_window()
       bot.set_manual_control_active(True)
 
-      from scenarios.trackblazer import enter_shop
+      from scenarios.trackblazer import check_trackblazer_shop_inventory
 
-      shop_result = enter_shop()
-      snapshot["state_summary"]["trackblazer_shop_check"] = shop_result.get("shop_check")
-      snapshot["state_summary"]["trackblazer_shop_enter"] = shop_result
+      shop_result = check_trackblazer_shop_inventory(trigger="manual_console")
+      snapshot["trackblazer_shop_items"] = shop_result.get("trackblazer_shop_items")
+      snapshot["state_summary"]["trackblazer_shop_summary"] = shop_result.get("trackblazer_shop_summary")
+      snapshot["state_summary"]["trackblazer_shop_flow"] = shop_result.get("trackblazer_shop_flow")
+      snapshot["state_summary"]["trackblazer_shop_enter"] = (shop_result.get("trackblazer_shop_flow") or {}).get("entry_result")
+      snapshot["ocr_debug"] = shop_result.get("inventory_ocr_debug_entries") or []
       bot.set_snapshot(snapshot)
-      bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop entry complete.")
+      bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop check complete.")
     except Exception as exc:
-      snapshot["state_summary"]["trackblazer_shop_check"] = {"error": str(exc)}
+      snapshot["state_summary"]["trackblazer_shop_flow"] = {
+        "trigger": "manual_console",
+        "error": str(exc),
+      }
       snapshot["state_summary"]["trackblazer_shop_enter"] = {"error": str(exc)}
       bot.set_snapshot(snapshot)
-      bot.set_phase("checking_shop", status="error", message="Manual shop entry failed.", error=str(exc))
+      bot.set_phase("checking_shop", status="error", message="Manual shop check failed.", error=str(exc))
     finally:
       bot.set_manual_control_active(False)
     publish_runtime_state()

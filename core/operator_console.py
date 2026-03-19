@@ -495,6 +495,9 @@ class OperatorConsole:
       "controls": state_summary.get("trackblazer_inventory_controls"),
       "flow": state_summary.get("trackblazer_inventory_flow"),
       "items": snapshot.get("trackblazer_inventory"),
+      "shop_summary": state_summary.get("trackblazer_shop_summary"),
+      "shop_flow": state_summary.get("trackblazer_shop_flow"),
+      "shop_items": snapshot.get("trackblazer_shop_items"),
     }
     self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
@@ -508,25 +511,34 @@ class OperatorConsole:
 
   def _format_timing(self, state_summary):
     flow = state_summary.get("trackblazer_inventory_flow") or {}
+    title = "Inventory Flow"
+    if not flow:
+      flow = state_summary.get("trackblazer_shop_flow") or {}
+      title = "Shop Flow"
     if not flow:
       return "No timing data"
     lines = []
     # Flow-level totals
-    lines.append("=== Inventory Flow ===")
+    lines.append(f"=== {title} ===")
     for key in ("timing_open", "timing_scan", "timing_controls", "timing_close", "timing_total"):
       val = flow.get(key)
       if val is not None:
         label = key.replace("timing_", "")
         lines.append(f"  {label:10s} {val:.3f}s")
+    for key in ("timing_reset_swipes", "timing_forward_swipes"):
+      val = flow.get(key)
+      if val is not None:
+        label = key.replace("timing_", "")
+        lines.append(f"  {label:10s} {val:.3f}s")
     # Open breakdown
-    open_result = flow.get("open_result") or {}
+    open_result = flow.get("open_result") or flow.get("entry_result") or {}
     open_timing = open_result.get("timing") or {}
     if open_timing:
       lines.append("")
       lines.append("=== Open Breakdown ===")
       lines.extend(self._format_timing_mapping(open_timing))
     # Scan breakdown (from inventory scan info log)
-    scan_timing = flow.get("scan_timing") or {}
+    scan_timing = flow.get("scan_timing") or ((flow.get("scan_result") or {}).get("flow") if isinstance(flow.get("scan_result"), dict) else {}) or {}
     if scan_timing:
       lines.append("")
       lines.append("=== Scan Breakdown ===")

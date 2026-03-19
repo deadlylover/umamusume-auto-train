@@ -283,6 +283,7 @@ TRACKBLAZER_SHOP_ENTRY_TEMPLATES = {
   "shop_refresh_cancel": "assets/trackblazer/shop_refresh_cancel.png",
   "shop_refresh_shop": "assets/trackblazer/shop_refresh_shop.png",
   "shop_enter_lobby": "assets/buttons/shop_enter_lobby.png",
+  "shop_enter_summer_lobby": "assets/trackblazer/shop_enter_summer_lobby.png",
 }
 
 UNITY_TEAM_MATCHUP_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (130, 565, -130, -475))

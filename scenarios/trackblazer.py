@@ -585,15 +585,36 @@ def detect_training_items_button(threshold=0.8):
         threshold,
         template_scaling=_INVERSE_GLOBAL_SCALE,
     )
+    best_match = device_action.best_template_match(
+        template_path,
+        screenshot,
+        template_scales=[device_action._effective_template_scale(_INVERSE_GLOBAL_SCALE)],
+    )
     if not matches:
-        return None
+        return {
+            "template": template_path,
+            "threshold": threshold,
+            "matched": False,
+            "passed_threshold": False,
+            "score": round(best_match["score"], 4) if best_match and best_match.get("score") is not None else None,
+            "match": None,
+            "location": [int(v) for v in best_match["location"]] if best_match and best_match.get("location") is not None else None,
+            "size": [int(v) for v in best_match["size"]] if best_match and best_match.get("size") is not None else None,
+            "search_image_path": search_image_path,
+            "click_target": None,
+        }
 
-    best_match = max(matches, key=lambda match: (match[1] + match[3] // 2, match[0] + match[2] // 2))
-    x, y, w, h = best_match
+    chosen_match = max(matches, key=lambda match: (match[1] + match[3] // 2, match[0] + match[2] // 2))
+    x, y, w, h = chosen_match
     return {
         "template": template_path,
         "threshold": threshold,
+        "matched": True,
+        "passed_threshold": True,
+        "score": round(best_match["score"], 4) if best_match and best_match.get("score") is not None else None,
         "match": [int(x), int(y), int(w), int(h)],
+        "location": [int(x), int(y)],
+        "size": [int(w), int(h)],
         "search_image_path": search_image_path,
         "click_target": (
             int(region_ltrb[0] + x + w // 2),
@@ -652,14 +673,14 @@ def open_training_items_inventory(threshold=0.8, verify_threshold=0.8, skip_prec
     t0 = _time()
     button = detect_training_items_button(threshold=threshold)
     timing["detect_button"] = round(_time() - t0, 4)
-    if not button:
+    if not button or not button.get("matched") or not button.get("click_target"):
         timing["total"] = round(_time() - t_total, 4)
         info(f"[TB_INV] open timing: no_button — {timing}")
         return {
             "opened": False,
             "already_open": False,
             "clicked": False,
-            "button": None,
+            "button": button,
             "verification": None,
             "verification_checks": [],
             "timing": timing,
@@ -1547,11 +1568,48 @@ def detect_shop_entry_button(threshold=0.8):
     return best_method.get("method"), best_method.get("entry")
 
 
+def detect_shop_screen(threshold=0.7):
+    """Check whether the Trackblazer shop screen is currently open."""
+    region_ltrb = _trackblazer_ui_region()
+    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    checks = []
+
+    for key in ("shop_confirm", "shop_aftersale_close"):
+        template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
+        if not template_path:
+            continue
+        entry = _best_match_entry(
+            template_path,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            screenshot=screenshot,
+        )
+        entry["key"] = key
+        checks.append(entry)
+        if entry.get("passed_threshold"):
+            return True, entry, checks
+
+    back_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back")
+    if back_template:
+        back_entry = _best_match_entry(
+            back_template,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            screenshot=screenshot,
+        )
+        back_entry["key"] = "use_back"
+        checks.append(back_entry)
+        if back_entry.get("passed_threshold"):
+            return True, back_entry, checks
+
+    return False, None, checks
+
+
 def enter_shop(threshold=0.8):
     """Enter the Trackblazer shop using the best currently supported method.
 
-    Only the refresh-dialog method is wired today. The direct lobby button
-    path is left as a follow-up once its asset/flow is finalized.
+    Supports refresh-dialog and lobby entry buttons when their templates are
+    visible. Returns timing and verification data for operator-console review.
     """
     t_total = _time()
     timing = {}
@@ -1576,43 +1634,116 @@ def enter_shop(threshold=0.8):
             "timing": timing,
         }
 
-    if method_name == "lobby_button":
-        timing["total"] = round(_time() - t_total, 4)
-        warning("[TB_SHOP] Lobby shop entry detected but not wired yet. TODO: hook up direct lobby shop entry.")
-        return {
-            "entered": False,
-            "clicked": False,
-            "method": method_name,
-            "reason": "lobby_shop_entry_not_wired_yet",
-            "shop_check": shop_state,
-            "click_metrics": None,
-            "timing": timing,
-        }
-
     t0 = _time()
     click_metrics = device_action.click_with_metrics(entry["click_target"])
     timing["click_total"] = round(_time() - t0, 4)
     timing["click_breakdown"] = click_metrics
+    clicked = bool(click_metrics.get("clicked"))
 
     t0 = _time()
-    sleep(0.25)
+    sleep(0.35)
     timing["sleep"] = round(_time() - t0, 4)
 
-    entered = bool(click_metrics.get("clicked"))
     t0 = _time()
-    shop_coins = get_trackblazer_shop_coins() if entered else -1
+    shop_open, verification_entry, verification_checks = detect_shop_screen(
+        threshold=max(0.7, threshold - 0.1),
+    ) if clicked else (False, None, [])
+    timing["verify"] = round(_time() - t0, 4)
+    t0 = _time()
+    shop_coins = get_trackblazer_shop_coins() if shop_open else -1
     timing["read_shop_coins"] = round(_time() - t0, 4)
     timing["total"] = round(_time() - t_total, 4)
 
     info(f"[TB_SHOP] enter shop timing: {timing}")
     return {
-        "entered": entered,
+        "entered": bool(clicked and shop_open),
         "clicked": bool(click_metrics.get("clicked")),
         "method": method_name,
-        "reason": "clicked_refresh_dialog_shop" if entered else "click_failed",
+        "reason": (
+            f"clicked_{method_name}_shop"
+            if clicked and shop_open else
+            ("shop_verification_failed" if clicked else "click_failed")
+        ),
         "shop_coins": shop_coins,
         "shop_check": shop_state,
         "click_metrics": click_metrics,
+        "verification": verification_entry,
+        "verification_checks": verification_checks,
+        "timing": timing,
+    }
+
+
+def close_trackblazer_shop(threshold=0.8, verify_threshold=0.75):
+    """Exit the Trackblazer shop without purchasing anything."""
+    t_total = _time()
+    timing = {}
+    region_ltrb = _trackblazer_ui_region()
+    t0 = _time()
+    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    timing["screenshot"] = round(_time() - t0, 4)
+
+    attempt_entries = []
+    attempts = [
+        ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
+        ("close_btn", "assets/buttons/close_btn.png", 1.0),
+        ("back_btn", "assets/buttons/back_btn.png", 1.0),
+    ]
+    t0 = _time()
+    for key, template_path, template_scaling in attempts:
+        if not template_path:
+            continue
+        entry = _best_match_entry(
+            template_path,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            template_scaling=template_scaling,
+            screenshot=screenshot,
+        )
+        entry["key"] = key
+        attempt_entries.append(entry)
+        if not entry.get("passed_threshold"):
+            continue
+        timing["match_attempts"] = round(_time() - t0, 4)
+        timing["matched_key"] = key
+
+        t0 = _time()
+        click_metrics = device_action.click_with_metrics(
+            entry["click_target"],
+            text=f"[TB_SHOP] Close shop via {key}.",
+        )
+        clicked = bool(click_metrics.get("clicked"))
+        timing["click_total"] = round(_time() - t0, 4)
+        timing["click_breakdown"] = click_metrics
+
+        t0 = _time()
+        sleep(0.2)
+        timing["sleep"] = round(_time() - t0, 4)
+
+        t0 = _time()
+        still_open, verification_entry, verification_checks = detect_shop_screen(threshold=verify_threshold)
+        timing["verify"] = round(_time() - t0, 4)
+        timing["total"] = round(_time() - t_total, 4)
+        info(f"[TB_SHOP] close timing: {timing}")
+        return {
+            "closed": bool(clicked and not still_open),
+            "clicked": bool(clicked),
+            "attempt": entry,
+            "attempts": attempt_entries,
+            "verification": verification_entry,
+            "verification_checks": verification_checks,
+            "timing": timing,
+        }
+
+    timing["match_attempts"] = round(_time() - t0, 4)
+    timing["total"] = round(_time() - t_total, 4)
+    info(f"[TB_SHOP] close timing: no_match {timing}")
+    return {
+        "closed": False,
+        "clicked": False,
+        "attempt": None,
+        "attempts": attempt_entries,
+        "verification": None,
+        "verification_checks": [],
         "timing": timing,
     }
 
@@ -1659,7 +1790,11 @@ def inspect_shop_entry_state(threshold=0.8):
             "method": method_name,
             "matched": matched,
             "ready": matched,
-            "entry": checks.get("shop_refresh_shop") or checks.get("shop_enter_lobby"),
+            "entry": (
+                checks.get("shop_refresh_shop")
+                or checks.get("shop_enter_lobby")
+                or checks.get("shop_enter_summer_lobby")
+            ),
             "dismiss": checks.get("shop_refresh_cancel"),
             "best_match": best_entry,
             "region_ltrb": [int(v) for v in region_ltrb],
@@ -1796,31 +1931,43 @@ def inspect_shop_entry_state(threshold=0.8):
 
     methods = {}
 
-    methods["refresh_dialog"] = _refresh_dialog_summary()
-
-    lobby_template = _entry_template("shop_enter_lobby")
-    if lobby_template:
-        methods["lobby_button"] = _shop_method_summary(
-            "lobby_button",
-            constants.MANT_SHOP_BUTTON_BBOX,
-            {"shop_enter_lobby": lobby_template},
-            required_keys=("shop_enter_lobby",),
-            template_scaling=1.0,
-        )
-    else:
-        methods["lobby_button"] = {
-            "method": "lobby_button",
+    def _single_template_method(method_name, template_key):
+        template_path = _entry_template(template_key)
+        if template_path:
+            template_scaling = (
+                _INVERSE_GLOBAL_SCALE
+                if "assets/trackblazer/" in str(template_path).replace("\\", "/")
+                else 1.0
+            )
+            region_ltrb = (
+                _trackblazer_ui_region()
+                if template_key == "shop_enter_summer_lobby"
+                else constants.MANT_SHOP_BUTTON_BBOX
+            )
+            return _shop_method_summary(
+                method_name,
+                region_ltrb,
+                {template_key: template_path},
+                required_keys=(template_key,),
+                template_scaling=template_scaling,
+            )
+        return {
+            "method": method_name,
             "matched": False,
             "ready": False,
             "entry": None,
             "dismiss": None,
             "best_match": None,
             "region_ltrb": [int(v) for v in constants.MANT_SHOP_BUTTON_BBOX],
-            "required_keys": ["shop_enter_lobby"],
-            "missing_required": ["shop_enter_lobby"],
+            "required_keys": [template_key],
+            "missing_required": [template_key],
             "checks": {},
             "reason": "templates_missing",
         }
+
+    methods["refresh_dialog"] = _refresh_dialog_summary()
+    methods["lobby_button"] = _single_template_method("lobby_button", "shop_enter_lobby")
+    methods["summer_lobby_button"] = _single_template_method("summer_lobby_button", "shop_enter_summer_lobby")
 
     ready_methods = [entry for entry in methods.values() if entry.get("ready")]
     scored_methods = [entry for entry in methods.values() if (entry.get("best_match") or {}).get("score") is not None]
@@ -1843,3 +1990,121 @@ def inspect_shop_entry_state(threshold=0.8):
         "best_method": best_method,
         "methods": methods,
     }
+
+
+def check_trackblazer_shop_inventory(
+    threshold=0.7,
+    checkbox_threshold=0.8,
+    confirm_threshold=0.7,
+    max_reset_swipes=4,
+    max_forward_swipes=8,
+    trigger="manual_console",
+):
+    """Enter the Trackblazer shop, scan all visible items, then back out."""
+    clear_runtime_ocr_debug()
+    t_total = _time()
+    flow = {
+        "trigger": str(trigger or "manual_console"),
+        "execution_intent": bot.get_execution_intent(),
+        "read_only": True,
+        "safety_rule": "never_click_shop_checkbox_or_confirm",
+        "entered": False,
+        "closed": False,
+        "entry_result": None,
+        "scan_result": None,
+        "close_result": None,
+        "shop_coins": -1,
+        "pages": [],
+        "all_items": [],
+        "stop_reason": "",
+        "reason": "",
+    }
+    result = {
+        "trackblazer_shop_items": [],
+        "trackblazer_shop_summary": {
+            "items_detected": [],
+            "page_count": 0,
+            "stop_reason": "",
+            "shop_coins": -1,
+        },
+        "trackblazer_shop_flow": flow,
+        "ocr_runtime_debug": {},
+        "inventory_ocr_debug_entries": [],
+        "success": False,
+    }
+
+    try:
+        t0 = _time()
+        entry_result = enter_shop(threshold=max(0.8, threshold))
+        flow["timing_open"] = round(_time() - t0, 3)
+        flow["entry_result"] = entry_result
+        flow["entered"] = bool(entry_result.get("entered"))
+        flow["shop_coins"] = entry_result.get("shop_coins", -1)
+        if not flow["entered"]:
+            flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
+            return result
+
+        t0 = _time()
+        scan_result = scan_all_trackblazer_shop_items(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            max_reset_swipes=max_reset_swipes,
+            max_forward_swipes=max_forward_swipes,
+        )
+        flow["timing_scan"] = round(_time() - t0, 3)
+        flow["scan_result"] = scan_result
+        flow["scan_timing"] = (scan_result.get("flow") or {}).get("timing") or {}
+        flow["pages"] = [page.get("visible_items") for page in (scan_result.get("pages") or [])]
+        flow["all_items"] = list(scan_result.get("all_items") or [])
+        flow["stop_reason"] = (scan_result.get("flow") or {}).get("stop_reason") or ""
+        result["trackblazer_shop_items"] = list(flow["all_items"])
+        result["trackblazer_shop_summary"] = {
+            "items_detected": list(flow["all_items"]),
+            "page_count": len(scan_result.get("pages") or []),
+            "stop_reason": flow["stop_reason"],
+            "shop_coins": flow["shop_coins"],
+        }
+
+        t0 = _time()
+        close_result = close_trackblazer_shop()
+        flow["timing_close"] = round(_time() - t0, 3)
+        flow["close_result"] = close_result
+        flow["closed"] = bool(close_result.get("closed"))
+        if not flow["closed"] and not flow["reason"]:
+            flow["reason"] = "failed_to_close_shop"
+
+        flow["success"] = bool(flow["entered"] and flow["closed"] and flow["all_items"])
+        result["success"] = bool(flow["success"])
+    finally:
+        flow["timing_total"] = round(_time() - t_total, 3)
+        flow["timing_controls"] = flow.get("timing_close")
+        scan_result = flow.get("scan_result") or {}
+        scan_flow = scan_result.get("flow") or {}
+        flow["timing_reset_swipes"] = round(
+            sum((swipe.get("duration", 0.0) + swipe.get("settle_seconds", 0.0)) for swipe in (scan_flow.get("reset_swipes") or [])),
+            3,
+        )
+        flow["timing_forward_swipes"] = round(
+            sum((swipe.get("duration", 0.0) + swipe.get("settle_seconds", 0.0)) for swipe in (scan_flow.get("forward_swipes") or [])),
+            3,
+        )
+        result["trackblazer_shop_flow"] = flow
+        record_runtime_ocr_debug(
+            "trackblazer_shop_manual_check",
+            extra={
+                "items_detected": result["trackblazer_shop_summary"].get("items_detected", []),
+                "page_count": result["trackblazer_shop_summary"].get("page_count"),
+                "stop_reason": result["trackblazer_shop_summary"].get("stop_reason"),
+                "shop_coins": result["trackblazer_shop_summary"].get("shop_coins"),
+                "flow": flow,
+            },
+        )
+        result["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+
+    info(
+        f"[TB_SHOP] manual shop check timing: total={flow.get('timing_total', '?')}s "
+        f"open={flow.get('timing_open', '-')} scan={flow.get('timing_scan', '-')} "
+        f"close={flow.get('timing_close', '-')}"
+    )
+    return result

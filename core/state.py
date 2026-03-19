@@ -118,12 +118,7 @@ def _build_trackblazer_inventory_debug_entries(flow, controls, inventory):
       _inventory_template_debug_entry(
         "inventory_open_button",
         open_button.get("template"),
-        {
-          "threshold": open_button.get("threshold"),
-          "passed_threshold": True,
-          "matched": True,
-          "click_target": open_button.get("click_target"),
-        },
+        open_button,
         extra={
           "match_rect": open_button.get("match"),
           "search_image_path": open_button.get("search_image_path"),
