@@ -1149,14 +1149,15 @@ def _choose_best_candidate(all_frames, target_skill):
     if not candidates:
         return None
 
-    # Sort: prefer candidates with increment, then by score descending.
-    def _rank(c):
-        has_inc = 1 if c["row"].get("increment_match") else 0
-        score = c["row"].get("match_score", 0)
-        return (has_inc, score)
+    # Only consider candidates that have an increment button paired.
+    # No increment means the skill is already learned / not actionable.
+    actionable = [c for c in candidates if c["row"].get("increment_match")]
+    if not actionable:
+        return None
 
-    candidates.sort(key=_rank, reverse=True)
-    return candidates[0]
+    # Sort by match score descending.
+    actionable.sort(key=lambda c: c["row"].get("match_score", 0), reverse=True)
+    return actionable[0]
 
 
 def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):

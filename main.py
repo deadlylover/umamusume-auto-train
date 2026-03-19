@@ -378,7 +378,7 @@ def trigger_manual_skill_purchase_check():
       purchase_result = collect_skill_purchase(
         trigger="manual_console",
         dry_run=True,
-        debug_session_name="manual_skill_purchase_check",
+        debug_session_name=f"manual_skill_purchase_check_{int(time.time() * 1000)}",
       )
       snapshot["state_summary"]["skill_purchase_flow"] = purchase_result.get("skill_purchase_flow")
       bot.set_snapshot(snapshot)

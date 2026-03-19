@@ -241,6 +241,14 @@ def _build_trackblazer_shop_debug_entries(flow, ocr_runtime_debug=None):
       entries.append(_inventory_template_debug_entry(f"shop_entry_verify_{idx}", template_path, check))
 
   scan_result = flow.get("scan_result") or {}
+  # Collect last non-empty search_image_path per item across all pages so
+  # rows from drag frames (save_debug_image=False) can inherit a valid path.
+  _item_search_image = {}
+  for page in scan_result.get("pages") or []:
+    for row in page.get("rows") or []:
+      path = row.get("search_image_path")
+      if path:
+        _item_search_image[row.get("item_name")] = path
   for page in scan_result.get("pages") or []:
     page_index = page.get("page_index", 0)
     for row in page.get("rows") or []:
@@ -263,7 +271,7 @@ def _build_trackblazer_shop_debug_entries(flow, ocr_runtime_debug=None):
             "row_center_y": row.get("row_center_y"),
             "checkbox_match": row.get("checkbox_match"),
             "checkbox_target": row.get("checkbox_target"),
-            "search_image_path": row.get("search_image_path"),
+            "search_image_path": row.get("search_image_path") or _item_search_image.get(item_name, ""),
           },
         )
       )

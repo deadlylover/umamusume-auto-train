@@ -1754,7 +1754,6 @@ def scan_all_trackblazer_shop_items(
         checkbox_threshold=checkbox_threshold,
         confirm_threshold=confirm_threshold,
         screenshot=initial_screenshot,
-        save_debug_image=False,
     )
     initial_page_timing = dict(initial_page.get("timing") or {})
     initial_page_timing["capture"] = round(initial_page_timing.get("capture", 0.0) + initial_capture_elapsed, 4)

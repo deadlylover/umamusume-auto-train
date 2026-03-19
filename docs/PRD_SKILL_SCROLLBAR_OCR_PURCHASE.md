@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned. This is a handoff/TODO PRD for replacing the current swipe-settle skill scan with the same scrollbar-driven capture pipeline now used for the Trackblazer shop scan.
+Phase 1 implemented. Milestones 1–4 complete. The scrollbar-driven buffered capture pipeline is live in `core/skill_scanner.py` with post-drag waterfall execution, top-to-bottom multi-skill ordering, and already-learned skill filtering (no increment = skip). Milestone 5 (purchase commit) remains deferred.
 
 The existing skill flow in [core/skill.py](/Users/loli/umaautomac/umamusume-auto-train/core/skill.py) is still a simple:
 
@@ -304,6 +304,12 @@ Instead:
 - as soon as a desired purchasable skill is found, resolve its increment button and act
 
 This keeps Phase 1 bounded and fast.
+
+### Already-Learned Skill Filtering
+
+A skill that OCR-matches the shortlist but has no paired increment button is treated as already learned and excluded from candidate selection entirely. This avoids wasting seek-back time on skills that cannot be actioned.
+
+Later, an "obtained" icon template can be added for explicit learned-state detection, but the absence of an increment button is a sufficient and cheaper signal for now.
 
 Example config target list:
 
