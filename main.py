@@ -11,7 +11,7 @@ import uvicorn
 
 from utils.log import info, warning, error, debug, init_logging, args
 
-from core.skeleton import career_lobby
+from core.skeleton import career_lobby, _enrich_ocr_debug_entries
 from core.hotkeys import HotkeyListener
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.platform.window_focus import focus_target_window
@@ -248,7 +248,7 @@ def trigger_manual_inventory_check():
       snapshot["state_summary"]["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
       snapshot["state_summary"]["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
       snapshot["state_summary"]["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
-      snapshot["ocr_debug"] = state_obj.get("inventory_ocr_debug_entries") or []
+      snapshot["ocr_debug"] = _enrich_ocr_debug_entries(state_obj.get("inventory_ocr_debug_entries") or [])
       bot.set_snapshot(snapshot)
       bot.set_phase("checking_inventory", status="complete", message="Manual Trackblazer inventory check complete.")
     except Exception as exc:
@@ -299,7 +299,7 @@ def trigger_manual_inventory_selection_test():
       snapshot["state_summary"]["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
       snapshot["state_summary"]["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
       snapshot["state_summary"]["trackblazer_inventory_flow"] = result.get("trackblazer_inventory_flow")
-      snapshot["ocr_debug"] = result.get("inventory_ocr_debug_entries") or []
+      snapshot["ocr_debug"] = _enrich_ocr_debug_entries(result.get("inventory_ocr_debug_entries") or [])
       bot.set_snapshot(snapshot)
       bot.set_phase("checking_inventory_selection", status="complete", message="Manual Trackblazer item-selection test complete.")
     except Exception as exc:
@@ -339,7 +339,7 @@ def trigger_manual_shop_check():
       snapshot["state_summary"]["trackblazer_shop_summary"] = shop_result.get("trackblazer_shop_summary")
       snapshot["state_summary"]["trackblazer_shop_flow"] = shop_result.get("trackblazer_shop_flow")
       snapshot["state_summary"]["trackblazer_shop_enter"] = (shop_result.get("trackblazer_shop_flow") or {}).get("entry_result")
-      snapshot["ocr_debug"] = shop_result.get("inventory_ocr_debug_entries") or []
+      snapshot["ocr_debug"] = _enrich_ocr_debug_entries(shop_result.get("inventory_ocr_debug_entries") or [])
       bot.set_snapshot(snapshot)
       bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop check complete.")
     except Exception as exc:

@@ -668,6 +668,13 @@ def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_s
     region_ltrb = region_ltrb or _trackblazer_ui_region()
     if screenshot is None:
         screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    search_image_path = ""
+    if screenshot is not None and getattr(screenshot, "size", 0) != 0:
+        search_image_path = _save_training_scan_debug_image(
+            screenshot,
+            "trackblazer_shop",
+            "template_search_region",
+        )
     best_match = device_action.best_template_match(
         template_path,
         screenshot,
@@ -683,6 +690,8 @@ def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_s
             "location": None,
             "size": None,
             "click_target": None,
+            "search_image_path": search_image_path,
+            "region_ltrb": [int(v) for v in region_ltrb],
         }
 
     x, y = best_match["location"]
@@ -700,6 +709,8 @@ def _best_match_entry(template_path, region_ltrb=None, threshold=0.8, template_s
         "location": [int(x), int(y)],
         "size": [int(w), int(h)],
         "click_target": click_target,
+        "search_image_path": search_image_path,
+        "region_ltrb": [int(v) for v in region_ltrb],
     }
 
 
@@ -2633,6 +2644,8 @@ def inspect_shop_entry_state(threshold=0.8):
                 "selection_reason": "dialog_lower_row_candidate",
                 "candidate_count": len(candidates),
                 "key": key,
+                "search_image_path": fallback.get("search_image_path"),
+                "region_ltrb": fallback.get("region_ltrb"),
             }
 
         dialog_template = _entry_template("shop_refresh_dialog")

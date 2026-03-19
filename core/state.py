@@ -99,6 +99,10 @@ def _inventory_template_debug_entry(field, template_path, result=None, extra=Non
       entry["match_size"] = result.get("size")
     if result.get("click_target") is not None:
       entry["click_target"] = result.get("click_target")
+    if result.get("search_image_path"):
+      entry["search_image_path"] = result.get("search_image_path")
+    if result.get("region_ltrb") is not None:
+      entry["bbox_xyxy"] = result.get("region_ltrb")
   if extra:
     entry.update(extra)
   return entry
