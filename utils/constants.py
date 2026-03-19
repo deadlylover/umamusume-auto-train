@@ -166,6 +166,12 @@ MANT_GRADE_POINT_REGION = convert_xyxy_to_xywh(MANT_GRADE_POINT_BBOX)
 
 MANT_SHOP_BUTTON_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (600, 785, -90, -190))
 MANT_SHOP_BUTTON_REGION = convert_xyxy_to_xywh(MANT_SHOP_BUTTON_BBOX)
+MANT_SHOP_REFRESH_DIALOG_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (100, 366, -436, -486))
+MANT_SHOP_REFRESH_DIALOG_REGION = convert_xyxy_to_xywh(MANT_SHOP_REFRESH_DIALOG_BBOX)
+MANT_SHOP_SCROLLSWIPE_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (640, 420, -50, -260))
+MANT_SHOP_SCROLLSWIPE_REGION = convert_xyxy_to_xywh(MANT_SHOP_SCROLLSWIPE_BBOX)
+MANT_SHOP_SCROLLBAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (705, 280, -18, -250))
+MANT_SHOP_SCROLLBAR_REGION = convert_xyxy_to_xywh(MANT_SHOP_SCROLLBAR_BBOX)
 
 # Trackblazer inventory/item region — covers the item list area on the training items screen.
 # Placeholder offsets; tune with the region adjuster once the screen is accessible.
@@ -188,8 +194,10 @@ TRACKBLAZER_ITEM_TEMPLATES = {
   "guts_scroll": "assets/trackblazer/items/guts_scroll.png",
   "guts_training_application": "assets/trackblazer/items/guts_training_application.png",
   "master_cleat_hammer": "assets/trackblazer/items/master_cleat_hammer.png",
+  "master_practice_guide": "assets/trackblazer/items/master_practice_guide.png",
   "miracle_cure": "assets/trackblazer/items/miracle_cure.png",
   "motivating_megaphone": "assets/trackblazer/items/motivating_megaphone.png",
+  "pocket_planner": "assets/trackblazer/items/pocket_planner.png",
   "power_ankle_weights": "assets/trackblazer/items/power_ankle_weights.png",
   "power_manual": "assets/trackblazer/items/power_manual.png",
   "power_scroll": "assets/trackblazer/items/power_scroll.png",
@@ -201,6 +209,7 @@ TRACKBLAZER_ITEM_TEMPLATES = {
   "speed_notepad": "assets/trackblazer/items/speed_notepad.png",
   "speed_scroll": "assets/trackblazer/items/speed_scroll.png",
   "stamina_ankle_weights": "assets/trackblazer/items/stamina_ankle_weights.png",
+  "stamina_manual": "assets/trackblazer/items/stamina_manual.png",
   "vita_20": "assets/trackblazer/items/vita_20.png",
   "vita_65": "assets/trackblazer/items/vita_65.png",
   "wit_manual": "assets/trackblazer/items/wit_manual.png",
@@ -224,8 +233,10 @@ TRACKBLAZER_ITEM_CATEGORIES = {
   "guts_scroll": "training_boost",
   "guts_training_application": "training_boost",
   "master_cleat_hammer": "training_boost",
+  "master_practice_guide": "training_boost",
   "miracle_cure": "condition",
   "motivating_megaphone": "mood",
+  "pocket_planner": "training_boost",
   "power_ankle_weights": "training_boost",
   "power_manual": "training_boost",
   "power_scroll": "training_boost",
@@ -237,6 +248,7 @@ TRACKBLAZER_ITEM_CATEGORIES = {
   "speed_notepad": "training_boost",
   "speed_scroll": "training_boost",
   "stamina_ankle_weights": "training_boost",
+  "stamina_manual": "training_boost",
   "vita_20": "energy",
   "vita_65": "energy",
   "wit_manual": "training_boost",
@@ -267,8 +279,10 @@ TRACKBLAZER_ITEM_USE_TEMPLATES = {
 
 # Trackblazer shop entry templates.
 TRACKBLAZER_SHOP_ENTRY_TEMPLATES = {
+  "shop_refresh_dialog": "assets/trackblazer/shop_refresh.png",
+  "shop_refresh_cancel": "assets/trackblazer/shop_refresh_cancel.png",
+  "shop_refresh_shop": "assets/trackblazer/shop_refresh_shop.png",
   "shop_enter_lobby": "assets/buttons/shop_enter_lobby.png",
-  "shop_refresh_shop_button": "assets/buttons/shop_refresh_shop_button.png",
 }
 
 UNITY_TEAM_MATCHUP_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (130, 565, -130, -475))
@@ -331,6 +345,8 @@ SKILL_SCROLL_TOP_MOUSE_POS=(560, SKILL_SCROLL_BOTTOM_MOUSE_POS[1] - 300)
 # TODO: Validate race list scroll positions across layouts; adjust padding if needed.
 RACE_SCROLL_BOTTOM_MOUSE_POS=(0, 0)
 RACE_SCROLL_TOP_MOUSE_POS=(0, 0)
+MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS=(0, 0)
+MANT_SHOP_SCROLL_TOP_MOUSE_POS=(0, 0)
 
 # Anchor the scan row from the same per-training swipe boxes that the OCR
 # adjuster exposes, but keep execution clicks separate so the scan pass does not
@@ -477,9 +493,35 @@ def update_race_scroll_positions():
   RACE_SCROLL_TOP_MOUSE_POS = (x, top_y)
   RACE_SCROLL_BOTTOM_MOUSE_POS = (x, bottom_y)
 
+def update_shop_scroll_positions():
+  """Derive Trackblazer shop swipe points from the adjustable swipe bbox.
+
+  Use a conservative in-box travel for ADB swipes so the shop list advances
+  one page at a time without inertial overshoot at release.
+  """
+  global MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS, MANT_SHOP_SCROLL_TOP_MOUSE_POS
+  x1, y1, x2, y2 = MANT_SHOP_SCROLLSWIPE_BBOX
+  width = max(1, x2 - x1)
+  height = max(1, y2 - y1)
+  x = x1 + width // 2
+  top_y = y1 + int(height * 0.4)
+  bottom_y = y1 + int(height * 0.7)
+  min_y = y1 + 1
+  max_y = y2 - 1
+  top_y = max(min_y, min(max_y, top_y))
+  bottom_y = max(min_y, min(max_y, bottom_y))
+  if bottom_y <= top_y:
+    top_y = max(min_y, min(max_y, y1 + 1))
+    bottom_y = max(min_y, min(max_y, y2 - 1))
+    if bottom_y <= top_y:
+      bottom_y = min(max_y, top_y + 1)
+  MANT_SHOP_SCROLL_TOP_MOUSE_POS = (x, top_y)
+  MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS = (x, bottom_y)
+
 def update_action_positions():
   update_training_button_positions()
   update_race_scroll_positions()
+  update_shop_scroll_positions()
 
 update_action_positions()
 
@@ -606,6 +648,10 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_GRADE_POINT_REGION",
   "MANT_SHOP_BUTTON_BBOX",
   "MANT_SHOP_BUTTON_REGION",
+  "MANT_SHOP_SCROLLSWIPE_BBOX",
+  "MANT_SHOP_SCROLLSWIPE_REGION",
+  "MANT_SHOP_SCROLLBAR_BBOX",
+  "MANT_SHOP_SCROLLBAR_REGION",
   "MANT_INVENTORY_ITEMS_BBOX",
   "MANT_INVENTORY_ITEMS_REGION",
   "EVENT_NAME_BBOX",

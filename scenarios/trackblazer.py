@@ -9,6 +9,7 @@ import core.bot as bot
 from core.state import (
     _save_training_scan_debug_image,
     _build_trackblazer_inventory_debug_entries,
+    get_trackblazer_shop_coins,
     clear_runtime_ocr_debug,
     record_runtime_ocr_debug,
     snapshot_runtime_ocr_debug,
@@ -20,6 +21,7 @@ from utils.screenshot import enhance_image_for_ocr
 from utils.shared import CleanDefaultDict
 from PIL import Image
 from time import time as _time
+from pathlib import Path
 import re
 
 # Trackblazer item/shop assets are captured at the game's native screen
@@ -62,6 +64,19 @@ _ITEM_VARIANT_FAMILIES = (
     ("cleat_hammer", (
         "artisan_cleat_hammer",
         "master_cleat_hammer",
+    )),
+    ("manual", (
+        "power_manual",
+        "stamina_manual",
+        "wit_manual",
+    )),
+    ("training_application", (
+        "guts_training_application",
+        "wit_training_application",
+    )),
+    ("vita", (
+        "vita_20",
+        "vita_65",
     )),
 )
 
@@ -837,13 +852,6 @@ def scan_training_items_inventory(threshold=0.8):
         for item_name in family_items:
             resolved_matches[item_name] = []
         for cluster in _cluster_matches_by_row(family_candidates):
-            # Skip expensive re-match when only one family member is in the cluster.
-            unique_names = set(entry["item_name"] for entry in cluster)
-            if len(unique_names) == 1:
-                entry = max(cluster, key=lambda e: e.get("score", 0) if "score" in e else 0)
-                resolved_matches[entry["item_name"]].append(entry["match"])
-                families_skipped += 1
-                continue
             winner = _resolve_family_cluster(cluster, family_items, screenshot, threshold)
             if winner is None:
                 debug(
@@ -984,6 +992,267 @@ def build_inventory_summary(inventory):
         if data.get("held_quantity") is not None:
             summary["held_quantities"][item_name] = data.get("held_quantity")
     return summary
+
+
+def scan_trackblazer_shop_inventory(threshold=0.8, checkbox_threshold=0.8, confirm_threshold=0.8):
+    """Scan the currently visible Trackblazer shop item rows without clicking.
+
+    This is the first page-only framework. Scrolling will layer on top later.
+    It detects visible item icons, resolves same-family variants row-by-row,
+    pairs each row to the unchecked purchase checkbox on the right, and reads
+    the current confirm button state. Costs are intentionally deferred.
+    """
+    t_total = _time()
+    region_ltrb = _trackblazer_ui_region()
+    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    icon_screenshot, icon_offset_x = _item_icon_search_crop(screenshot)
+    icon_search_image_path = _save_training_scan_debug_image(
+        icon_screenshot,
+        "trackblazer_shop",
+        "item_icon_search_region",
+    )
+
+    raw_matches = {}
+    t0 = _time()
+    for item_name, template_path in constants.TRACKBLAZER_ITEM_TEMPLATES.items():
+        item_threshold = _item_threshold(item_name, threshold)
+        matches = device_action.match_template(
+            template_path,
+            icon_screenshot,
+            item_threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+        raw_matches[item_name] = [
+            (int(x + icon_offset_x), int(y), int(w), int(h))
+            for (x, y, w, h) in matches
+        ]
+    t_templates = _time() - t0
+
+    t0 = _time()
+    resolved_matches = {item_name: list(matches) for item_name, matches in raw_matches.items()}
+    families_resolved = 0
+    families_skipped = 0
+    for _, family_items in _ITEM_VARIANT_FAMILIES:
+        family_candidates = []
+        for item_name in family_items:
+            for match in raw_matches.get(item_name, []):
+                family_candidates.append(
+                    {
+                        "item_name": item_name,
+                        "match": match,
+                        "row_center_y": int(_match_center_y(match)),
+                    }
+                )
+        if not family_candidates:
+            continue
+        for item_name in family_items:
+            resolved_matches[item_name] = []
+        for cluster in _cluster_matches_by_row(family_candidates):
+            winner = _resolve_family_cluster(cluster, family_items, screenshot, threshold)
+            if winner is None:
+                continue
+            resolved_matches[winner["item_name"]].append(winner["match"])
+            families_resolved += 1
+    t_families = _time() - t0
+
+    t0 = _time()
+    checkbox_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("select_unchecked")
+    checkbox_matches = []
+    if checkbox_template:
+        checkbox_matches = device_action.match_template(
+            checkbox_template,
+            screenshot,
+            checkbox_threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+    checkbox_matches = [
+        (int(x), int(y), int(w), int(h))
+        for (x, y, w, h) in checkbox_matches
+        if int(x) >= 560 and int(y) >= 450 and int(y) <= 1100
+    ]
+    t_checkboxes = _time() - t0
+
+    t0 = _time()
+    confirm_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_confirm")
+    confirm_entry = None
+    if confirm_template:
+        confirm_entry = _best_match_entry(
+            confirm_template,
+            region_ltrb=region_ltrb,
+            threshold=confirm_threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+            screenshot=screenshot,
+        )
+        confirm_entry["key"] = "shop_confirm"
+    t_confirm = _time() - t0
+
+    rows = []
+    for item_name, matches in resolved_matches.items():
+        if not matches:
+            continue
+        match = min(matches, key=lambda current: current[1])
+        row_center_y = int(_match_center_y(match))
+        paired_checkbox = _pair_item_to_increment(match, checkbox_matches, y_tolerance=36)
+        checkbox_target = _to_absolute_click_target(constants.GAME_WINDOW_REGION, paired_checkbox) if paired_checkbox else None
+        rows.append(
+            {
+                "item_name": item_name,
+                "category": constants.TRACKBLAZER_ITEM_CATEGORIES.get(item_name, "unknown"),
+                "threshold": _item_threshold(item_name, threshold),
+                "match": [int(v) for v in match],
+                "row_center_y": row_center_y,
+                "search_image_path": icon_search_image_path,
+                "checkbox_match": [int(v) for v in paired_checkbox] if paired_checkbox else None,
+                "checkbox_target": (
+                    int(checkbox_target[0]),
+                    int(checkbox_target[1]),
+                ) if checkbox_target else None,
+                "detected": True,
+            }
+        )
+
+    rows = sorted(rows, key=lambda entry: entry["row_center_y"])
+    visible_items = [entry["item_name"] for entry in rows]
+
+    timing = {
+        "total": round(_time() - t_total, 4),
+        "templates": round(t_templates, 4),
+        "families": round(t_families, 4),
+        "families_resolved": families_resolved,
+        "families_skipped": families_skipped,
+        "checkboxes": round(t_checkboxes, 4),
+        "confirm": round(t_confirm, 4),
+        "rows_detected": len(rows),
+        "checkbox_count": len(checkbox_matches),
+    }
+    info(
+        f"[TB_SHOP] visible rows={len(rows)} items={visible_items} "
+        f"checkboxes={len(checkbox_matches)} confirm={bool(confirm_entry and confirm_entry.get('passed_threshold'))}"
+    )
+    return {
+        "visible_items": visible_items,
+        "rows": rows,
+        "checkbox_matches": [[int(v) for v in match] for match in checkbox_matches],
+        "confirm": confirm_entry,
+        "scroll_ready": False,
+        "todo": "add scrolling to scan more than the current visible page",
+        "timing": timing,
+    }
+
+
+def scroll_trackblazer_shop(direction="down", duration=0.55, settle_seconds=1.0):
+    """Scroll the Trackblazer shop list using the configured swipe region.
+
+    direction="down" reveals lower items by swiping bottom->top.
+    direction="up" reveals higher items by swiping top->bottom.
+    """
+    normalized = str(direction or "down").strip().lower()
+    if normalized not in ("down", "up"):
+        raise ValueError(f"Unsupported shop scroll direction: {direction}")
+
+    if normalized == "down":
+        start = constants.MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS
+        end = constants.MANT_SHOP_SCROLL_TOP_MOUSE_POS
+    else:
+        start = constants.MANT_SHOP_SCROLL_TOP_MOUSE_POS
+        end = constants.MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS
+
+    swiped = device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Trackblazer shop scroll {normalized}",
+    )
+    if swiped:
+        sleep(settle_seconds)
+    return {
+        "direction": normalized,
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": float(settle_seconds),
+        "swiped": bool(swiped),
+    }
+
+
+def scan_all_trackblazer_shop_items(
+    threshold=0.8,
+    checkbox_threshold=0.8,
+    confirm_threshold=0.8,
+    max_reset_swipes=4,
+    max_forward_swipes=12,
+):
+    """Scan the full Trackblazer shop by paging through visible rows.
+
+    This first pass uses repeated visible-item scans and stops once further
+    down-swipes stop producing new rows. The scrollbar region is available for
+    future refinement, but item-diffing is the primary stop rule for now.
+    """
+    t_total = _time()
+    flow = {
+        "reset_swipes": [],
+        "forward_swipes": [],
+        "pages": [],
+        "stop_reason": "",
+    }
+
+    # Best-effort reset toward the top so the scan starts from a consistent state.
+    for _ in range(max_reset_swipes):
+        flow["reset_swipes"].append(scroll_trackblazer_shop(direction="up"))
+
+    seen_items = set()
+    ordered_items = []
+    seen_signatures = set()
+    stale_pages = 0
+    last_page = None
+
+    for page_index in range(max_forward_swipes + 1):
+        page = scan_trackblazer_shop_inventory(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+        )
+        visible_items = list(page.get("visible_items") or [])
+        signature = tuple(visible_items)
+        new_items = [item_name for item_name in visible_items if item_name not in seen_items]
+        for item_name in new_items:
+            seen_items.add(item_name)
+            ordered_items.append(item_name)
+
+        flow["pages"].append(
+            {
+                "page_index": page_index,
+                "visible_items": visible_items,
+                "new_items": new_items,
+                "rows": page.get("rows"),
+                "confirm": page.get("confirm"),
+                "timing": page.get("timing"),
+            }
+        )
+
+        if signature in seen_signatures or (not new_items and last_page == signature):
+            stale_pages += 1
+        else:
+            stale_pages = 0
+        seen_signatures.add(signature)
+        last_page = signature
+
+        if stale_pages >= 1:
+            flow["stop_reason"] = "no_new_visible_items_after_scroll"
+            break
+
+        if page_index >= max_forward_swipes:
+            flow["stop_reason"] = "max_forward_swipes_reached"
+            break
+
+        flow["forward_swipes"].append(scroll_trackblazer_shop(direction="down"))
+
+    flow["timing_total"] = round(_time() - t_total, 4)
+    return {
+        "all_items": ordered_items,
+        "pages": flow["pages"],
+        "flow": flow,
+    }
 
 
 def prepare_training_items_for_use(
@@ -1266,41 +1535,311 @@ def detect_use_training_items_button(threshold=0.8):
 
 
 def detect_shop_entry_button(threshold=0.8):
-    """Check if a shop entry button is visible on the lobby screen.
+    """Return the best available Trackblazer shop entry method and target.
 
-    Checks both the lobby shop button and the shop-refresh popup button.
-    Returns (button_key, match_location) or (None, None).
+    The returned key is a method name such as ``refresh_dialog`` or
+    ``lobby_button`` so future callers can branch on the entry path cleanly.
     """
-    for key, template in constants.TRACKBLAZER_SHOP_ENTRY_TEMPLATES.items():
-        match = device_action.locate(template, min_search_time=get_secs(0.5))
-        if match:
-            return key, match
-    return None, None
+    state = inspect_shop_entry_state(threshold=threshold)
+    best_method = state.get("best_method") or {}
+    if not best_method.get("matched"):
+        return None, None
+    return best_method.get("method"), best_method.get("entry")
+
+
+def enter_shop(threshold=0.8):
+    """Enter the Trackblazer shop using the best currently supported method.
+
+    Only the refresh-dialog method is wired today. The direct lobby button
+    path is left as a follow-up once its asset/flow is finalized.
+    """
+    t_total = _time()
+    timing = {}
+
+    t0 = _time()
+    shop_state = inspect_shop_entry_state(threshold=threshold)
+    timing["detect_entry"] = round(_time() - t0, 4)
+
+    best_method = shop_state.get("best_method") or {}
+    method_name = best_method.get("method")
+    entry = best_method.get("entry") or {}
+
+    if not best_method.get("matched") or not entry.get("click_target"):
+        timing["total"] = round(_time() - t_total, 4)
+        return {
+            "entered": False,
+            "clicked": False,
+            "method": method_name,
+            "reason": "no_supported_shop_entry_detected",
+            "shop_check": shop_state,
+            "click_metrics": None,
+            "timing": timing,
+        }
+
+    if method_name == "lobby_button":
+        timing["total"] = round(_time() - t_total, 4)
+        warning("[TB_SHOP] Lobby shop entry detected but not wired yet. TODO: hook up direct lobby shop entry.")
+        return {
+            "entered": False,
+            "clicked": False,
+            "method": method_name,
+            "reason": "lobby_shop_entry_not_wired_yet",
+            "shop_check": shop_state,
+            "click_metrics": None,
+            "timing": timing,
+        }
+
+    t0 = _time()
+    click_metrics = device_action.click_with_metrics(entry["click_target"])
+    timing["click_total"] = round(_time() - t0, 4)
+    timing["click_breakdown"] = click_metrics
+
+    t0 = _time()
+    sleep(0.25)
+    timing["sleep"] = round(_time() - t0, 4)
+
+    entered = bool(click_metrics.get("clicked"))
+    t0 = _time()
+    shop_coins = get_trackblazer_shop_coins() if entered else -1
+    timing["read_shop_coins"] = round(_time() - t0, 4)
+    timing["total"] = round(_time() - t_total, 4)
+
+    info(f"[TB_SHOP] enter shop timing: {timing}")
+    return {
+        "entered": entered,
+        "clicked": bool(click_metrics.get("clicked")),
+        "method": method_name,
+        "reason": "clicked_refresh_dialog_shop" if entered else "click_failed",
+        "shop_coins": shop_coins,
+        "shop_check": shop_state,
+        "click_metrics": click_metrics,
+        "timing": timing,
+    }
 
 
 def inspect_shop_entry_state(threshold=0.8):
-    """Collect a debug-friendly summary of Trackblazer shop entry detection."""
-    checks = {}
-    for key, template_path in constants.TRACKBLAZER_SHOP_ENTRY_TEMPLATES.items():
-        entry = _best_match_entry(
-            template_path,
+    """Collect a debug-friendly summary of Trackblazer shop entry detection.
+
+    This is intentionally method-oriented so the shop flow can support multiple
+    entry paths: the refresh dialog now, and a direct lobby button later.
+    """
+    def _entry_template(key):
+        template_path = constants.TRACKBLAZER_SHOP_ENTRY_TEMPLATES.get(key)
+        if not template_path:
+            return None
+        template_file = Path(template_path)
+        if not template_file.is_absolute():
+            template_file = Path.cwd() / template_file
+        if not template_file.exists():
+            return None
+        return template_path
+
+    def _shop_method_summary(method_name, region_ltrb, parts, required_keys, template_scaling):
+        screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+        checks = {}
+        for key, template_path in parts.items():
+            entry = _best_match_entry(
+                template_path,
+                region_ltrb=region_ltrb,
+                threshold=threshold,
+                template_scaling=template_scaling,
+                screenshot=screenshot,
+            )
+            entry["key"] = key
+            checks[key] = entry
+
+        missing_required = [
+            key for key in required_keys
+            if not (checks.get(key) or {}).get("passed_threshold")
+        ]
+        scored_checks = [entry for entry in checks.values() if entry.get("score") is not None]
+        best_entry = max(scored_checks, key=lambda entry: entry.get("score") or 0.0) if scored_checks else None
+        matched = not missing_required
+        method_summary = {
+            "method": method_name,
+            "matched": matched,
+            "ready": matched,
+            "entry": checks.get("shop_refresh_shop") or checks.get("shop_enter_lobby"),
+            "dismiss": checks.get("shop_refresh_cancel"),
+            "best_match": best_entry,
+            "region_ltrb": [int(v) for v in region_ltrb],
+            "required_keys": list(required_keys),
+            "missing_required": missing_required,
+            "checks": checks,
+        }
+        return method_summary
+
+    def _refresh_dialog_summary():
+        def _dialog_button_entry(key, template_path, game_region, game_screenshot, dialog_region):
+            fallback = _best_match_entry(
+                template_path,
+                region_ltrb=game_region,
+                threshold=threshold,
+                template_scaling=_INVERSE_GLOBAL_SCALE,
+                screenshot=game_screenshot,
+            )
+            fallback["key"] = key
+
+            matches = device_action.match_template(
+                template_path,
+                game_screenshot,
+                threshold=threshold,
+                template_scaling=_INVERSE_GLOBAL_SCALE,
+            )
+            if not matches:
+                return fallback
+
+            dialog_left, dialog_top, dialog_right, dialog_bottom = dialog_region
+            dialog_mid_y = dialog_top + (dialog_bottom - dialog_top) * 0.55
+            candidates = []
+            for match in matches:
+                match_x, match_y, match_w, match_h = [int(v) for v in match]
+                center_x = int(game_region[0] + match_x + match_w // 2)
+                center_y = int(game_region[1] + match_y + match_h // 2)
+                if dialog_left <= center_x <= dialog_right and dialog_mid_y <= center_y <= dialog_bottom:
+                    candidates.append((match_x, match_y, match_w, match_h, center_x, center_y))
+
+            if not candidates:
+                return fallback
+
+            match_x, match_y, match_w, match_h, center_x, center_y = max(
+                candidates,
+                key=lambda match: (match[5], match[4]),
+            )
+            return {
+                "template": template_path,
+                "threshold": threshold,
+                "matched": True,
+                "passed_threshold": True,
+                "score": None,
+                "location": [int(match_x), int(match_y)],
+                "size": [int(match_w), int(match_h)],
+                "click_target": (int(center_x), int(center_y)),
+                "selection_reason": "dialog_lower_row_candidate",
+                "candidate_count": len(candidates),
+                "key": key,
+            }
+
+        dialog_template = _entry_template("shop_refresh_dialog")
+        if not dialog_template:
+            return {
+                "method": "refresh_dialog",
+                "matched": False,
+                "ready": False,
+                "entry": None,
+                "dismiss": None,
+                "best_match": None,
+                "region_ltrb": [int(v) for v in _trackblazer_ui_region()],
+                "required_keys": ["shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel"],
+                "missing_required": ["shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel"],
+                "checks": {},
+                "reason": "templates_missing",
+            }
+
+        game_region = _trackblazer_ui_region()
+        game_screenshot = device_action.screenshot(region_ltrb=game_region)
+        dialog_entry = _best_match_entry(
+            dialog_template,
+            region_ltrb=game_region,
             threshold=threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+            screenshot=game_screenshot,
+        )
+        dialog_entry["key"] = "shop_refresh_dialog"
+        checks = {"shop_refresh_dialog": dialog_entry}
+
+        dialog_region = game_region
+        if dialog_entry.get("passed_threshold") and dialog_entry.get("location") and dialog_entry.get("size"):
+            dialog_x, dialog_y = dialog_entry["location"]
+            dialog_w, dialog_h = dialog_entry["size"]
+            dialog_region = (
+                int(game_region[0] + dialog_x),
+                int(game_region[1] + dialog_y),
+                int(game_region[0] + dialog_x + dialog_w),
+                int(game_region[1] + dialog_y + dialog_h),
+            )
+
+        for key in ("shop_refresh_cancel", "shop_refresh_shop"):
+            template_path = _entry_template(key)
+            if not template_path:
+                continue
+            entry = _dialog_button_entry(
+                key,
+                template_path,
+                game_region,
+                game_screenshot,
+                dialog_region,
+            )
+            checks[key] = entry
+
+        required_keys = ("shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel")
+        missing_required = [
+            key for key in required_keys
+            if not (checks.get(key) or {}).get("passed_threshold")
+        ]
+        scored_checks = [entry for entry in checks.values() if entry.get("score") is not None]
+        best_entry = max(scored_checks, key=lambda entry: entry.get("score") or 0.0) if scored_checks else None
+        matched = not missing_required
+        return {
+            "method": "refresh_dialog",
+            "matched": matched,
+            "ready": matched,
+            "entry": checks.get("shop_refresh_shop"),
+            "dismiss": checks.get("shop_refresh_cancel"),
+            "dialog": checks.get("shop_refresh_dialog"),
+            "best_match": best_entry,
+            "region_ltrb": [int(v) for v in dialog_region],
+            "required_keys": list(required_keys),
+            "missing_required": missing_required,
+            "checks": checks,
+        }
+
+    methods = {}
+
+    methods["refresh_dialog"] = _refresh_dialog_summary()
+
+    lobby_template = _entry_template("shop_enter_lobby")
+    if lobby_template:
+        methods["lobby_button"] = _shop_method_summary(
+            "lobby_button",
+            constants.MANT_SHOP_BUTTON_BBOX,
+            {"shop_enter_lobby": lobby_template},
+            required_keys=("shop_enter_lobby",),
             template_scaling=1.0,
         )
-        entry["key"] = key
-        checks[key] = entry
+    else:
+        methods["lobby_button"] = {
+            "method": "lobby_button",
+            "matched": False,
+            "ready": False,
+            "entry": None,
+            "dismiss": None,
+            "best_match": None,
+            "region_ltrb": [int(v) for v in constants.MANT_SHOP_BUTTON_BBOX],
+            "required_keys": ["shop_enter_lobby"],
+            "missing_required": ["shop_enter_lobby"],
+            "checks": {},
+            "reason": "templates_missing",
+        }
 
-    passed = [entry for entry in checks.values() if entry.get("passed_threshold")]
-    best_entry = None
-    if passed:
-        best_entry = max(passed, key=lambda entry: entry.get("score") or 0.0)
-    elif checks:
-        best_entry = max(checks.values(), key=lambda entry: entry.get("score") or 0.0)
+    ready_methods = [entry for entry in methods.values() if entry.get("ready")]
+    scored_methods = [entry for entry in methods.values() if (entry.get("best_match") or {}).get("score") is not None]
+    best_method = None
+    if ready_methods:
+        best_method = max(
+            ready_methods,
+            key=lambda entry: (entry.get("best_match") or {}).get("score") or 0.0,
+        )
+    elif scored_methods:
+        best_method = max(
+            scored_methods,
+            key=lambda entry: (entry.get("best_match") or {}).get("score") or 0.0,
+        )
 
     return {
         "threshold": threshold,
-        "matched": bool(best_entry and best_entry.get("passed_threshold")),
-        "button_key": best_entry.get("key") if best_entry else None,
-        "best_match": best_entry,
-        "checks": checks,
+        "matched": bool(best_method and best_method.get("matched")),
+        "entry_method": best_method.get("method") if best_method else None,
+        "best_method": best_method,
+        "methods": methods,
     }

@@ -314,16 +314,18 @@ def trigger_manual_shop_check():
       focus_target_window()
       bot.set_manual_control_active(True)
 
-      from scenarios.trackblazer import inspect_shop_entry_state
+      from scenarios.trackblazer import enter_shop
 
-      shop_check = inspect_shop_entry_state()
-      snapshot["state_summary"]["trackblazer_shop_check"] = shop_check
+      shop_result = enter_shop()
+      snapshot["state_summary"]["trackblazer_shop_check"] = shop_result.get("shop_check")
+      snapshot["state_summary"]["trackblazer_shop_enter"] = shop_result
       bot.set_snapshot(snapshot)
-      bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop check complete.")
+      bot.set_phase("checking_shop", status="complete", message="Manual Trackblazer shop entry complete.")
     except Exception as exc:
       snapshot["state_summary"]["trackblazer_shop_check"] = {"error": str(exc)}
+      snapshot["state_summary"]["trackblazer_shop_enter"] = {"error": str(exc)}
       bot.set_snapshot(snapshot)
-      bot.set_phase("checking_shop", status="error", message="Manual shop check failed.", error=str(exc))
+      bot.set_phase("checking_shop", status="error", message="Manual shop entry failed.", error=str(exc))
     finally:
       bot.set_manual_control_active(False)
     publish_runtime_state()

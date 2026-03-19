@@ -516,16 +516,16 @@
     7
   ],
   "MANT_SHOP_COIN_BBOX": [
-    432,
-    1390,
-    530,
-    1415
+    582,
+    558,
+    684,
+    600
   ],
   "MANT_SHOP_COIN_REGION": [
-    432,
-    1390,
-    98,
-    25
+    582,
+    558,
+    102,
+    42
   ],
   "MANT_GRADE_POINT_BBOX": [
     21,
@@ -550,6 +550,30 @@
     1277,
     175,
     132
+  ],
+  "MANT_SHOP_SCROLLSWIPE_BBOX": [
+    166,
+    562,
+    234,
+    1035
+  ],
+  "MANT_SHOP_SCROLLSWIPE_REGION": [
+    166,
+    562,
+    68,
+    473
+  ],
+  "MANT_SHOP_SCROLLBAR_BBOX": [
+    729,
+    630,
+    767,
+    1151
+  ],
+  "MANT_SHOP_SCROLLBAR_REGION": [
+    729,
+    630,
+    38,
+    521
   ],
   "MANT_INVENTORY_ITEMS_BBOX": [
     28,
@@ -622,5 +646,17 @@
     169,
     62,
     18
+  ],
+  "MANT_SHOP_REFRESH_DIALOG_BBOX": [
+    660,
+    366,
+    924,
+    594
+  ],
+  "MANT_SHOP_REFRESH_DIALOG_REGION": [
+    660,
+    366,
+    264,
+    228
   ]
 }

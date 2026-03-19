@@ -4,6 +4,7 @@ import re
 import cv2
 import time
 from pathlib import Path
+from PIL import Image
 
 from utils.log import info, warning, error, debug, debug_window, args
 
@@ -798,6 +799,64 @@ def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None):
     if value != -1:
       return value
   return -1
+
+
+def get_trackblazer_shop_coins():
+  """Read the current Trackblazer shop currency from the shop screen.
+
+  Canonical source for now is the in-shop coin display at
+  ``MANT_SHOP_COIN_REGION``. TODO: add the lobby coin display as a secondary
+  source once that region/flow is wired.
+  """
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return -1
+
+  region_xywh = constants.MANT_SHOP_COIN_REGION
+  screenshot = device_action.screenshot(region_xywh=region_xywh)
+  record_runtime_ocr_debug(
+    "trackblazer_shop_coins",
+    image=screenshot,
+    extra={
+      "region_key": "MANT_SHOP_COIN_REGION",
+      "region_xywh": list(region_xywh),
+    },
+  )
+
+  pil = Image.fromarray(screenshot)
+  thresholds = [None, 220, 200, 180]
+  best_text = ""
+  best_digits = ""
+  for binarize_threshold in thresholds:
+    enhanced = enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold)
+    text = extract_text(enhanced, allowlist="0123456789,", threshold=0.6)
+    digits = re.sub(r"[^\d]", "", text or "")
+    if len(digits) > len(best_digits):
+      best_text = text or ""
+      best_digits = digits
+    if digits:
+      break
+
+  coins = int(best_digits) if best_digits else -1
+  record_runtime_ocr_debug(
+    "trackblazer_shop_coins",
+    extra={
+      "raw_text": best_text,
+      "parsed_value": coins,
+    },
+  )
+  return coins
+
+
+def collect_trackblazer_shop_state(state_object, trigger="automatic"):
+  """Read non-destructive Trackblazer shop state from the current shop screen."""
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer") and trigger != "manual_console":
+    debug("[STATE] Skipping Trackblazer shop state scan — wrong scenario.")
+    return state_object
+
+  shop_coins = get_trackblazer_shop_coins()
+  state_object["shop_coins"] = shop_coins
+  state_object["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+  return state_object
 
 
 def get_failure_chance(region_xywh=None):

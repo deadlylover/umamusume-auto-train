@@ -1153,15 +1153,29 @@ def career_lobby(dry_run_turn=False):
         continue
       if matches.get("shop_refresh", False):
         info("Shop refresh popup detected — shop has been refreshed.")
-        # TODO: persist shop_refreshed state for future shop-visit logic
-        cancel_match = device_action.match_template("assets/buttons/cancel_btn.png", region_ltrb=constants.GAME_WINDOW_BBOX, threshold=0.9)
-        if cancel_match:
-          x, y, w, h = cancel_match[0]
-          device_action.click(target=(x + w // 2, y + h // 2), text="Dismissed shop refresh popup.")
-          info("Dismissed shop refresh popup.")
-          non_match_count = 0
+        # Trackblazer policy: a refresh popup means there are fresh items to
+        # inspect, so default to entering the shop. The startup/menu-recovery
+        # path is the separate case where dismissing dialogs to reach a clean
+        # lobby state is still appropriate.
+        # TODO: wire in direct lobby shop entry as an alternate method.
+        if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+          from scenarios.trackblazer import enter_shop
+          shop_result = enter_shop()
+          if shop_result.get("entered"):
+            info(f"Entered Trackblazer shop via {shop_result.get('method')}.")
+            non_match_count = 0
+          else:
+            warning(f"Trackblazer shop entry failed: {shop_result.get('reason')}")
+            non_match_count += 1
         else:
-          non_match_count += 1
+          cancel_match = device_action.match_template("assets/buttons/cancel_btn.png", region_ltrb=constants.GAME_WINDOW_BBOX, threshold=0.9)
+          if cancel_match:
+            x, y, w, h = cancel_match[0]
+            device_action.click(target=(x + w // 2, y + h // 2), text="Dismissed shop refresh popup.")
+            info("Dismissed shop refresh popup.")
+            non_match_count = 0
+          else:
+            non_match_count += 1
         continue
       if matches.get("cancel", False):
         clock_icon = device_action.match_template("assets/icons/clock_icon.png", screenshot=screenshot, threshold=0.9)
