@@ -375,7 +375,11 @@ def trigger_manual_skill_purchase_check():
 
       from core.skill_scanner import collect_skill_purchase
 
-      purchase_result = collect_skill_purchase(trigger="manual_console", dry_run=True)
+      purchase_result = collect_skill_purchase(
+        trigger="manual_console",
+        dry_run=True,
+        debug_session_name="manual_skill_purchase_check",
+      )
       snapshot["state_summary"]["skill_purchase_flow"] = purchase_result.get("skill_purchase_flow")
       bot.set_snapshot(snapshot)
       bot.set_phase("checking_skill_purchase", status="complete", message="Manual skill purchase check complete.")

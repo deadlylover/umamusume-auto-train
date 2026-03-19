@@ -33,6 +33,58 @@ Initial example target:
 - detect the confirm/learn step as the next action
 - stop there for dry-run validation
 
+Current live validation note:
+
+- use `Escape Artist` as the manual test case for now
+- reason: several other shortlist skills may already be bought on the current test save, which makes increment-button validation less reliable
+- when running live manual tests for seek-back, reacquire, and increment pairing, prefer `Escape Artist` first
+
+Current benchmark note:
+
+- there is an active multi-skill benchmark using `Escape Artist` and `Groundwork`
+- benchmark goal: do one full scrollbar scan, then seek back and increment both skills in order, while stopping short of confirm / learn
+- intended behavior:
+  - scan the full list once
+  - build an indexed list of target sightings with saved scrollbar ratios
+  - seek back for `Escape Artist`, reacquire, increment once
+  - seek back for `Groundwork`, reacquire, increment once
+  - detect confirm availability after increments, but never click confirm / learn
+- current benchmark helper:
+  - `core.skill_scanner.scan_and_increment_skills(["Escape Artist", "Groundwork"], dry_run=...)`
+- current first-pass tuning during the benchmark:
+  - multi-skill scan drag duration: `6.0s`
+  - frame interval target: `0.22s`
+- runtime debug output for the benchmark should be written under `logs/runtime_debug/`
+- manual operator-console skill checks should also emit buffered skill-scan frames to `logs/runtime_debug/manual_skill_purchase_check/`
+
+Example benchmark command:
+
+```bash
+PYTHONPATH=. .venv/bin/python - <<'PY'
+import json
+import core.bot as bot
+import core.config as config
+from core.platform.window_focus import focus_target_window
+from core.skill_scanner import scan_and_increment_skills
+from main import resolve_control_backend
+
+config.reload_config(print_config=False)
+resolve_control_backend()
+focus_target_window()
+bot.set_manual_control_active(True)
+try:
+    result = scan_and_increment_skills(
+        ["Escape Artist", "Groundwork"],
+        dry_run=True,
+        save_debug_frames=True,
+        debug_session_name="benchmark_escape_artist_groundwork",
+    )
+    print(json.dumps(result, indent=2, default=str))
+finally:
+    bot.set_manual_control_active(False)
+PY
+```
+
 ## Transfer From Shop Scan
 
 The Trackblazer shop work in [scenarios/trackblazer.py](/Users/loli/umaautomac/umamusume-auto-train/scenarios/trackblazer.py) established the core pattern that should be reused:
@@ -160,6 +212,35 @@ The important implementation rule is:
 - capture must not wait for OCR
 
 That is the whole reason to build the buffer/pipeline.
+
+## Post-Drag Waterfall Execution
+
+After the continuous drag finishes, do not block on every low-value bookkeeping task before acting.
+
+Preferred execution model:
+
+1. Keep capture and OCR overlapped during the drag.
+2. Do not interrupt the drag to seek back mid-scan.
+3. As soon as the drag itself is complete, allow actioning to begin once enough analyzed frames exist to trust the first target.
+4. Start with the earliest trusted target in scrollbar order, usually the smallest `scrollbar_ratio`.
+5. Seek back, reacquire, and increment that target.
+6. While that seek-back / increment work is happening, remaining background frame analysis may continue for later targets.
+7. Use later-completing analysis results to resolve downstream targets in order.
+
+Important constraints:
+
+- do not seek back before the first drag is finished
+- do not require every non-critical frame summary to be finalized before starting the first seek-back
+- preserve one uninterrupted indexed first pass
+- process multi-skill targets top-to-bottom after the drag, not in arbitrary match-score order
+
+This is a "waterfall after drag" model, not a "seek while still scrolling" model.
+
+Why:
+
+- interrupting the drag corrupts the indexed first pass
+- clicking increment changes page state and invalidates the assumption that later buffered frames reflect the same UI state
+- starting seek-back immediately after the drag ends can reduce idle latency without giving up scan integrity
 
 ## OCR Strategy
 

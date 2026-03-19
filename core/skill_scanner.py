@@ -18,7 +18,12 @@ from queue import Queue
 import numpy as np
 import threading
 import re
+import cv2
+import json
 import Levenshtein
+from pathlib import Path
+
+_SKILL_RUNTIME_DEBUG_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -35,14 +40,17 @@ _SCROLLBAR_DRAG_END_PADDING = 10
 _SCROLLBAR_RESET_DURATION_SECONDS = 0.5
 _SCROLLBAR_SEEK_DURATION_SECONDS = 0.4
 
-# Buffered capture pipeline tuning (kept for future continuous-drag mode).
-_SCROLLBAR_DRAG_DURATION_SECONDS = 3.2
-_SCROLLBAR_FRAME_INTERVAL_SECONDS = 0.2
+# Buffered capture pipeline tuning — continuous drag is the primary scan path.
+_SCROLLBAR_DRAG_DURATION_SECONDS = 6.0   # Slow drag for dense captures
+_SCROLLBAR_FRAME_INTERVAL_SECONDS = 0.18  # ~5-6 fps effective capture
 _SCROLLBAR_ANALYSIS_WORKERS = 3
 
-# Step-scan tuning — seek to discrete positions, settle, then analyze.
-_SCROLLBAR_SCAN_STEPS = 8           # Number of positions from top to bottom
-_SCROLLBAR_STEP_SETTLE_SECONDS = 0.3  # Wait after each seek for content to settle
+# Seek-back tuning — used when returning to a target frame's scrollbar ratio.
+_SCROLLBAR_SEEKBACK_SETTLE_SECONDS = 0.35  # Settle after seek-back drag
+_SCROLLBAR_REACQUIRE_SETTLE_SECONDS = 0.2  # Settle after reacquire nudge
+_SCROLLBAR_SEEKBACK_BUFFER_RATIO = 0.05
+_SCROLLBAR_BOTTOM_COMPLETION_PASSES = 2
+_SCROLLBAR_BOTTOM_COMPLETION_DRAG_DURATION_SECONDS = 0.8
 
 # OCR matching tuning.
 _EXACT_MATCH_THRESHOLD = 0.92     # Levenshtein ratio for "exact" match
@@ -81,6 +89,47 @@ def _capture_live_skill_screenshot():
     """Force a fresh screenshot of the game window."""
     device_action.flush_screenshot_cache()
     return device_action.screenshot(region_ltrb=_skill_ui_region())
+
+
+def _ensure_skill_runtime_debug_dir(session_name):
+    runtime_debug_dir = Path("logs/runtime_debug")
+    runtime_debug_dir.mkdir(parents=True, exist_ok=True)
+    safe_session = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(session_name or "skill_scan"))
+    session_dir = runtime_debug_dir / safe_session
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "frames").mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def _append_skill_runtime_debug_manifest(session_dir, entry):
+    manifest_path = Path(session_dir) / "manifest.json"
+    with _SKILL_RUNTIME_DEBUG_LOCK:
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {}
+        else:
+            manifest = {}
+        frames = list(manifest.get("frames") or [])
+        frames.append(entry)
+        frames.sort(key=lambda item: int(item.get("index", 0)))
+        manifest["frames"] = frames
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+
+
+def _save_skill_runtime_debug_frame(session_dir, stem, screenshot, frame_summary=None):
+    if screenshot is None or getattr(screenshot, "size", 0) == 0 or not session_dir:
+        return ""
+    safe_stem = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(stem))
+    image_path = Path(session_dir) / "frames" / f"{safe_stem}.png"
+    screenshot_bgr = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(image_path), screenshot_bgr)
+    if frame_summary is not None:
+        manifest_entry = dict(frame_summary)
+        manifest_entry["image_path"] = str(image_path)
+        _append_skill_runtime_debug_manifest(session_dir, manifest_entry)
+    return str(image_path)
 
 
 def _crop_absolute_bbox(screenshot, target_bbox, base_region_ltrb=None):
@@ -242,6 +291,64 @@ def _drag_skill_scrollbar(scrollbar_state, edge="top", duration=_SCROLLBAR_RESET
         "duration": float(duration),
         "swiped": swiped,
     }
+
+
+def _drag_skill_scrollbar_to_ratio(scrollbar_state, position_ratio, duration=_SCROLLBAR_SEEK_DURATION_SECONDS):
+    """Drag the skill scrollbar thumb to an approximate position ratio.
+
+    Used for seek-back when returning to a target found during the full scan.
+    """
+    thumb_center = (scrollbar_state or {}).get("thumb_center")
+    bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.SKILL_SCROLLBAR_BBOX]
+    track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
+    thumb_height = int((scrollbar_state or {}).get("thumb_height") or 0)
+    travel_pixels = int((scrollbar_state or {}).get("travel_pixels") or 0)
+    if not thumb_center or track_center_x <= 0 or thumb_height <= 0:
+        return {
+            "direction": "scrollbar_ratio",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+            "target_ratio": None,
+        }
+    clamped_ratio = min(1.0, max(0.0, float(position_ratio or 0.0)))
+    thumb_top_target = int(round(clamped_ratio * max(0, travel_pixels)))
+    end_y = int(bbox[1] + thumb_top_target + max(1, thumb_height // 2))
+    start = (int(thumb_center[0]), int(thumb_center[1]))
+    end = (track_center_x, end_y)
+    swiped = bool(device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Skill scrollbar seek ratio={clamped_ratio:.3f}",
+    ))
+    return {
+        "direction": "scrollbar_ratio",
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": 0.0,
+        "swiped": swiped,
+        "target_ratio": round(clamped_ratio, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Row signature for frame deduplication
+# ---------------------------------------------------------------------------
+
+def _compute_row_signature(ocr_rows):
+    """Compute a lightweight signature from OCR rows to detect duplicate frames.
+
+    Uses the sorted normalized texts so that identical visible rows produce
+    the same signature regardless of OCR ordering noise.
+    """
+    if not ocr_rows:
+        return ""
+    texts = sorted(row.get("text_normalized", "") for row in ocr_rows if row.get("text_normalized"))
+    return "|".join(texts)
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +542,7 @@ def _analyze_skill_frame(frame_payload):
         "increment_count": len(increment_matches),
         "increment_matches": [list(m) for m in increment_matches],
         "scrollbar": scrollbar,
+        "row_signature": _compute_row_signature(ocr_rows),
         "final": bool(frame_payload.get("final")),
         "timing": {
             "capture": round(frame_payload.get("capture_elapsed", 0.0), 4),
@@ -448,7 +556,13 @@ def _analyze_skill_frame(frame_payload):
 # Buffered capture during scrollbar drag
 # ---------------------------------------------------------------------------
 
-def _capture_skill_frames_during_scrollbar_drag(initial_scrollbar, skill_shortlist):
+def _capture_skill_frames_during_scrollbar_drag(
+    initial_scrollbar,
+    skill_shortlist,
+    drag_duration=None,
+    frame_interval=None,
+    debug_session_dir=None,
+):
     """Capture frames during a top-to-bottom scrollbar drag, analyzing concurrently.
 
     Same producer-consumer pattern as the Trackblazer shop scan.
@@ -462,17 +576,39 @@ def _capture_skill_frames_during_scrollbar_drag(initial_scrollbar, skill_shortli
                 return
             try:
                 analyzed = _analyze_skill_frame(frame_payload)
+                if debug_session_dir is not None:
+                    frame_index = int(analyzed.get("index", 0))
+                    scrollbar = analyzed.get("scrollbar") or {}
+                    frame_summary = {
+                        "index": frame_index,
+                        "elapsed": analyzed.get("elapsed"),
+                        "scrollbar_ratio": scrollbar.get("position_ratio"),
+                        "ocr_rows_count": analyzed.get("ocr_rows_count", 0),
+                        "matched_names": [m.get("match_name") for m in (analyzed.get("matched_targets") or [])],
+                        "increment_count": analyzed.get("increment_count", 0),
+                        "timing": analyzed.get("timing"),
+                    }
+                    _save_skill_runtime_debug_frame(
+                        debug_session_dir,
+                        f"buffer_frame_{frame_index:03d}_ratio_{str(scrollbar.get('position_ratio')).replace('.', '_')}",
+                        frame_payload.get("screenshot"),
+                        frame_summary=frame_summary,
+                    )
                 analyzed_frames.append(analyzed)
             finally:
                 analysis_queue.task_done()
 
+    resolved_drag_duration = float(drag_duration or _SCROLLBAR_DRAG_DURATION_SECONDS)
+    resolved_frame_interval = float(frame_interval or _SCROLLBAR_FRAME_INTERVAL_SECONDS)
+
     drag = {
         "start": None,
         "end": None,
-        "duration": float(_SCROLLBAR_DRAG_DURATION_SECONDS),
+        "duration": float(resolved_drag_duration),
         "swiped": False,
         "frames": [],
         "stop_reason": "",
+        "skipped_due_to_backlog": 0,
         "timing": {},
     }
     thumb_center = (initial_scrollbar or {}).get("thumb_center")
@@ -505,13 +641,13 @@ def _capture_skill_frames_during_scrollbar_drag(initial_scrollbar, skill_shortli
         drag["swiped"] = bool(device_action.swipe(
             drag_start,
             drag_end,
-            duration=_SCROLLBAR_DRAG_DURATION_SECONDS,
+            duration=resolved_drag_duration,
             text="Skill scrollbar drag top-to-bottom",
         ))
 
     drag_thread = threading.Thread(target=_run_drag, daemon=True)
     drag_thread.start()
-    next_capture_at = _time() + _SCROLLBAR_FRAME_INTERVAL_SECONDS
+    next_capture_at = _time() + resolved_frame_interval
     while drag_thread.is_alive():
         now = _time()
         if now < next_capture_at:
@@ -528,7 +664,7 @@ def _capture_skill_frames_during_scrollbar_drag(initial_scrollbar, skill_shortli
             "skill_shortlist": skill_shortlist,
         })
         frame_count += 1
-        next_capture_at = max(next_capture_at + _SCROLLBAR_FRAME_INTERVAL_SECONDS, _time() + 0.001)
+        next_capture_at = max(next_capture_at + resolved_frame_interval, _time() + 0.001)
 
     drag_thread.join()
     # Capture one final frame after drag completes.
@@ -574,14 +710,78 @@ def _capture_skill_frames_during_scrollbar_drag(initial_scrollbar, skill_shortli
     wall_total = _time() - t_drag
     drag["timing"] = {
         "drag_runtime": round(capture_window, 4),
-        "frame_interval_target": round(_SCROLLBAR_FRAME_INTERVAL_SECONDS, 4),
+        "frame_interval_target": round(resolved_frame_interval, 4),
         "frames": int(frame_count),
+        "skipped_due_to_backlog": int(drag.get("skipped_due_to_backlog", 0)),
         "capture_total": round(capture_total, 4),
         "scan_total": round(scan_total, 4),
         "analysis_total": round(max(0.0, wall_total - capture_window), 4),
         "wall": round(wall_total, 4),
     }
     return drag
+
+
+def _complete_scan_to_bottom(skill_shortlist, start_index, debug_session_dir=None):
+    """Force one or more bottom-edge captures when the main drag stops early."""
+    extra_frames = []
+    completion = {
+        "attempted": False,
+        "passes": [],
+        "completed": False,
+        "final_scrollbar": None,
+    }
+    next_index = int(start_index)
+    for _ in range(_SCROLLBAR_BOTTOM_COMPLETION_PASSES):
+        current_sb = inspect_skill_scrollbar()
+        completion["final_scrollbar"] = current_sb
+        if not current_sb.get("detected") or current_sb.get("is_at_bottom"):
+            completion["completed"] = bool(current_sb.get("detected") and current_sb.get("is_at_bottom"))
+            break
+        completion["attempted"] = True
+        pass_result = _drag_skill_scrollbar(
+            current_sb,
+            edge="bottom",
+            duration=_SCROLLBAR_BOTTOM_COMPLETION_DRAG_DURATION_SECONDS,
+        )
+        sleep(_SCROLLBAR_REACQUIRE_SETTLE_SECONDS)
+        screenshot = _capture_live_skill_screenshot()
+        frame = _analyze_skill_frame({
+            "index": next_index,
+            "elapsed": None,
+            "capture_elapsed": 0.0,
+            "screenshot": screenshot,
+            "skill_shortlist": skill_shortlist,
+            "final": True,
+        })
+        if debug_session_dir is not None:
+            _save_skill_runtime_debug_frame(
+                debug_session_dir,
+                f"bottom_completion_frame_{next_index:03d}",
+                screenshot,
+                frame_summary={
+                    "index": next_index,
+                    "elapsed": None,
+                    "scrollbar_ratio": ((frame.get("scrollbar") or {}).get("position_ratio")),
+                    "ocr_rows_count": frame.get("ocr_rows_count", 0),
+                    "matched_names": [m.get("match_name") for m in (frame.get("matched_targets") or [])],
+                    "increment_count": frame.get("increment_count", 0),
+                    "timing": frame.get("timing"),
+                },
+            )
+        next_index += 1
+        live_sb = frame.get("scrollbar") or {}
+        pass_result["scrollbar_after"] = {
+            "detected": live_sb.get("detected"),
+            "position_ratio": live_sb.get("position_ratio"),
+            "is_at_bottom": live_sb.get("is_at_bottom"),
+        }
+        completion["passes"].append(pass_result)
+        completion["final_scrollbar"] = live_sb
+        extra_frames.append(frame)
+        if live_sb.get("is_at_bottom"):
+            completion["completed"] = True
+            break
+    return extra_frames, completion
 
 
 # ---------------------------------------------------------------------------
@@ -607,14 +807,18 @@ def _detect_confirm_button(screenshot=None):
 # Main scan + purchase flow (Phase 1 — dry run)
 # ---------------------------------------------------------------------------
 
-def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=True):
-    """Phase 1 skill purchase flow.
+def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=True,
+                             save_debug_frames=False, debug_session_name=None):
+    """Continuous-drag skill purchase flow.
 
     1. Detect scrollbar on the open skills page.
-    2. Reset to top.
-    3. Scan while dragging to bottom, capturing and OCR-ing concurrently.
-    4. Find the target skill and click its increment button.
-    5. Detect confirm availability (do NOT click confirm in Phase 1).
+    2. Reset to top if needed.
+    3. Capture + analyze initial still frame at top.
+    4. Run a full continuous drag scan (top→bottom), building a search index.
+    5. Choose the best target candidate across ALL indexed frames.
+    6. Seek back near the saved scrollbar ratio for that frame.
+    7. Reacquire the target live, click its increment button.
+    8. Detect confirm availability (do NOT click confirm in Phase 1).
 
     Returns a flow result dict with timing and debug output.
     """
@@ -625,9 +829,16 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
         "scrollbar_initial": None,
         "scrollbar_reset": None,
         "drag_result": None,
+        "bottom_completion_result": None,
+        "all_frames": [],
+        "frame_signatures_seen": 0,
+        "frame_signatures_unique": 0,
         "target_found": False,
         "target_frame_index": None,
+        "target_scrollbar_ratio": None,
         "target_row": None,
+        "seekback_result": None,
+        "reacquire_result": None,
         "increment_click_result": None,
         "confirm_detect_result": None,
         "confirm_available": False,
@@ -647,9 +858,16 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
         return flow
 
     t_flow = _time()
+    debug_session_dir = (
+        _ensure_skill_runtime_debug_dir(
+            debug_session_name or f"skill_purchase_single_{int(_time() * 1000)}"
+        )
+        if save_debug_frames
+        else None
+    )
 
-    # Step 1: Detect scrollbar.
-    info(f"Skill scanner: detecting scrollbar...")
+    # --- Step 1: Detect scrollbar ---
+    info("Skill scanner: detecting scrollbar...")
     scrollbar = inspect_skill_scrollbar()
     flow["scrollbar_initial"] = scrollbar
     if not scrollbar.get("detected"):
@@ -659,19 +877,18 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
     info(f"Skill scanner: scrollbar detected, ratio={scrollbar.get('position_ratio')}, "
          f"scrollable={scrollbar.get('scrollable')}")
 
-    # Step 2: Reset to top.
+    # --- Step 2: Reset to top ---
     if not scrollbar.get("is_at_top"):
         info("Skill scanner: resetting scrollbar to top...")
         reset_result = _drag_skill_scrollbar(scrollbar, edge="top")
         flow["scrollbar_reset"] = reset_result
         sleep(0.3)
-        # Re-detect after reset.
         scrollbar = inspect_skill_scrollbar()
         info(f"Skill scanner: after reset, ratio={scrollbar.get('position_ratio')}")
     else:
         info("Skill scanner: already at top.")
 
-    # Step 2.5: Capture and analyze the initial still frame at top.
+    # --- Step 3: Capture initial still frame at top ---
     info("Skill scanner: capturing initial still frame at top...")
     initial_screenshot = _capture_live_skill_screenshot()
     initial_frame = _analyze_skill_frame({
@@ -681,87 +898,316 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
         "screenshot": initial_screenshot,
         "skill_shortlist": skill_shortlist,
     })
-    # Check if target is already visible at top.
-    target_match = _find_best_target_match(initial_frame, target_skill)
-    if target_match:
-        info(f"Skill scanner: target '{target_match['match_name']}' found in initial frame! "
-             f"score={target_match['match_score']}")
-        flow["target_found"] = True
-        flow["target_frame_index"] = -1
-        flow["target_row"] = target_match
-        return _do_increment_and_confirm(flow, target_match, initial_screenshot, dry_run, t_flow)
+    if debug_session_dir is not None:
+        _save_skill_runtime_debug_frame(
+            debug_session_dir,
+            "initial_frame_top",
+            initial_screenshot,
+            frame_summary={
+                "index": -1,
+                "elapsed": 0.0,
+                "scrollbar_ratio": ((initial_frame.get("scrollbar") or {}).get("position_ratio")),
+                "ocr_rows_count": initial_frame.get("ocr_rows_count", 0),
+                "matched_names": [m.get("match_name") for m in (initial_frame.get("matched_targets") or [])],
+                "increment_count": initial_frame.get("increment_count", 0),
+                "timing": initial_frame.get("timing"),
+            },
+        )
+    all_analyzed_frames = [initial_frame]
+    seen_signatures = set()
+    sig = initial_frame.get("row_signature", "")
+    if sig:
+        seen_signatures.add(sig)
 
-    # Step 3: Step-scan through the list using scrollbar increments.
-    # Each step seeks to a ratio, settles, captures, and analyzes in place.
-    # When the target is found, it's already on screen — no seek-back needed.
+    # --- Step 4: Full continuous drag scan ---
     if scrollbar.get("scrollable"):
-        step_count = _SCROLLBAR_SCAN_STEPS
-        frames = []
-        info(f"Skill scanner: step-scanning {step_count} positions, shortlist={skill_shortlist}...")
-        for step_idx in range(step_count):
-            ratio = step_idx / max(1, step_count - 1)
-            # Seek scrollbar to this ratio.
-            current_sb = inspect_skill_scrollbar()
-            if not current_sb.get("detected"):
-                info(f"Skill scanner: scrollbar lost at step {step_idx}")
-                break
-            thumb = current_sb["thumb_center"]
-            target_y = int(current_sb["bbox"][1] + ratio * current_sb["travel_pixels"] + current_sb["thumb_height"] // 2)
-            device_action.swipe(
-                (int(thumb[0]), int(thumb[1])),
-                (int(current_sb["track_center_x"]), target_y),
-                duration=_SCROLLBAR_SEEK_DURATION_SECONDS,
-                text=f"Skill scan step {step_idx}/{step_count} ratio={ratio:.2f}",
-            )
-            sleep(_SCROLLBAR_STEP_SETTLE_SECONDS)
-
-            # Capture and analyze at this position.
-            screenshot = _capture_live_skill_screenshot()
-            frame = _analyze_skill_frame({
-                "index": step_idx,
-                "elapsed": round(_time() - t_flow, 4),
-                "capture_elapsed": 0.0,
-                "screenshot": screenshot,
-                "skill_shortlist": skill_shortlist,
-            })
-            frames.append(frame)
-            target_match = _find_best_target_match(frame, target_skill)
-            if target_match and target_match.get("increment_match"):
-                info(f"Skill scanner: target '{target_match['match_name']}' found at step "
-                     f"{step_idx} (ratio={ratio:.2f})! score={target_match['match_score']}")
-                flow["target_found"] = True
-                flow["target_frame_index"] = step_idx
-                flow["target_row"] = target_match
-                flow["drag_result"] = {
-                    "stop_reason": "target_found",
-                    "frame_count": len(frames),
-                    "timing": {"wall": round(_time() - t_flow, 4)},
-                }
-                return _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow)
-            elif target_match:
-                info(f"Skill scanner: target '{target_match['match_name']}' OCR'd at step "
-                     f"{step_idx} but no increment button paired.")
-                flow["target_found"] = True
-                flow["target_frame_index"] = step_idx
-                flow["target_row"] = target_match
-
+        info(f"Skill scanner: starting continuous drag scan, shortlist={skill_shortlist}...")
+        drag_result = _capture_skill_frames_during_scrollbar_drag(
+            scrollbar,
+            skill_shortlist,
+            debug_session_dir=debug_session_dir,
+        )
         flow["drag_result"] = {
-            "stop_reason": "scan_complete",
-            "frame_count": len(frames),
-            "timing": {"wall": round(_time() - t_flow, 4)},
+            "stop_reason": drag_result.get("stop_reason"),
+            "swiped": drag_result.get("swiped"),
+            "timing": drag_result.get("timing"),
         }
+        for frame in drag_result.get("frames", []):
+            all_analyzed_frames.append(frame)
+            sig = frame.get("row_signature", "")
+            if sig:
+                seen_signatures.add(sig)
+        if drag_result.get("stop_reason") != "scrollbar_bottom_reached":
+            info("Skill scanner: drag ended before bottom detection, forcing bottom completion...")
+            extra_frames, bottom_completion = _complete_scan_to_bottom(
+                skill_shortlist,
+                start_index=len(all_analyzed_frames),
+                debug_session_dir=debug_session_dir,
+            )
+            flow["bottom_completion_result"] = bottom_completion
+            for frame in extra_frames:
+                all_analyzed_frames.append(frame)
+                sig = frame.get("row_signature", "")
+                if sig:
+                    seen_signatures.add(sig)
     else:
-        info("Skill scanner: list is not scrollable, only initial frame was checked.")
+        info("Skill scanner: list is not scrollable, only initial frame available.")
 
-    if not flow["target_found"]:
+    flow["all_frames"] = _summarize_frames_for_flow(all_analyzed_frames)
+    flow["frame_signatures_seen"] = len(all_analyzed_frames)
+    flow["frame_signatures_unique"] = len(seen_signatures)
+    t_scan_done = _time()
+    info(f"Skill scanner: scan complete — {len(all_analyzed_frames)} frames, "
+         f"{len(seen_signatures)} unique signatures, "
+         f"wall={round(t_scan_done - t_flow, 2)}s")
+
+    # --- Step 5: Choose best target from indexed frames ---
+    best_candidate = _choose_best_candidate(all_analyzed_frames, target_skill)
+
+    if not best_candidate:
         flow["reason"] = "target_not_found_in_any_frame"
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done)
+        _log_scan_debug(flow, all_analyzed_frames)
         info(f"Skill scanner: target skill not found. Scanned shortlist: {skill_shortlist}")
+        return flow
 
-    flow["scan_timing"] = {"wall": round(_time() - t_flow, 4)}
+    flow["target_found"] = True
+    flow["target_frame_index"] = best_candidate["frame_index"]
+    flow["target_scrollbar_ratio"] = best_candidate["scrollbar_ratio"]
+    flow["target_row"] = best_candidate["row"]
+    info(f"Skill scanner: best candidate '{best_candidate['row']['match_name']}' "
+         f"in frame {best_candidate['frame_index']} "
+         f"(ratio={best_candidate['scrollbar_ratio']}, "
+         f"score={best_candidate['row']['match_score']}, "
+         f"has_inc={best_candidate['row'].get('increment_match') is not None})")
 
-    # Log summary of all OCR text seen across frames for debugging.
-    _log_scan_debug(flow, None, initial_frame)
-    return flow
+    # --- Step 6: Seek back near saved scrollbar ratio ---
+    t_seekback = _time()
+    reacquire_match, reacquire_screenshot, seek_result, reacquire_result = _reacquire_skill_candidate(
+        target_skill,
+        skill_shortlist,
+        best_candidate,
+        t_flow,
+    )
+    flow["seekback_result"] = seek_result
+    flow["reacquire_result"] = reacquire_result
+    if flow["seekback_result"] is None and best_candidate["frame_index"] != -1:
+        warning("Skill scanner: scrollbar lost before seek-back.")
+        flow["reason"] = "scrollbar_lost_before_seekback"
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
+        return flow
+
+    if not reacquire_match:
+        flow["reason"] = "target_found_in_scan_but_reacquire_failed"
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
+        info("Skill scanner: could not reacquire target after seek-back.")
+        _log_scan_debug(flow, all_analyzed_frames)
+        return flow
+
+    if not reacquire_match.get("increment_match"):
+        flow["reason"] = "target_reacquired_but_no_increment_paired"
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
+        info("Skill scanner: target reacquired but no increment button paired live.")
+        _log_scan_debug(flow, all_analyzed_frames)
+        return flow
+
+    info(f"Skill scanner: target reacquired! score={reacquire_match['match_score']}, "
+         f"increment paired.")
+
+    # --- Step 8: Click increment and detect confirm ---
+    return _do_increment_and_confirm(flow, reacquire_match, reacquire_screenshot, dry_run,
+                                     t_flow, t_scan_done, t_seekback)
+
+
+# ---------------------------------------------------------------------------
+# Candidate selection from indexed frames
+# ---------------------------------------------------------------------------
+
+def _choose_best_candidate(all_frames, target_skill):
+    """Choose the best target match across all indexed frames.
+
+    Prefers: has increment > higher match score > earlier frame.
+    Returns None if no match found.
+    """
+    candidates = []
+    for frame in all_frames:
+        match = _find_best_target_match(frame, target_skill)
+        if match:
+            sb = frame.get("scrollbar") or {}
+            candidates.append({
+                "frame_index": frame.get("index", 0),
+                "scrollbar_ratio": sb.get("position_ratio"),
+                "row": match,
+            })
+
+    if not candidates:
+        return None
+
+    # Sort: prefer candidates with increment, then by score descending.
+    def _rank(c):
+        has_inc = 1 if c["row"].get("increment_match") else 0
+        score = c["row"].get("match_score", 0)
+        return (has_inc, score)
+
+    candidates.sort(key=_rank, reverse=True)
+    return candidates[0]
+
+
+def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):
+    scrollbar = (frame or {}).get("scrollbar") or {}
+    matched_targets = (frame or {}).get("matched_targets") or []
+    return {
+        "ocr_rows_count": (frame or {}).get("ocr_rows_count", 0),
+        "matched_targets_count": len(matched_targets),
+        "target_reacquired": match is not None,
+        "target_has_increment": bool(match and match.get("increment_match")),
+        "scrollbar_ratio": scrollbar.get("position_ratio"),
+        "seek_ratio": seek_ratio,
+        "nudge_attempts": list(nudge_attempts or []),
+    }
+
+
+def _click_increment_for_match(target_match, dry_run):
+    """Click or preview-click the increment button for a matched skill row."""
+    inc = target_match.get("increment_match")
+    if not inc:
+        return {
+            "clicked": False,
+            "dry_run": bool(dry_run),
+            "target": None,
+            "increment_match": None,
+        }
+    scroll_left, scroll_top, _, _ = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
+    click_x = scroll_left + inc[0] + inc[2] // 2
+    click_y = scroll_top + inc[1] + inc[3] // 2
+    if dry_run:
+        info(f"Skill scanner: [DRY RUN] would click increment for '{target_match['match_name']}' "
+             f"at ({click_x}, {click_y})")
+        return {
+            "clicked": False,
+            "dry_run": True,
+            "target": [click_x, click_y],
+            "increment_match": list(inc),
+        }
+    info(f"Skill scanner: clicking increment for '{target_match['match_name']}' "
+         f"at ({click_x}, {click_y})...")
+    device_action.click(target=(click_x, click_y), duration=0.15)
+    sleep(0.5)
+    return {
+        "clicked": True,
+        "dry_run": False,
+        "target": [click_x, click_y],
+        "increment_match": list(inc),
+    }
+
+
+def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow):
+    """Seek back to an indexed candidate and reacquire it live.
+
+    Bias slightly above the indexed ratio, then search downward first. That
+    matches the observed behavior better than landing slightly low and needing
+    to reverse direction immediately.
+    """
+    seek_result = None
+    candidate_ratio = candidate.get("scrollbar_ratio")
+    seek_ratio = None
+    if candidate.get("frame_index") == -1:
+        current_sb = inspect_skill_scrollbar()
+        if current_sb.get("detected") and not current_sb.get("is_at_top"):
+            seek_result = _drag_skill_scrollbar(current_sb, edge="top")
+            sleep(_SCROLLBAR_SEEKBACK_SETTLE_SECONDS)
+        reacquire_screenshot = _capture_live_skill_screenshot()
+        reacquire_frame = _analyze_skill_frame({
+            "index": -99,
+            "elapsed": round(_time() - t_flow, 4),
+            "capture_elapsed": 0.0,
+            "screenshot": reacquire_screenshot,
+            "skill_shortlist": skill_shortlist,
+        })
+        reacquire_match = _find_best_target_match(reacquire_frame, target_skill)
+        reacquire_result = _build_reacquire_result(reacquire_frame, reacquire_match)
+        return reacquire_match, reacquire_screenshot, seek_result, reacquire_result
+
+    current_sb = inspect_skill_scrollbar()
+    if not current_sb.get("detected"):
+        return None, None, None, {
+            "target_reacquired": False,
+            "target_has_increment": False,
+            "scrollbar_ratio": None,
+            "seek_ratio": None,
+            "nudge_attempts": [],
+            "reason": "scrollbar_lost_before_seekback",
+        }
+
+    seek_ratio = min(1.0, max(0.0, float(candidate_ratio or 0.0) - _SCROLLBAR_SEEKBACK_BUFFER_RATIO))
+    seek_result = _drag_skill_scrollbar_to_ratio(current_sb, seek_ratio)
+    sleep(_SCROLLBAR_SEEKBACK_SETTLE_SECONDS)
+
+    reacquire_screenshot = _capture_live_skill_screenshot()
+    reacquire_frame = _analyze_skill_frame({
+        "index": -99,
+        "elapsed": round(_time() - t_flow, 4),
+        "capture_elapsed": 0.0,
+        "screenshot": reacquire_screenshot,
+        "skill_shortlist": skill_shortlist,
+    })
+    reacquire_match = _find_best_target_match(reacquire_frame, target_skill)
+    nudge_attempts = []
+    if reacquire_match and reacquire_match.get("increment_match"):
+        reacquire_result = _build_reacquire_result(
+            reacquire_frame,
+            reacquire_match,
+            seek_ratio=seek_ratio,
+            nudge_attempts=nudge_attempts,
+        )
+        return reacquire_match, reacquire_screenshot, seek_result, reacquire_result
+
+    for nudge_direction, nudge_delta in [("down", 0.02), ("down2", 0.04), ("down3", 0.06), ("up", -0.02), ("up2", -0.05)]:
+        current_sb = inspect_skill_scrollbar()
+        if not current_sb.get("detected"):
+            break
+        current_ratio = current_sb.get("position_ratio", seek_ratio if seek_ratio is not None else 0.5)
+        nudge_ratio = min(1.0, max(0.0, current_ratio + nudge_delta))
+        debug(f"Skill scanner: nudge {nudge_direction} to ratio={nudge_ratio:.3f}")
+        _drag_skill_scrollbar_to_ratio(current_sb, nudge_ratio)
+        sleep(_SCROLLBAR_REACQUIRE_SETTLE_SECONDS)
+        screenshot = _capture_live_skill_screenshot()
+        frame = _analyze_skill_frame({
+            "index": -98,
+            "elapsed": round(_time() - t_flow, 4),
+            "capture_elapsed": 0.0,
+            "screenshot": screenshot,
+            "skill_shortlist": skill_shortlist,
+        })
+        match = _find_best_target_match(frame, target_skill)
+        nudge_attempts.append({
+            "direction": nudge_direction,
+            "target_ratio": round(nudge_ratio, 4),
+            "matched": bool(match),
+            "has_increment": bool(match and match.get("increment_match")),
+            "scrollbar_ratio": ((frame.get("scrollbar") or {}).get("position_ratio")),
+        })
+        if match and match.get("increment_match"):
+            reacquire_result = _build_reacquire_result(
+                frame,
+                match,
+                seek_ratio=seek_ratio,
+                nudge_attempts=nudge_attempts,
+            )
+            info(f"Skill scanner: reacquired via nudge {nudge_direction}!")
+            return match, screenshot, seek_result, reacquire_result
+        if match:
+            reacquire_screenshot = screenshot
+            reacquire_frame = frame
+            reacquire_match = match
+
+    reacquire_result = _build_reacquire_result(
+        reacquire_frame,
+        reacquire_match,
+        seek_ratio=seek_ratio,
+        nudge_attempts=nudge_attempts,
+    )
+    return reacquire_match, reacquire_screenshot, seek_result, reacquire_result
 
 
 def _find_best_target_match(frame, target_skill):
@@ -782,29 +1228,53 @@ def _find_best_target_match(frame, target_skill):
     return max(matched, key=lambda m: m.get("match_score", 0))
 
 
-def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow):
+# ---------------------------------------------------------------------------
+# Seek-back nudge for reacquisition
+# ---------------------------------------------------------------------------
+
+def _nudge_and_reacquire(target_skill, skill_shortlist, flow, t_flow):
+    """Try small scrollbar nudges up/down to reacquire a target after seek-back."""
+    for nudge_direction, nudge_delta in [("up", -0.03), ("down", 0.03), ("up2", -0.06)]:
+        current_sb = inspect_skill_scrollbar()
+        if not current_sb.get("detected"):
+            break
+        current_ratio = current_sb.get("position_ratio", 0.5)
+        nudge_ratio = min(1.0, max(0.0, current_ratio + nudge_delta))
+        debug(f"Skill scanner: nudge {nudge_direction} to ratio={nudge_ratio:.3f}")
+        _drag_skill_scrollbar_to_ratio(current_sb, nudge_ratio)
+        sleep(_SCROLLBAR_REACQUIRE_SETTLE_SECONDS)
+        screenshot = _capture_live_skill_screenshot()
+        frame = _analyze_skill_frame({
+            "index": -98,
+            "elapsed": round(_time() - t_flow, 4),
+            "capture_elapsed": 0.0,
+            "screenshot": screenshot,
+            "skill_shortlist": skill_shortlist,
+        })
+        match = _find_best_target_match(frame, target_skill)
+        if match and match.get("increment_match"):
+            info(f"Skill scanner: reacquired via nudge {nudge_direction}!")
+            return match
+        elif match:
+            info(f"Skill scanner: OCR'd target via nudge {nudge_direction} but no increment.")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Increment click + confirm detection
+# ---------------------------------------------------------------------------
+
+def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow,
+                               t_scan_done=None, t_seekback=None):
     """Click increment for the matched target and detect confirm."""
     inc = target_match.get("increment_match")
     if not inc:
         flow["reason"] = "target_found_but_no_increment_paired"
         info("Skill scanner: target found but no increment button paired.")
-        flow["scan_timing"] = {"wall": round(_time() - t_flow, 4)}
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
         return flow
 
-    # Convert SCROLLING_SKILL_SCREEN_BBOX-relative increment match to absolute.
-    scroll_left, scroll_top, _, _ = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
-    click_x = scroll_left + inc[0] + inc[2] // 2
-    click_y = scroll_top + inc[1] + inc[3] // 2
-
-    info(f"Skill scanner: clicking increment for '{target_match['match_name']}' "
-         f"at ({click_x}, {click_y})...")
-    device_action.click(target=(click_x, click_y), duration=0.15)
-    flow["increment_click_result"] = {
-        "clicked": True,
-        "target": [click_x, click_y],
-        "increment_match": list(inc),
-    }
-    sleep(0.5)
+    flow["increment_click_result"] = _click_increment_for_match(target_match, dry_run)
 
     # Detect confirm button.
     info("Skill scanner: checking for confirm button...")
@@ -812,39 +1282,249 @@ def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow):
     flow["confirm_detect_result"] = confirm
     flow["confirm_available"] = confirm.get("detected", False)
     if confirm.get("detected"):
-        info("Skill scanner: confirm button detected! (Phase 1 dry run — not clicking)")
-        flow["reason"] = "increment_clicked_confirm_detected"
+        info("Skill scanner: confirm button detected! (not clicking)")
+        flow["reason"] = "increment_clicked_confirm_detected" if not dry_run else "dry_run_confirm_detected"
     else:
-        info("Skill scanner: confirm button NOT detected after increment.")
-        flow["reason"] = "increment_clicked_confirm_not_detected"
+        if dry_run:
+            info("Skill scanner: confirm not detected (expected — dry run did not click increment).")
+            flow["reason"] = "dry_run_complete"
+        else:
+            info("Skill scanner: confirm button NOT detected after increment.")
+            flow["reason"] = "increment_clicked_confirm_not_detected"
 
-    flow["scan_timing"] = {"wall": round(_time() - t_flow, 4)}
+    flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
     return flow
 
 
-def _log_scan_debug(flow, drag_result, initial_frame):
+def scan_and_increment_skills(target_skills, dry_run=False,
+                              save_debug_frames=False, debug_session_name=None):
+    """Scan once, then seek back and increment multiple skills in order.
+
+    This does one full indexed pass before any seek-back. After the index is
+    built, targets are revisited in the caller-provided order.
+    """
+    ordered_targets = []
+    seen = set()
+    for skill_name in (target_skills or []):
+        normalized = _normalize_skill_text(skill_name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered_targets.append(skill_name)
+
+    flow = {
+        "target_skills": ordered_targets,
+        "scan_timing": {},
+        "scrollbar_initial": None,
+        "scrollbar_reset": None,
+        "drag_result": None,
+        "bottom_completion_result": None,
+        "all_frames": [],
+        "frame_signatures_seen": 0,
+        "frame_signatures_unique": 0,
+        "target_results": [],
+        "reason": "",
+    }
+    if not ordered_targets:
+        flow["reason"] = "no_target_skills_configured"
+        return flow
+
+    skill_shortlist = list(ordered_targets)
+    t_flow = _time()
+    debug_session_dir = (
+        _ensure_skill_runtime_debug_dir(
+            debug_session_name or f"skill_purchase_multi_{int(_time() * 1000)}"
+        )
+        if save_debug_frames
+        else None
+    )
+
+    info(f"Skill scanner: detecting scrollbar for multi-target run {ordered_targets}...")
+    scrollbar = inspect_skill_scrollbar()
+    flow["scrollbar_initial"] = scrollbar
+    if not scrollbar.get("detected"):
+        flow["reason"] = "scrollbar_not_detected"
+        return flow
+    if not scrollbar.get("is_at_top"):
+        flow["scrollbar_reset"] = _drag_skill_scrollbar(scrollbar, edge="top")
+        sleep(0.3)
+        scrollbar = inspect_skill_scrollbar()
+
+    initial_screenshot = _capture_live_skill_screenshot()
+    initial_frame = _analyze_skill_frame({
+        "index": -1,
+        "elapsed": 0.0,
+        "capture_elapsed": 0.0,
+        "screenshot": initial_screenshot,
+        "skill_shortlist": skill_shortlist,
+    })
+    if debug_session_dir is not None:
+        _save_skill_runtime_debug_frame(
+            debug_session_dir,
+            "initial_frame_top",
+            initial_screenshot,
+            frame_summary={
+                "index": -1,
+                "elapsed": 0.0,
+                "scrollbar_ratio": ((initial_frame.get("scrollbar") or {}).get("position_ratio")),
+                "ocr_rows_count": initial_frame.get("ocr_rows_count", 0),
+                "matched_names": [m.get("match_name") for m in (initial_frame.get("matched_targets") or [])],
+                "increment_count": initial_frame.get("increment_count", 0),
+                "timing": initial_frame.get("timing"),
+            },
+        )
+    all_analyzed_frames = [initial_frame]
+    seen_signatures = set()
+    if initial_frame.get("row_signature"):
+        seen_signatures.add(initial_frame.get("row_signature"))
+
+    if scrollbar.get("scrollable"):
+        drag_result = _capture_skill_frames_during_scrollbar_drag(
+            scrollbar,
+            skill_shortlist,
+            drag_duration=6.0,
+            frame_interval=0.22,
+            debug_session_dir=debug_session_dir,
+        )
+        flow["drag_result"] = {
+            "stop_reason": drag_result.get("stop_reason"),
+            "swiped": drag_result.get("swiped"),
+            "timing": drag_result.get("timing"),
+        }
+        for frame in drag_result.get("frames", []):
+            all_analyzed_frames.append(frame)
+            if frame.get("row_signature"):
+                seen_signatures.add(frame.get("row_signature"))
+        if drag_result.get("stop_reason") != "scrollbar_bottom_reached":
+            extra_frames, bottom_completion = _complete_scan_to_bottom(
+                skill_shortlist,
+                start_index=len(all_analyzed_frames),
+                debug_session_dir=debug_session_dir,
+            )
+            flow["bottom_completion_result"] = bottom_completion
+            for frame in extra_frames:
+                all_analyzed_frames.append(frame)
+                if frame.get("row_signature"):
+                    seen_signatures.add(frame.get("row_signature"))
+
+    flow["all_frames"] = _summarize_frames_for_flow(all_analyzed_frames)
+    flow["frame_signatures_seen"] = len(all_analyzed_frames)
+    flow["frame_signatures_unique"] = len(seen_signatures)
+    t_scan_done = _time()
+
+    for skill_name in ordered_targets:
+        candidate = _choose_best_candidate(all_analyzed_frames, skill_name)
+        entry = {
+            "target_skill": skill_name,
+            "candidate": None,
+            "seekback_result": None,
+            "reacquire_result": None,
+            "increment_click_result": None,
+            "confirm_detect_result": None,
+            "confirm_available": False,
+            "reason": "",
+        }
+        if candidate:
+            entry["candidate"] = {
+                "frame_index": candidate.get("frame_index"),
+                "scrollbar_ratio": candidate.get("scrollbar_ratio"),
+                "match_name": (candidate.get("row") or {}).get("match_name"),
+                "match_score": (candidate.get("row") or {}).get("match_score"),
+            }
+        else:
+            entry["reason"] = "target_not_found_in_any_frame"
+            flow["target_results"].append(entry)
+            continue
+
+        reacquire_match, _reacquire_screenshot, seek_result, reacquire_result = _reacquire_skill_candidate(
+            skill_name,
+            skill_shortlist,
+            candidate,
+            t_flow,
+        )
+        entry["seekback_result"] = seek_result
+        entry["reacquire_result"] = reacquire_result
+        if not reacquire_match:
+            entry["reason"] = "target_found_in_scan_but_reacquire_failed"
+            flow["target_results"].append(entry)
+            continue
+        if not reacquire_match.get("increment_match"):
+            entry["reason"] = "target_reacquired_but_no_increment_paired"
+            flow["target_results"].append(entry)
+            continue
+
+        entry["increment_click_result"] = _click_increment_for_match(reacquire_match, dry_run)
+        confirm = _detect_confirm_button()
+        entry["confirm_detect_result"] = confirm
+        entry["confirm_available"] = confirm.get("detected", False)
+        if confirm.get("detected"):
+            entry["reason"] = "increment_clicked_confirm_detected" if not dry_run else "dry_run_confirm_detected"
+        else:
+            entry["reason"] = "increment_clicked_confirm_not_detected" if not dry_run else "dry_run_complete"
+        flow["target_results"].append(entry)
+
+    flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_scan_done)
+    succeeded = [entry for entry in flow["target_results"] if entry.get("increment_click_result")]
+    flow["reason"] = (
+        "multi_increments_processed"
+        if succeeded
+        else "no_targets_incremented"
+    )
+    return flow
+
+
+# ---------------------------------------------------------------------------
+# Timing + debug helpers
+# ---------------------------------------------------------------------------
+
+def _build_scan_timing(t_flow, t_scan_done=None, t_seekback=None):
+    """Build the scan_timing dict with phase breakdowns."""
+    now = _time()
+    timing = {"wall": round(now - t_flow, 4)}
+    if t_scan_done:
+        timing["scan_phase"] = round(t_scan_done - t_flow, 4)
+    if t_seekback and t_scan_done:
+        timing["seekback_phase"] = round(now - t_seekback, 4) if t_seekback else None
+    return timing
+
+
+def _summarize_frames_for_flow(all_frames):
+    """Build a compact summary of all analyzed frames for the flow result."""
+    summaries = []
+    for frame in all_frames:
+        sb = frame.get("scrollbar") or {}
+        summaries.append({
+            "index": frame.get("index"),
+            "elapsed": frame.get("elapsed"),
+            "ocr_rows_count": frame.get("ocr_rows_count", 0),
+            "matched_count": len(frame.get("matched_targets", [])),
+            "matched_names": [m.get("match_name") for m in frame.get("matched_targets", [])],
+            "increment_count": frame.get("increment_count", 0),
+            "scrollbar_ratio": sb.get("position_ratio"),
+            "row_signature": frame.get("row_signature", "")[:40],
+            "timing": frame.get("timing"),
+        })
+    return summaries
+
+
+def _log_scan_debug(flow, all_frames):
     """Log a debug summary of the scan for troubleshooting."""
     all_texts = set()
-    if initial_frame:
-        for row in initial_frame.get("ocr_rows", []):
+    for frame in (all_frames or []):
+        for row in frame.get("ocr_rows", []):
             all_texts.add(row.get("text_raw", ""))
-    if drag_result:
-        for frame in drag_result.get("frames", []):
-            for row in frame.get("ocr_rows", []):
-                all_texts.add(row.get("text_raw", ""))
     if all_texts:
         debug(f"Skill scanner: all OCR text seen ({len(all_texts)} unique): "
               f"{sorted(all_texts)[:20]}...")
     # Log matched targets summary.
     matched_summary = []
-    if drag_result:
-        for frame in drag_result.get("frames", []):
-            for m in frame.get("matched_targets", []):
-                matched_summary.append(f"frame={frame.get('index')} "
-                                       f"name='{m.get('match_name')}' "
-                                       f"score={m.get('match_score')} "
-                                       f"type={m.get('match_type')} "
-                                       f"inc={m.get('increment_match') is not None}")
+    for frame in (all_frames or []):
+        for m in frame.get("matched_targets", []):
+            matched_summary.append(f"frame={frame.get('index')} "
+                                   f"name='{m.get('match_name')}' "
+                                   f"score={m.get('match_score')} "
+                                   f"type={m.get('match_type')} "
+                                   f"inc={m.get('increment_match') is not None}")
     if matched_summary:
         info(f"Skill scanner: matched targets: {matched_summary}")
 
@@ -976,7 +1656,8 @@ def _close_skills_page():
 # ---------------------------------------------------------------------------
 
 def collect_skill_purchase(target_skill=None, skill_shortlist=None,
-                           allow_open=True, trigger="automatic", dry_run=True):
+                           allow_open=True, trigger="automatic", dry_run=True,
+                           save_debug_frames=None, debug_session_name=None):
     """Full skill purchase flow: open skills page, scan, optionally increment, close.
 
     Returns a dict with:
@@ -1009,6 +1690,7 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
     }
 
     t_total = _time()
+    enable_debug_frames = bool(trigger == "manual_console") if save_debug_frames is None else bool(save_debug_frames)
 
     # Gate: is auto-buy enabled?
     if not getattr(config, "IS_AUTO_BUY_SKILL", False) and trigger != "manual_console":
@@ -1050,6 +1732,8 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         target_skill=target_skill,
         skill_shortlist=skill_shortlist,
         dry_run=dry_run,
+        save_debug_frames=enable_debug_frames,
+        debug_session_name=debug_session_name,
     )
     flow["timing_scan"] = round(_time() - t0, 3)
     flow["scanned"] = True
@@ -1073,6 +1757,16 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         flow["scan_result"]["confirm_detect_result"] = scan_result["confirm_detect_result"]
     if scan_result.get("drag_result"):
         flow["scan_result"]["drag_result"] = scan_result["drag_result"]
+    if scan_result.get("bottom_completion_result"):
+        flow["scan_result"]["bottom_completion_result"] = scan_result["bottom_completion_result"]
+    if scan_result.get("seekback_result"):
+        flow["scan_result"]["seekback_result"] = scan_result["seekback_result"]
+    if scan_result.get("reacquire_result"):
+        flow["scan_result"]["reacquire_result"] = scan_result["reacquire_result"]
+    flow["scan_result"]["target_frame_index"] = scan_result.get("target_frame_index")
+    flow["scan_result"]["target_scrollbar_ratio"] = scan_result.get("target_scrollbar_ratio")
+    flow["scan_result"]["frame_count"] = scan_result.get("frame_signatures_seen", 0)
+    flow["scan_result"]["unique_frames"] = scan_result.get("frame_signatures_unique", 0)
     result["skill_purchase_scan"] = scan_result
 
     # Step 3: Close skills page (skip if it was already open before we started).
