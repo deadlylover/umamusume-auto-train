@@ -172,6 +172,30 @@ def _build_trackblazer_inventory_debug_entries(flow, controls, inventory):
       )
     )
 
+  increment_template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_confirm_use_increment_item")
+  for attempt in flow.get("increment_attempts") or []:
+    if not increment_template_path:
+      break
+    item_name = attempt.get("item_name") or "unknown"
+    entries.append(
+      _inventory_template_debug_entry(
+        f"inventory_increment_{item_name}",
+        increment_template_path,
+        {
+          "matched": bool(attempt.get("increment_target")),
+          "passed_threshold": bool(attempt.get("increment_target")),
+          "click_target": attempt.get("increment_target"),
+        },
+        extra={
+          "increment_match": attempt.get("increment_match"),
+          "row_center_y": attempt.get("row_center_y"),
+          "held_quantity": attempt.get("held_quantity"),
+          "clicked": attempt.get("clicked"),
+          "click_metrics": attempt.get("click_metrics"),
+        },
+      )
+    )
+
   close_result = flow.get("close_result") or {}
   for idx, check in enumerate(close_result.get("attempts") or []):
     template_path = check.get("template")

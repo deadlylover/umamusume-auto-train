@@ -193,6 +193,7 @@ def _manual_console_snapshot():
   snapshot["selected_action"] = dict(snapshot.get("selected_action") or {})
   snapshot["backend_state"] = bot.get_backend_state()
   snapshot["execution_intent"] = bot.get_execution_intent()
+  snapshot["trackblazer_use_items_enabled"] = bot.get_trackblazer_use_items_enabled()
   return snapshot
 
 
@@ -246,6 +247,56 @@ def trigger_manual_inventory_check():
     publish_runtime_state()
 
   _start_manual_console_check("manual inventory check", _run)
+
+
+def trigger_manual_inventory_selection_test():
+  def _run():
+    use_items_enabled = bot.get_trackblazer_use_items_enabled()
+    bot.set_phase("checking_inventory_selection", message="Running manual Trackblazer item-selection test.")
+    publish_runtime_state()
+    snapshot = _manual_console_snapshot()
+    snapshot["scenario_name"] = "trackblazer"
+    snapshot["sub_phase"] = "manual_inventory_selection_test"
+    snapshot["selected_action"] = {"func": "prepare_training_items_for_use"}
+    snapshot["reasoning_notes"] = (
+      "Manual Trackblazer item-selection test triggered from the operator console. "
+      "This flow increments vita_65 and reset_whistle once each, verifies confirm-use availability, "
+      f"and {'clicks the first confirm-use button as a scaffold' if use_items_enabled else 'closes the inventory without pressing confirm-use'}."
+    )
+    snapshot["selected_action"]["use_items"] = use_items_enabled
+    try:
+      config.reload_config(print_config=False)
+      resolve_control_backend()
+      focus_target_window()
+      bot.set_manual_control_active(True)
+
+      from scenarios.trackblazer import prepare_training_items_for_use
+
+      result = prepare_training_items_for_use(
+        ["vita_65", "reset_whistle"],
+        verify_only=False,
+        close_after_test=not use_items_enabled,
+        apply_confirm_use=use_items_enabled,
+      )
+      snapshot["trackblazer_inventory"] = result.get("trackblazer_inventory")
+      snapshot["state_summary"]["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
+      snapshot["state_summary"]["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
+      snapshot["state_summary"]["trackblazer_inventory_flow"] = result.get("trackblazer_inventory_flow")
+      snapshot["ocr_debug"] = result.get("inventory_ocr_debug_entries") or []
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_inventory_selection", status="complete", message="Manual Trackblazer item-selection test complete.")
+    except Exception as exc:
+      snapshot["state_summary"]["trackblazer_inventory_flow"] = {
+        "trigger": "manual_prepare_training_items",
+        "error": str(exc),
+      }
+      bot.set_snapshot(snapshot)
+      bot.set_phase("checking_inventory_selection", status="error", message="Manual item-selection test failed.", error=str(exc))
+    finally:
+      bot.set_manual_control_active(False)
+    publish_runtime_state()
+
+  _start_manual_console_check("manual inventory item-selection test", _run)
 
 
 def trigger_manual_shop_check():
@@ -413,6 +464,7 @@ if __name__ == "__main__":
   config.reload_config(print_config=False)
   bot.register_control_callback("toggle_bot", toggle_bot)
   bot.register_control_callback("check_inventory", trigger_manual_inventory_check)
+  bot.register_control_callback("check_inventory_selection", trigger_manual_inventory_selection_test)
   bot.register_control_callback("check_shop", trigger_manual_shop_check)
   ensure_operator_console()
   publish_runtime_state()

@@ -58,6 +58,7 @@ pause_requested = False
 execution_intent = "execute"
 control_callbacks = {}
 manual_control_active = False
+trackblazer_use_items_enabled = False
 
 
 def set_phase(phase, status="active", message="", error=""):
@@ -82,6 +83,7 @@ def get_runtime_state():
       "pause_requested": pause_requested,
       "manual_control_active": manual_control_active,
       "execution_intent": execution_intent,
+      "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
       "is_bot_running": is_bot_running,
       "backend_state": get_backend_state(),
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
@@ -158,6 +160,18 @@ def set_manual_control_active(active):
 def is_manual_control_active():
   with runtime_lock:
     return manual_control_active
+
+
+def set_trackblazer_use_items_enabled(enabled):
+  global trackblazer_use_items_enabled, runtime_updated_at
+  with runtime_lock:
+    trackblazer_use_items_enabled = bool(enabled)
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_use_items_enabled():
+  with runtime_lock:
+    return trackblazer_use_items_enabled
 
 
 def set_control_backend_state(

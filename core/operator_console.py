@@ -22,6 +22,7 @@ PHASES = [
   "scanning_lobby",
   "collecting_main_state",
   "checking_inventory",
+  "checking_inventory_selection",
   "checking_shop",
   "collecting_training_state",
   "pre_training",
@@ -34,6 +35,7 @@ PHASES = [
 
 PHASE_CONTROL_CALLBACKS = {
   "checking_inventory": "check_inventory",
+  "checking_inventory_selection": "check_inventory_selection",
   "checking_shop": "check_shop",
 }
 
@@ -62,6 +64,7 @@ class OperatorConsole:
     self._message_value = None
     self._error_value = None
     self._execution_intent_var = None
+    self._trackblazer_use_items_var = None
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._phase_labels = {}
@@ -170,6 +173,8 @@ class OperatorConsole:
     primary_controls.grid(row=0, column=0, sticky="w")
     secondary_controls = tk.Frame(actions, bg="#101418")
     secondary_controls.grid(row=1, column=0, sticky="w", pady=(6, 0))
+    tertiary_controls = tk.Frame(actions, bg="#101418")
+    tertiary_controls.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
     self._bot_button = tk.Button(primary_controls, text="Start Bot", command=self._toggle_bot)
     self._bot_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -196,6 +201,7 @@ class OperatorConsole:
         activeforeground="white",
       ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
+    self._trackblazer_use_items_var = tk.BooleanVar(value=bot.get_trackblazer_use_items_enabled())
     self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
     self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
     tk.Checkbutton(
@@ -232,6 +238,29 @@ class OperatorConsole:
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
     tk.Button(secondary_controls, text="Save Position", command=self._save_and_test_position).pack(side=tk.LEFT, padx=(12, 0))
+
+    tk.Button(
+      tertiary_controls,
+      text="Test Use Items",
+      command=lambda: self._run_phase_check("check_inventory_selection"),
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Checkbutton(
+      tertiary_controls,
+      text="Use items",
+      variable=self._trackblazer_use_items_var,
+      command=self._toggle_trackblazer_use_items,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Label(
+      tertiary_controls,
+      text="Off = dry-run and close inventory. On = click first confirm-use scaffold.",
+      fg="#9aa4ad",
+      bg="#101418",
+    ).pack(side=tk.LEFT)
 
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
@@ -417,6 +446,8 @@ class OperatorConsole:
     self._device_value.set(backend_state.get("device_id") or "-")
     if self._execution_intent_var is not None:
       self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
+    if self._trackblazer_use_items_var is not None:
+      self._trackblazer_use_items_var.set(bool(runtime_state.get("trackblazer_use_items_enabled")))
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
     self._bot_button.configure(text="Stop Bot" if runtime_state.get("is_bot_running") else "Start Bot")
@@ -441,6 +472,7 @@ class OperatorConsole:
       "turn": snapshot.get("turn_label"),
       "state_summary": state_summary,
       "selected_action": selected_action,
+      "trackblazer_use_items_enabled": runtime_state.get("trackblazer_use_items_enabled"),
       "available_actions": snapshot.get("available_actions"),
       "reasoning_notes": snapshot.get("reasoning_notes"),
       "sub_phase": snapshot.get("sub_phase"),
@@ -706,6 +738,18 @@ class OperatorConsole:
     config.SKIP_FULL_STATS_APTITUDE_CHECK = enabled
     if self._persist_config_value("skip_full_stats_aptitude_check", enabled):
       self._message_value.set(f"Skip full stats/aptitude {'enabled' if enabled else 'disabled'}.")
+    self.publish()
+
+  def _toggle_trackblazer_use_items(self):
+    if self._trackblazer_use_items_var is None:
+      return
+    enabled = bool(self._trackblazer_use_items_var.get())
+    bot.set_trackblazer_use_items_enabled(enabled)
+    self._message_value.set(
+      "Trackblazer item use scaffold enabled."
+      if enabled else
+      "Trackblazer item use dry-run enabled."
+    )
     self.publish()
 
   def _load_window_geometry(self):
