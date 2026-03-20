@@ -11,7 +11,7 @@ import uvicorn
 
 from utils.log import info, warning, error, debug, init_logging, args
 
-from core.skeleton import career_lobby, _enrich_ocr_debug_entries
+from core.skeleton import career_lobby, _enrich_ocr_debug_entries, _planned_clicks_for_action
 from core.hotkeys import HotkeyListener
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.platform.window_focus import focus_target_window
@@ -141,29 +141,57 @@ def main():
 def toggle_bot():
   with bot.bot_lock:
     if bot.is_bot_running:
-      debug("[BOT] Stopping...")
-      bot.stop_event.set()
-      bot.is_bot_running = False
-      bot.clear_pause_request()
-
-      if bot.bot_thread and bot.bot_thread.is_alive():
-        debug("[BOT] Waiting for bot to stop...")
-        bot.cancel_review_wait()
-        bot.bot_thread.join(timeout=3)
-
-        if bot.bot_thread.is_alive():
-          debug("[BOT] Bot still running, please wait...")
-        else:
-          debug("[BOT] Bot stopped completely")
-
-      bot.bot_thread = None
+      _stop_bot_locked()
     else:
-      debug("[BOT] Starting...")
-      bot.clear_pause_request()
-      bot.is_bot_running = True
-      bot.bot_thread = threading.Thread(target=main, daemon=True)
-      bot.bot_thread.start()
+      _start_bot_locked()
   publish_runtime_state()
+
+
+def _start_bot_locked():
+  if bot.is_bot_running:
+    return False
+  debug("[BOT] Starting...")
+  bot.clear_pause_request()
+  bot.is_bot_running = True
+  bot.bot_thread = threading.Thread(target=main, daemon=True)
+  bot.bot_thread.start()
+  return True
+
+
+def start_bot():
+  with bot.bot_lock:
+    started = _start_bot_locked()
+  publish_runtime_state()
+  return started
+
+
+def _stop_bot_locked():
+  if not bot.is_bot_running:
+    return False
+  debug("[BOT] Stopping...")
+  bot.stop_event.set()
+  bot.is_bot_running = False
+  bot.clear_pause_request()
+
+  if bot.bot_thread and bot.bot_thread.is_alive():
+    debug("[BOT] Waiting for bot to stop...")
+    bot.cancel_review_wait()
+    bot.bot_thread.join(timeout=3)
+
+    if bot.bot_thread.is_alive():
+      debug("[BOT] Bot still running, please wait...")
+    else:
+      debug("[BOT] Bot stopped completely")
+
+  bot.bot_thread = None
+  return True
+
+
+def stop_bot():
+  with bot.bot_lock:
+    stopped = _stop_bot_locked()
+  publish_runtime_state()
+  return stopped
 
 
 def _manual_console_snapshot():
@@ -234,6 +262,7 @@ def trigger_manual_inventory_check():
     snapshot["sub_phase"] = "manual_inventory_check"
     _clear_manual_trackblazer_result(snapshot, "inventory")
     snapshot["selected_action"] = {"func": "check_inventory"}
+    snapshot["planned_clicks"] = _planned_clicks_for_action(snapshot["selected_action"])
     snapshot["reasoning_notes"] = "Manual Trackblazer inventory check triggered from the operator console."
     try:
       config.reload_config(print_config=False)
@@ -281,6 +310,7 @@ def trigger_manual_inventory_selection_test():
       f"and {'clicks the first confirm-use button as a scaffold' if use_items_enabled else 'closes the inventory without pressing confirm-use'}."
     )
     snapshot["selected_action"]["use_items"] = use_items_enabled
+    snapshot["planned_clicks"] = _planned_clicks_for_action(snapshot["selected_action"])
     try:
       config.reload_config(print_config=False)
       resolve_control_backend()
@@ -325,6 +355,7 @@ def trigger_manual_shop_check():
     snapshot["sub_phase"] = "manual_shop_check"
     _clear_manual_trackblazer_result(snapshot, "shop")
     snapshot["selected_action"] = {"func": "check_shop"}
+    snapshot["planned_clicks"] = _planned_clicks_for_action(snapshot["selected_action"])
     snapshot["reasoning_notes"] = "Manual Trackblazer shop check triggered from the operator console."
     try:
       config.reload_config(print_config=False)
@@ -530,6 +561,8 @@ if __name__ == "__main__":
   update_config()
   config.reload_config(print_config=False)
   bot.register_control_callback("toggle_bot", toggle_bot)
+  bot.register_control_callback("start_bot", start_bot)
+  bot.register_control_callback("stop_bot", stop_bot)
   bot.register_control_callback("check_inventory", trigger_manual_inventory_check)
   bot.register_control_callback("check_inventory_selection", trigger_manual_inventory_selection_test)
   bot.register_control_callback("check_shop", trigger_manual_shop_check)

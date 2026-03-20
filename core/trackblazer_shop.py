@@ -730,7 +730,9 @@ def policy_context(year=None, turn=None):
   year_text = str(year or "").strip()
   turn_text = str(turn or "").strip()
   label = ""
-  if year_text and turn_text:
+  if year_text and year_text in _TIMELINE_INDEX:
+    label = year_text
+  elif year_text and turn_text:
     combined = f"{year_text} {turn_text}"
     if combined in _TIMELINE_INDEX:
       label = combined

@@ -15,6 +15,7 @@ from utils.tools import click, sleep, get_secs, check_race_suitability, get_apti
 import utils.device_action_wrapper as device_action
 import utils.pyautogui_actions as pyautogui_actions
 import core.bot as bot
+from core.platform.window_focus import apply_configured_recognition_geometry
 
 from utils.shared import CleanDefaultDict
 import core.config as config
@@ -115,9 +116,23 @@ def _build_trackblazer_inventory_debug_entries(flow, controls, inventory):
     if template_path:
       entries.append(_inventory_template_debug_entry(f"inventory_precheck_{idx}", template_path, check))
 
+  lobby_button = flow.get("lobby_open_button") or {}
+  if lobby_button.get("template"):
+    entries.append(
+      _inventory_template_debug_entry(
+        "inventory_open_button",
+        lobby_button.get("template"),
+        lobby_button,
+        extra={
+          "match_rect": lobby_button.get("match"),
+          "search_image_path": lobby_button.get("search_image_path"),
+        },
+      )
+    )
+
   open_result = flow.get("open_result") or {}
   open_button = open_result.get("button") or {}
-  if open_button.get("template"):
+  if open_button.get("template") and not lobby_button.get("template"):
     entries.append(
       _inventory_template_debug_entry(
         "inventory_open_button",
@@ -436,7 +451,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     close_training_items_inventory,
     detect_inventory_screen,
     detect_inventory_controls,
-    detect_use_training_items_button,
+    detect_training_items_button,
   )
 
   if constants.SCENARIO_NAME not in ("mant", "trackblazer") and trigger != "manual_console":
@@ -470,14 +485,21 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
 
   inventory_screen_open, _, precheck_entries = detect_inventory_screen()
   flow["precheck"] = precheck_entries
-  use_items_button = detect_use_training_items_button()
-  flow["use_training_items_button_visible"] = bool(use_items_button)
-  flow["use_training_items_button_match"] = list(use_items_button) if use_items_button else None
+  lobby_open_button = detect_training_items_button()
+  flow["lobby_open_button"] = lobby_open_button
+  flow["use_training_items_button_visible"] = bool(
+    lobby_open_button and lobby_open_button.get("matched") and lobby_open_button.get("click_target")
+  )
+  flow["use_training_items_button_match"] = (
+    list(lobby_open_button.get("match"))
+    if lobby_open_button and lobby_open_button.get("match")
+    else None
+  )
 
   if inventory_screen_open:
     flow["opened"] = True
     flow["already_open"] = True
-  elif not use_items_button:
+  elif not flow["use_training_items_button_visible"]:
     flow["skipped"] = True
     flow["reason"] = "inventory_button_not_visible"
     debug("[STATE] Trackblazer inventory button is not visible on the lobby.")
@@ -784,6 +806,7 @@ def get_support_card_data(threshold=0.8):
   return count_result
 
 def get_training_data(year=None, check_stat_gains = False):
+  apply_configured_recognition_geometry()
   results = {}
 
   if constants.SCENARIO_NAME == "unity":
@@ -809,6 +832,8 @@ def get_training_data(year=None, check_stat_gains = False):
 def get_stat_gains(year=1, attempts=0, enable_debug=True, show_screenshot=False, region_xywh=None, scale_factor=1, secondary_stat_gains=False):
   if region_xywh is None:
     raise ValueError("region_xywh is required")
+
+  apply_configured_recognition_geometry()
   
   stat_gains={}
   #[220, 100, 60], [255, 245, 170]
@@ -982,6 +1007,7 @@ def collect_trackblazer_shop_state(state_object, trigger="automatic"):
 def get_failure_chance(region_xywh=None):
   if region_xywh is None:
     raise ValueError("region_xywh is required")
+  apply_configured_recognition_geometry()
   screenshot = device_action.screenshot(region_xywh=region_xywh)
   record_runtime_ocr_debug("training_failure", image=screenshot)
   template_scales = [0.9, 1.0, 1.1, 1.26, 1.4]

@@ -80,9 +80,27 @@ _ITEM_USE_OVERRIDES = {
     ],
   },
   "motivating_megaphone": {
-    "usage_group": "mood",
+    "usage_group": "training_burst",
     "default_priority": "HIGH",
-    "notes": "Use when mood is below GREAT.",
+    "notes": "Core burst megaphone; use on committed high-value trainings.",
+    "timing_overrides": [
+      {
+        "label": "Classic Summer burst",
+        "start": "Classic Year Early Jul",
+        "end": "Classic Year Late Aug",
+        "priority_delta": 1,
+        "sort_bonus": 200,
+        "note": "Primary training burst megaphone during summer windows.",
+      },
+      {
+        "label": "Senior Summer burst",
+        "start": "Senior Year Early Jul",
+        "end": "Senior Year Late Aug",
+        "priority_delta": 1,
+        "sort_bonus": 200,
+        "note": "Primary training burst megaphone during summer windows.",
+      },
+    ],
   },
   "reset_whistle": {
     "usage_group": "burst_setup",
@@ -431,6 +449,25 @@ def _usage_context(state_obj, action):
   support_count = _safe_int(training_data.get("total_supports"), 0)
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
+  strong_burst_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and (
+      rainbow_count > 0
+      and (
+        matching_stat_gain >= 30
+        or total_stat_gain >= 30
+        or score_value >= 6.0
+      )
+    )
+  )
+  weak_summer_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and timeline_label in _SUMMER_WINDOWS
+    and rainbow_count <= 0
+    and matching_stat_gain < 20
+    and total_stat_gain < 20
+    and score_value < 5.0
+  )
   return {
     "timeline_label": timeline_label,
     "summer_window": timeline_label in _SUMMER_WINDOWS,
@@ -466,6 +503,9 @@ def _usage_context(state_obj, action):
         or rainbow_count >= 2
       )
     ),
+    "strong_burst_training": strong_burst_training,
+    "weak_summer_training": weak_summer_training,
+    "commit_training_after_items": strong_burst_training,
     "is_tsc": timeline_label == "Finale Underway",
   }
 
@@ -518,17 +558,20 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
   if usage_group == "training_burst_specific":
     if context["action_func"] != "do_training" or target_training != context["training_name"]:
       return None
-    if not (context["high_value_training"] or context["summer_window"] or context["rainbow_count"] > 0):
-      return None
+    if not context["commit_training_after_items"]:
+      return {
+        "defer_reason": "waiting for a committed burst training on this stat",
+      }
     reason_parts = [f"matches selected {_TRAINING_LABELS.get(target_training, target_training)} training"]
-    if context["summer_window"]:
-      reason_parts.append("summer burst window")
     if context["rainbow_count"] > 0:
       reason_parts.append("rainbow training")
+    if context["summer_window"]:
+      reason_parts.append("summer burst window")
     if context["matching_stat_gain"] > 0:
       reason_parts.append(f"+{context['matching_stat_gain']} matching stat gain")
+    reason_parts.append("commit to current training after item use")
     return {
-      "candidate_score": 420 + priority_score + context["matching_stat_gain"] * 10 + context["rainbow_count"] * 25,
+      "candidate_score": 460 + priority_score + context["matching_stat_gain"] * 10 + context["rainbow_count"] * 25,
       "reason": "; ".join(reason_parts),
       "reserved_quantity": reserve_quantity,
       "use_now": True,
@@ -537,17 +580,21 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
   if usage_group == "training_burst":
     if context["action_func"] != "do_training":
       return None
-    if not (context["high_value_training"] or context["summer_window"] or context["rainbow_count"] > 0):
-      return None
-    reason_parts = ["strong training turn"]
+    if not context["commit_training_after_items"]:
+      return {
+        "defer_reason": "waiting for a committed burst training",
+      }
+    reason_parts = ["committed training burst turn"]
     if context["summer_window"]:
       reason_parts.append("summer burst window")
     if context["rainbow_count"] > 0:
       reason_parts.append("rainbow support present")
+    if context["matching_stat_gain"] > 0:
+      reason_parts.append(f"+{context['matching_stat_gain']} matching stat gain")
     if context["total_stat_gain"] > 0:
       reason_parts.append(f"total stat gain {context['total_stat_gain']}")
     return {
-      "candidate_score": 360 + priority_score + context["total_stat_gain"] * 5 + context["rainbow_count"] * 20,
+      "candidate_score": 400 + priority_score + context["total_stat_gain"] * 5 + context["rainbow_count"] * 20,
       "reason": "; ".join(reason_parts),
       "reserved_quantity": reserve_quantity,
       "use_now": True,
@@ -560,11 +607,17 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return {
         "defer_reason": "save for summer burst windows",
       }
-    if not (context["rainbow_count"] > 0 or context["very_high_value_training"]):
-      return None
+    if context["commit_training_after_items"]:
+      return {
+        "defer_reason": "current training already worth committing burst items",
+      }
+    if not context["weak_summer_training"]:
+      return {
+        "defer_reason": "current summer training is acceptable without a reroll",
+      }
     return {
-      "candidate_score": 380 + priority_score + context["rainbow_count"] * 25,
-      "reason": "summer burst setup on a rainbow or spike training turn",
+      "candidate_score": 480 + priority_score,
+      "reason": "summer reroll: no rainbow spike and gains are too weak, shuffle support cards",
       "reserved_quantity": reserve_quantity,
       "use_now": True,
     }
@@ -694,6 +747,9 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "total_stat_gain": context.get("total_stat_gain"),
       "rainbow_count": context.get("rainbow_count"),
       "support_count": context.get("support_count"),
+      "strong_burst_training": context.get("strong_burst_training"),
+      "weak_summer_training": context.get("weak_summer_training"),
+      "commit_training_after_items": context.get("commit_training_after_items"),
     },
     "candidates": candidates[: max(0, int(limit))],
     "deferred": deferred[: max(0, int(limit))],

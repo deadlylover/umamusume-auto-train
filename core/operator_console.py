@@ -86,7 +86,9 @@ class OperatorConsole:
     self._details_notebook = None
     self._planned_actions_text = None
     self._timing_text = None
+    self._summary_notebook = None
     self._summary_text = None
+    self._summary_raw_text = None
     self._training_text = None
     self._inventory_text = None
     self._ocr_debug_entries = []
@@ -97,6 +99,18 @@ class OperatorConsole:
     self._ocr_debug_asset_photo = None
     self._ocr_debug_region_photo = None
     self._preview_windows = {}
+    self._training_collapsed = False
+    self._ocr_collapsed = False
+    self._training_header = None
+    self._training_panel = None
+    self._training_toggle_label = None
+    self._ocr_header = None
+    self._ocr_panel = None
+    self._ocr_toggle_label = None
+    self._right_pane = None
+    self._planned_clicks_value = None
+    self._would_use_value = None
+    self._would_buy_value = None
     self._shop_policy_window = None
     self._shop_policy_rows = []
     self._shop_policy_context_var = None
@@ -107,7 +121,8 @@ class OperatorConsole:
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
-    self._bot_button = None
+    self._start_bot_button = None
+    self._stop_bot_button = None
     self._pause_button = None
     self._resume_button = None
     self._continue_button = None
@@ -203,8 +218,10 @@ class OperatorConsole:
     tertiary_controls = tk.Frame(actions, bg="#101418")
     tertiary_controls.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
-    self._bot_button = tk.Button(primary_controls, text="Start Bot", command=self._toggle_bot)
-    self._bot_button.pack(side=tk.LEFT, padx=(0, 8))
+    self._start_bot_button = tk.Button(primary_controls, text="Start Bot", command=self._start_bot)
+    self._start_bot_button.pack(side=tk.LEFT, padx=(0, 8))
+    self._stop_bot_button = tk.Button(primary_controls, text="Stop Bot", command=self._stop_bot)
+    self._stop_bot_button.pack(side=tk.LEFT, padx=(0, 8))
     self._pause_button = tk.Button(primary_controls, text="Pause", command=self._request_pause)
     self._pause_button.pack(side=tk.LEFT, padx=(0, 8))
     self._resume_button = tk.Button(primary_controls, text="Resume", command=self._resume_bot)
@@ -316,9 +333,34 @@ class OperatorConsole:
     right = tk.Frame(root, bg="#101418")
     right.grid(row=2, column=1, sticky="nsew", padx=(4, 8), pady=6)
     right.columnconfigure(0, weight=1)
-    right.rowconfigure(1, weight=1)
-    right.rowconfigure(3, weight=1)
-    right.rowconfigure(5, weight=3)
+    right.rowconfigure(2, weight=1)
+    right.rowconfigure(4, weight=1)
+    right.rowconfigure(6, weight=3)
+    self._right_pane = right
+
+    quick_bar = tk.Frame(right, bg="#192028", padx=6, pady=3)
+    quick_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+    quick_bar.columnconfigure(1, weight=1)
+    quick_bar.columnconfigure(3, weight=0)
+    quick_bar.columnconfigure(5, weight=0)
+    tk.Label(quick_bar, text="Clicks:", fg="#8a949e", bg="#192028", font=("Helvetica", 9)).grid(row=0, column=0, sticky="w")
+    self._planned_clicks_value = tk.Label(
+      quick_bar, text="-", fg="#d6dde5", bg="#192028",
+      anchor="w", justify="left", font=("Helvetica", 9),
+    )
+    self._planned_clicks_value.grid(row=0, column=1, sticky="w", padx=(4, 12))
+    tk.Label(quick_bar, text="Use:", fg="#8a949e", bg="#192028", font=("Helvetica", 9)).grid(row=0, column=2, sticky="w")
+    self._would_use_value = tk.Label(
+      quick_bar, text="-", fg="#d6dde5", bg="#192028",
+      anchor="w", justify="left", font=("Helvetica", 9),
+    )
+    self._would_use_value.grid(row=0, column=3, sticky="w", padx=(4, 12))
+    tk.Label(quick_bar, text="Buy:", fg="#8a949e", bg="#192028", font=("Helvetica", 9)).grid(row=0, column=4, sticky="w")
+    self._would_buy_value = tk.Label(
+      quick_bar, text="-", fg="#d6dde5", bg="#192028",
+      anchor="w", justify="left", font=("Helvetica", 9),
+    )
+    self._would_buy_value.grid(row=0, column=5, sticky="w", padx=(4, 0))
 
     for phase in PHASES:
       label = tk.Label(
@@ -341,7 +383,7 @@ class OperatorConsole:
     self._message_value = tk.StringVar(value="")
     self._error_value = tk.StringVar(value="")
     summary_header = tk.Frame(right, bg="#101418")
-    summary_header.grid(row=0, column=0, sticky="ew")
+    summary_header.grid(row=1, column=0, sticky="ew")
     summary_header.columnconfigure(0, weight=1)
     summary_header.columnconfigure(1, weight=0)
     summary_header.columnconfigure(2, weight=0)
@@ -352,9 +394,9 @@ class OperatorConsole:
     tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=1, sticky="e", padx=(0, 4))
     tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=2, sticky="e", padx=(0, 12))
     tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=4, sticky="w")
-    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=5, sticky="e")
+    tk.Button(summary_header, text="Copy Summary", command=self._copy_active_summary).grid(row=0, column=5, sticky="e")
     summary_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
-    summary_panel.grid(row=1, column=0, sticky="nsew", pady=(2, 6))
+    summary_panel.grid(row=2, column=0, sticky="nsew", pady=(2, 6))
     details_container = tk.Frame(summary_panel, bg="#101418")
     details_container.rowconfigure(0, weight=1)
     details_container.columnconfigure(0, weight=1)
@@ -391,22 +433,39 @@ class OperatorConsole:
     summary_frame = tk.Frame(summary_panel, bg="#101418")
     summary_frame.rowconfigure(0, weight=1)
     summary_frame.columnconfigure(0, weight=1)
-    self._summary_text = scrolledtext.ScrolledText(summary_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._summary_notebook = ttk.Notebook(summary_frame)
+    self._summary_notebook.grid(row=0, column=0, sticky="nsew")
+    summary_brief_frame = tk.Frame(self._summary_notebook, bg="#101418")
+    summary_brief_frame.rowconfigure(0, weight=1)
+    summary_brief_frame.columnconfigure(0, weight=1)
+    self._summary_text = scrolledtext.ScrolledText(summary_brief_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
     self._summary_text.grid(row=0, column=0, sticky="nsew")
+    summary_raw_frame = tk.Frame(self._summary_notebook, bg="#101418")
+    summary_raw_frame.rowconfigure(0, weight=1)
+    summary_raw_frame.columnconfigure(0, weight=1)
+    self._summary_raw_text = scrolledtext.ScrolledText(summary_raw_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
+    self._summary_raw_text.grid(row=0, column=0, sticky="nsew")
+    self._summary_notebook.add(summary_brief_frame, text="Compact")
+    self._summary_notebook.add(summary_raw_frame, text="Raw")
     summary_panel.add(summary_frame, minsize=220)
 
     training_header = tk.Frame(right, bg="#101418")
-    training_header.grid(row=2, column=0, sticky="ew")
-    training_header.columnconfigure(0, weight=1)
-    training_header.columnconfigure(1, weight=0)
-    training_header.columnconfigure(2, weight=1)
-    training_header.columnconfigure(3, weight=0)
-    tk.Label(training_header, text="Ranked Trainings", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    training_header.grid(row=3, column=0, sticky="ew")
+    training_header.columnconfigure(0, weight=0)
+    training_header.columnconfigure(1, weight=1)
+    training_header.columnconfigure(2, weight=0)
+    training_header.columnconfigure(3, weight=1)
+    training_header.columnconfigure(4, weight=0)
+    self._training_toggle_label = tk.Label(training_header, text="\u25bc Ranked Trainings", fg="white", bg="#101418", anchor="w", cursor="hand2")
+    self._training_toggle_label.grid(row=0, column=0, sticky="w")
+    self._training_toggle_label.bind("<Button-1>", lambda _e: self._toggle_training_section())
     tk.Button(training_header, text="Copy Trainings", command=lambda: self._copy_widget(self._training_text)).grid(row=0, column=1, sticky="e", padx=(0, 12))
     tk.Label(training_header, text="Inventory", fg="white", bg="#101418", anchor="w").grid(row=0, column=2, sticky="w")
     tk.Button(training_header, text="Copy Inventory", command=lambda: self._copy_widget(self._inventory_text)).grid(row=0, column=3, sticky="e")
+    self._training_header = training_header
     training_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
-    training_panel.grid(row=3, column=0, sticky="nsew", pady=(2, 6))
+    training_panel.grid(row=4, column=0, sticky="nsew", pady=(2, 6))
+    self._training_panel = training_panel
     training_frame = tk.Frame(training_panel, bg="#101418")
     training_frame.rowconfigure(0, weight=1)
     training_frame.columnconfigure(0, weight=1)
@@ -428,12 +487,17 @@ class OperatorConsole:
     training_panel.add(inventory_frame, minsize=220)
 
     ocr_header = tk.Frame(right, bg="#101418")
-    ocr_header.grid(row=4, column=0, sticky="ew")
-    ocr_header.columnconfigure(0, weight=1)
-    tk.Label(ocr_header, text="OCR Debug", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    ocr_header.grid(row=5, column=0, sticky="ew")
+    ocr_header.columnconfigure(0, weight=0)
+    ocr_header.columnconfigure(1, weight=1)
+    self._ocr_toggle_label = tk.Label(ocr_header, text="\u25bc OCR Debug", fg="white", bg="#101418", anchor="w", cursor="hand2")
+    self._ocr_toggle_label.grid(row=0, column=0, sticky="w")
+    self._ocr_toggle_label.bind("<Button-1>", lambda _e: self._toggle_ocr_section())
     tk.Button(ocr_header, text="Copy OCR Debug", command=self._copy_ocr_debug).grid(row=0, column=1, sticky="e")
+    self._ocr_header = ocr_header
     ocr_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
-    ocr_panel.grid(row=5, column=0, sticky="nsew", pady=(2, 6))
+    ocr_panel.grid(row=6, column=0, sticky="nsew", pady=(2, 6))
+    self._ocr_panel = ocr_panel
 
     ocr_list_frame = tk.Frame(ocr_panel, bg="#101418")
     self._ocr_debug_listbox = tk.Listbox(
@@ -467,8 +531,8 @@ class OperatorConsole:
     self._ocr_debug_meta.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
     ocr_panel.add(ocr_detail_frame, minsize=260)
 
-    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=6, column=0, sticky="ew")
-    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
+    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
+    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=8, column=0, sticky="ew")
 
   def _make_stat(self, parent, column, title):
     row = 0 if column < 5 else 1
@@ -479,6 +543,63 @@ class OperatorConsole:
     value = tk.StringVar(value="-")
     tk.Label(frame, textvariable=value, fg="white", bg="#151b22", font=("Helvetica", 10, "bold")).pack(anchor="w")
     return value
+
+  def _rebalance_right_pane_weights(self):
+    right = self._right_pane
+    if right is None:
+      return
+    training_weight = 0 if self._training_collapsed else 1
+    ocr_weight = 0 if self._ocr_collapsed else 3
+    # Give planned actions section more space when others collapse
+    planned_weight = 1 + (1 if self._training_collapsed else 0) + (3 if self._ocr_collapsed else 0)
+    right.rowconfigure(2, weight=planned_weight)
+    right.rowconfigure(4, weight=training_weight)
+    right.rowconfigure(6, weight=ocr_weight)
+
+  def _toggle_training_section(self):
+    self._training_collapsed = not self._training_collapsed
+    if self._training_collapsed:
+      self._training_toggle_label.configure(text="\u25b6 Ranked Trainings")
+      self._training_panel.grid_remove()
+    else:
+      self._training_toggle_label.configure(text="\u25bc Ranked Trainings")
+      self._training_panel.grid()
+    self._rebalance_right_pane_weights()
+
+  def _toggle_ocr_section(self):
+    self._ocr_collapsed = not self._ocr_collapsed
+    if self._ocr_collapsed:
+      self._ocr_toggle_label.configure(text="\u25b6 OCR Debug")
+      self._ocr_panel.grid_remove()
+    else:
+      self._ocr_toggle_label.configure(text="\u25bc OCR Debug")
+      self._ocr_panel.grid()
+    self._rebalance_right_pane_weights()
+
+  def _update_quick_bar(self, snapshot):
+    planned = snapshot.get("planned_actions") or {}
+    # Planned clicks
+    planned_clicks = snapshot.get("planned_clicks") or []
+    if planned_clicks:
+      labels = []
+      for click in planned_clicks:
+        if isinstance(click, dict):
+          labels.append(click.get("label") or "click")
+      clicks_text = " \u2192 ".join(labels) if labels else "-"
+    else:
+      clicks_text = "-"
+    if self._planned_clicks_value is not None:
+      self._planned_clicks_value.configure(text=clicks_text)
+    # Would use
+    would_use = planned.get("would_use") or []
+    use_text = self._format_candidate_list(would_use) if would_use else "-"
+    if self._would_use_value is not None:
+      self._would_use_value.configure(text=use_text)
+    # Would buy
+    would_buy = planned.get("would_buy") or []
+    buy_text = self._format_shop_buy_list(would_buy) if would_buy else "-"
+    if self._would_buy_value is not None:
+      self._would_buy_value.configure(text=buy_text)
 
   def _poll_queue(self):
     try:
@@ -524,7 +645,9 @@ class OperatorConsole:
       self._skill_dry_run_var.set(bool(runtime_state.get("skill_dry_run_enabled")))
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
-    self._bot_button.configure(text="Stop Bot" if runtime_state.get("is_bot_running") else "Start Bot")
+    is_bot_running = bool(runtime_state.get("is_bot_running"))
+    self._start_bot_button.configure(state=tk.DISABLED if is_bot_running else tk.NORMAL)
+    self._stop_bot_button.configure(state=tk.NORMAL if is_bot_running else tk.DISABLED)
     self._pause_button.configure(state=tk.NORMAL if runtime_state.get("is_bot_running") else tk.DISABLED)
     self._resume_button.configure(
       state=tk.NORMAL if runtime_state.get("review_waiting") or runtime_state.get("pause_requested") else tk.DISABLED
@@ -561,9 +684,11 @@ class OperatorConsole:
       },
       "planned_clicks": snapshot.get("planned_clicks"),
     }
-    self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
+    self._set_text(self._summary_text, self._format_compact_summary(snapshot))
+    self._set_text(self._summary_raw_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
     self._set_text(self._planned_actions_text, self._format_planned_actions(snapshot))
     self._set_text(self._timing_text, self._format_timing(snapshot))
+    self._update_quick_bar(snapshot)
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
     inventory_payload = {
       "summary": state_summary.get("trackblazer_inventory_summary"),
@@ -678,9 +803,468 @@ class OperatorConsole:
 
   def _format_planned_actions(self, snapshot):
     planned = snapshot.get("planned_actions") or {}
-    if not planned:
-      return "No planned actions yet"
-    return json.dumps(planned, indent=2, ensure_ascii=True)
+    lines = []
+    turn_label = snapshot.get("turn_label") or "?"
+    state_summary = snapshot.get("state_summary") or {}
+    year_label = state_summary.get("year") or turn_label
+    lines.append("Turn Discussion")
+    lines.append(f"Paste this back and we can discuss this turn. Year: {year_label}.")
+    lines.append("")
+    compact_summary = self._format_compact_summary(snapshot, include_prompt=False)
+    if compact_summary:
+      lines.append(compact_summary)
+    if planned:
+      lines.append("")
+      lines.append("Planned Actions")
+      lines.extend(self._format_planned_action_sections(planned))
+    else:
+      lines.append("")
+      lines.append("Planned Actions")
+      lines.append("  No planned actions yet")
+    planned_clicks = snapshot.get("planned_clicks") or []
+    if planned_clicks:
+      lines.append("")
+      lines.append("Planned Clicks")
+      lines.extend(self._format_planned_clicks(planned_clicks))
+    return "\n".join(lines).strip()
+
+  def _copy_active_summary(self):
+    if self._root is None:
+      return
+    widget = self._summary_text
+    if self._summary_notebook is not None and self._summary_raw_text is not None:
+      try:
+        current_tab = self._summary_notebook.select()
+        if current_tab == str(self._summary_raw_text.master):
+          widget = self._summary_raw_text
+      except Exception:
+        widget = self._summary_text
+    self._copy_widget(widget)
+
+  def _format_compact_summary(self, snapshot, include_prompt=True):
+    state_summary = snapshot.get("state_summary") or {}
+    selected_action = snapshot.get("selected_action") or {}
+    ranked_trainings = snapshot.get("ranked_trainings") or []
+    planned = snapshot.get("planned_actions") or {}
+    lines = []
+
+    if include_prompt:
+      lines.append("Compact Turn Summary")
+      lines.append("Use this for quick back-and-forth turn review.")
+      lines.append("")
+
+    lines.append(
+      "Turn: "
+      f"{snapshot.get('turn_label') or '?'}"
+      f" | Scenario: {snapshot.get('scenario_name') or '-'}"
+      f" | Intent: {snapshot.get('execution_intent') or '-'}"
+    )
+    lines.append(
+      "State: "
+      f"mood {state_summary.get('current_mood') or '-'}"
+      f" | energy {self._format_ratio(state_summary.get('energy_level'), state_summary.get('max_energy'))}"
+      f" | backend {state_summary.get('control_backend') or '-'}"
+    )
+
+    criteria = state_summary.get("criteria")
+    if criteria:
+      lines.append(f"Criteria: {criteria}")
+
+    lines.append(self._format_selected_action_line(selected_action))
+
+    rival_line = self._format_rival_line(selected_action, state_summary)
+    if rival_line:
+      lines.append(rival_line)
+
+    training_lines = self._format_training_lines(ranked_trainings, selected_action)
+    if training_lines:
+      lines.append("")
+      lines.append("Trainings")
+      lines.extend(training_lines)
+
+    inventory_lines = self._format_inventory_lines(planned)
+    if inventory_lines:
+      lines.append("")
+      lines.append("Inventory")
+      lines.extend(inventory_lines)
+
+    shop_lines = self._format_shop_lines(planned, state_summary)
+    if shop_lines:
+      lines.append("")
+      lines.append("Shop")
+      lines.extend(shop_lines)
+
+    timing_lines = self._format_compact_timing_lines(state_summary)
+    if timing_lines:
+      lines.append("")
+      lines.append("Timing")
+      lines.extend(timing_lines)
+
+    notes = snapshot.get("reasoning_notes")
+    if notes:
+      lines.append("")
+      lines.append(f"Notes: {notes}")
+
+    return "\n".join(lines).strip()
+
+  def _format_selected_action_line(self, selected_action):
+    action_name = selected_action.get("func") or "-"
+    if action_name == "do_training":
+      training_name = selected_action.get("training_name") or "unknown"
+      parts = [f"Action: train {training_name}"]
+      score_tuple = selected_action.get("score_tuple") or ()
+      if score_tuple:
+        parts.append(f"score {self._format_number(score_tuple[0], digits=3)}")
+      gains = selected_action.get("stat_gains") or {}
+      total_gain = sum(self._safe_int(value) for value in gains.values())
+      matching_gain = self._safe_int(gains.get(training_name))
+      if matching_gain:
+        parts.append(f"{training_name}+{matching_gain}")
+      if total_gain:
+        parts.append(f"total+{total_gain}")
+      rainbows = selected_action.get("total_rainbow_friends")
+      supports = selected_action.get("total_supports")
+      if rainbows is not None:
+        parts.append(f"rainbows {rainbows}")
+      if supports is not None:
+        parts.append(f"supports {supports}")
+      failure = selected_action.get("failure")
+      if failure is not None:
+        parts.append(f"fail {self._format_number(failure)}%")
+      return " | ".join(parts)
+    if action_name == "do_race":
+      race_name = selected_action.get("race_name") or "unspecified"
+      return f"Action: race {race_name}"
+    return f"Action: {action_name}"
+
+  def _format_rival_line(self, selected_action, state_summary):
+    rival_scout = selected_action.get("rival_scout") or {}
+    if isinstance(rival_scout, dict) and rival_scout:
+      rival_found = rival_scout.get("rival_found")
+      if rival_found is True:
+        return "Race: rival race found"
+      if rival_found is False:
+        return "Race: rival race not found"
+    mission = state_summary.get("race_mission_available")
+    if mission is not None:
+      return f"Race mission available: {mission}"
+    return ""
+
+  def _format_training_lines(self, ranked_trainings, selected_action):
+    if not ranked_trainings:
+      return []
+    entries = []
+    for entry in ranked_trainings:
+      if not isinstance(entry, dict):
+        continue
+      score_tuple = entry.get("score_tuple") or ()
+      score_value = score_tuple[0] if score_tuple else None
+      gains = entry.get("stat_gains") or {}
+      total_gain = sum(self._safe_int(value) for value in gains.values())
+      entries.append(
+        {
+          "name": entry.get("name") or "?",
+          "score": self._safe_float(score_value),
+          "failure": entry.get("failure"),
+          "supports": entry.get("total_supports"),
+          "rainbows": entry.get("total_rainbow_friends"),
+          "total_gain": total_gain,
+          "stat_gains": gains,
+          "filtered_out": bool(entry.get("filtered_out")),
+          "excluded_reason": entry.get("excluded_reason"),
+          "max_allowed_failure": entry.get("max_allowed_failure"),
+        }
+      )
+    entries.sort(
+      key=lambda item: (
+        1 if not item["filtered_out"] else 0,
+        item["score"] if item["score"] is not None else float("-inf"),
+        item["total_gain"],
+      ),
+      reverse=True,
+    )
+    selected_name = selected_action.get("training_name")
+    lines = []
+    for idx, entry in enumerate(entries, start=1):
+      marker = "*" if entry["name"] == selected_name else " "
+      parts = [f"  {marker} {idx}. {entry['name']}"]
+      if entry["score"] is not None:
+        parts.append(f"score {self._format_number(entry['score'], digits=3)}")
+      elif entry.get("filtered_out"):
+        parts.append("discarded")
+      if entry["total_gain"]:
+        parts.append(f"total+{entry['total_gain']}")
+      matching_gain = self._safe_int((entry.get("stat_gains") or {}).get(entry["name"]))
+      if matching_gain:
+        parts.append(f"{entry['name']}+{matching_gain}")
+      if entry.get("rainbows") is not None:
+        parts.append(f"rainbows {entry['rainbows']}")
+      if entry.get("supports") is not None:
+        parts.append(f"supports {entry['supports']}")
+      if entry.get("failure") is not None:
+        parts.append(f"fail {self._format_number(entry['failure'])}%")
+      if entry.get("filtered_out") and entry.get("max_allowed_failure") is not None:
+        parts.append(f"limit {self._format_number(entry['max_allowed_failure'])}%")
+      if entry.get("excluded_reason"):
+        parts.append(entry["excluded_reason"])
+      lines.append(" | ".join(parts))
+    return lines
+
+  def _format_inventory_lines(self, planned):
+    inventory_scan = planned.get("inventory_scan") or {}
+    lines = []
+    status = inventory_scan.get("status") or "unknown"
+    button_visible = inventory_scan.get("button_visible")
+    status_line = f"  Scan: {status}"
+    if button_visible is not None:
+      status_line += f" | button visible: {button_visible}"
+    lines.append(status_line)
+
+    detected = inventory_scan.get("items_detected") or []
+    held = self._collect_held_quantities(planned)
+    if detected:
+      lines.append(f"  Held: {self._format_inventory_items(detected, held)}")
+
+    would_use = planned.get("would_use") or []
+    if would_use:
+      lines.append(f"  Use now: {self._format_candidate_list(would_use)}")
+    else:
+      lines.append("  Use now: none")
+
+    deferred = planned.get("deferred_use") or []
+    if deferred:
+      lines.append(f"  Deferred: {self._format_candidate_list(deferred, include_reason=True)}")
+    return lines
+
+  def _format_shop_lines(self, planned, state_summary):
+    shop_scan = planned.get("shop_scan") or {}
+    lines = []
+    status = shop_scan.get("status") or "unknown"
+    shop_coins = shop_scan.get("shop_coins")
+    status_line = f"  Scan: {status}"
+    if shop_coins not in (None, ""):
+      status_line += f" | coins: {shop_coins}"
+    lines.append(status_line)
+
+    would_buy = planned.get("would_buy") or []
+    if would_buy:
+      lines.append(f"  Buy: {self._format_shop_buy_list(would_buy)}")
+    else:
+      lines.append("  Buy: none")
+
+    priority_preview = state_summary.get("trackblazer_shop_priority_preview") or []
+    if priority_preview:
+      preview_names = [item.get("name") for item in priority_preview if item.get("name")]
+      if preview_names:
+        lines.append(f"  Priorities: {', '.join(preview_names)}")
+    return lines
+
+  def _format_compact_timing_lines(self, state_summary):
+    lines = []
+    inventory_flow = (
+      state_summary.get("trackblazer_inventory_pre_shop_flow")
+      or state_summary.get("trackblazer_inventory_flow")
+      or {}
+    )
+    shop_flow = state_summary.get("trackblazer_shop_flow") or {}
+    skill_flow = state_summary.get("skill_purchase_flow") or {}
+    for label, flow in (
+      ("inventory", inventory_flow),
+      ("shop", shop_flow),
+      ("skill", skill_flow),
+    ):
+      if not isinstance(flow, dict):
+        continue
+      total = flow.get("timing_total")
+      if total is None:
+        continue
+      parts = [f"  {label}: {self._format_number(total, digits=3)}s"]
+      for key in ("timing_open", "timing_scan", "timing_close"):
+        value = flow.get(key)
+        if value is not None:
+          parts.append(f"{key.replace('timing_', '')} {self._format_number(value, digits=3)}s")
+      lines.append(" | ".join(parts))
+    return lines
+
+  def _format_planned_action_sections(self, planned):
+    lines = []
+    for section_name, payload in (
+      ("Inventory Scan", planned.get("inventory_scan") or {}),
+      ("Would Use", planned.get("would_use") or []),
+      ("Deferred Use", planned.get("deferred_use") or []),
+      ("Shop Scan", planned.get("shop_scan") or {}),
+      ("Would Buy", planned.get("would_buy") or []),
+    ):
+      lines.append(f"  {section_name}:")
+      if isinstance(payload, dict):
+        summary = self._format_short_mapping(payload)
+        if summary:
+          lines.extend([f"    {line}" for line in summary])
+        else:
+          lines.append("    none")
+      elif isinstance(payload, list):
+        if payload:
+          for line in self._format_short_list(payload):
+            lines.append(f"    {line}")
+        else:
+          lines.append("    none")
+    return lines
+
+  def _format_planned_clicks(self, planned_clicks):
+    lines = []
+    for idx, click in enumerate(planned_clicks, start=1):
+      if not isinstance(click, dict):
+        continue
+      line = f"  {idx}. {click.get('label') or 'click'}"
+      note_parts = []
+      if click.get("template"):
+        note_parts.append(click["template"])
+      if click.get("target"):
+        note_parts.append(f"target={click['target']}")
+      if click.get("region_key"):
+        note_parts.append(f"region={click['region_key']}")
+      if click.get("note"):
+        note_parts.append(click["note"])
+      if note_parts:
+        line += f" | {' | '.join(note_parts)}"
+      lines.append(line)
+    return lines
+
+  def _format_short_mapping(self, payload):
+    lines = []
+    for key, value in payload.items():
+      if value in (None, "", [], {}):
+        continue
+      if isinstance(value, list):
+        rendered = ", ".join(self._stringify_list_item(item) for item in value)
+        lines.append(f"{key}: {rendered}")
+      elif isinstance(value, dict):
+        parts = []
+        for sub_key, sub_value in value.items():
+          if sub_value in (None, "", [], {}):
+            continue
+          parts.append(f"{sub_key}={sub_value}")
+        if parts:
+          lines.append(f"{key}: {'; '.join(parts)}")
+      else:
+        lines.append(f"{key}: {value}")
+    return lines
+
+  def _format_short_list(self, payload):
+    lines = []
+    for item in payload:
+      if isinstance(item, dict):
+        name = item.get("name") or item.get("key") or "item"
+        entry = name
+        details = []
+        priority = item.get("priority")
+        if priority:
+          details.append(f"policy={priority}")
+        target_training = item.get("target_training")
+        if target_training:
+          details.append(f"target={target_training}")
+        usage_group = item.get("usage_group")
+        if usage_group:
+          details.append(f"group={usage_group}")
+        held_quantity = item.get("held_quantity")
+        max_quantity = item.get("max_quantity")
+        if held_quantity is not None and max_quantity not in (None, "", 0):
+          details.append(f"hold {held_quantity}/{max_quantity}")
+        reserve_quantity = item.get("reserve_quantity")
+        if reserve_quantity not in (None, "", 0):
+          details.append(f"reserve {reserve_quantity}")
+        cost = item.get("cost")
+        if cost not in (None, ""):
+          details.append(f"cost {cost}")
+        if not details:
+          reason = item.get("reason")
+          if reason:
+            details.append(reason)
+        if details:
+          entry += f" | {'; '.join(str(detail) for detail in details)}"
+        lines.append(entry)
+      else:
+        lines.append(str(item))
+    return lines
+
+  def _collect_held_quantities(self, planned):
+    held = {}
+    for entry in (planned.get("would_use") or []) + (planned.get("deferred_use") or []):
+      if not isinstance(entry, dict):
+        continue
+      item_key = entry.get("key")
+      if item_key and entry.get("held_quantity") is not None:
+        held[item_key] = entry.get("held_quantity")
+    return held
+
+  def _format_inventory_items(self, item_keys, held_quantities):
+    rendered = []
+    for item_key in item_keys:
+      count = held_quantities.get(item_key)
+      label = self._humanize_item_name(item_key)
+      if count not in (None, ""):
+        label += f" x{count}"
+      rendered.append(label)
+    return ", ".join(rendered)
+
+  def _format_candidate_list(self, items, include_reason=False):
+    rendered = []
+    for item in items:
+      if not isinstance(item, dict):
+        continue
+      label = item.get("name") or self._humanize_item_name(item.get("key"))
+      if include_reason and item.get("reason"):
+        label += f" ({item['reason']})"
+      rendered.append(label)
+    return ", ".join(rendered) if rendered else "none"
+
+  def _format_shop_buy_list(self, items):
+    rendered = []
+    for item in items:
+      if not isinstance(item, dict):
+        continue
+      label = item.get("name") or self._humanize_item_name(item.get("key"))
+      cost = item.get("cost")
+      if cost is not None:
+        label += f" ({cost})"
+      rendered.append(label)
+    return ", ".join(rendered) if rendered else "none"
+
+  def _humanize_item_name(self, value):
+    text = str(value or "").replace("_", " ").strip()
+    return text.title() if text else "Unknown"
+
+  def _stringify_list_item(self, value):
+    if isinstance(value, dict):
+      return str(value.get("name") or value.get("key") or value)
+    return str(value)
+
+  def _format_ratio(self, left, right):
+    return f"{self._format_number(left)}/{self._format_number(right)}"
+
+  def _format_number(self, value, digits=1):
+    if value is None:
+      return "?"
+    try:
+      number = float(value)
+    except (TypeError, ValueError):
+      return str(value)
+    if digits <= 0:
+      return str(int(round(number)))
+    text = f"{number:.{digits}f}"
+    return text.rstrip("0").rstrip(".")
+
+  def _safe_int(self, value, default_value=0):
+    try:
+      return int(value)
+    except (TypeError, ValueError):
+      return default_value
+
+  def _safe_float(self, value, default_value=None):
+    try:
+      return float(value)
+    except (TypeError, ValueError):
+      return default_value
 
   def _format_timing_mapping(self, mapping, indent="  "):
     lines = []
@@ -1034,8 +1618,12 @@ class OperatorConsole:
   def _launch_adjuster(self):
     threading.Thread(target=self._launch_adjuster_background, daemon=True).start()
 
-  def _toggle_bot(self):
-    bot.invoke_control_callback("toggle_bot")
+  def _start_bot(self):
+    bot.invoke_control_callback("start_bot")
+    self.publish()
+
+  def _stop_bot(self):
+    bot.invoke_control_callback("stop_bot")
     self.publish()
 
   def _run_phase_check(self, callback_name):

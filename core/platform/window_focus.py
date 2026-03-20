@@ -157,6 +157,46 @@ def focus_target_window() -> bool:
   return _focus_default_windows()
 
 
+def apply_configured_recognition_geometry(force_overrides: bool = False) -> None:
+  """Apply configured OCR offsets/overrides without focusing or clicking."""
+
+  settings = getattr(config, "MAC_AIR_SETTINGS", {}) or {}
+  apply_offset_x = settings.get("apply_offset_x")
+  offset_x = settings.get("offset_x")
+  apply_offset_y = settings.get("apply_offset_y")
+  offset_y = settings.get("offset_y")
+  apply_recognition_offset = settings.get("apply_recognition_offset", False)
+  recognition_offset_x = settings.get("recognition_offset_x", 0)
+  recognition_offset_y = settings.get("recognition_offset_y", 0)
+
+  legacy_apply = settings.get("apply_constant_offset")
+  legacy_offset = settings.get("constant_offset")
+
+  if apply_offset_x is None:
+    apply_offset_x = legacy_apply if legacy_apply is not None else True
+  if offset_x is None:
+    offset_x = legacy_offset if legacy_offset is not None else 405
+  if apply_offset_y is None:
+    apply_offset_y = False
+  if offset_y is None:
+    offset_y = 0
+
+  x_shift = _coerce_int(offset_x, 0) if apply_offset_x else 0
+  y_shift = _coerce_int(offset_y, 0) if apply_offset_y else 0
+  if x_shift or y_shift:
+    constants.adjust_constants_offsets(x_shift, y_shift)
+
+  if apply_recognition_offset:
+    constants.apply_recognition_offsets(
+      _coerce_int(recognition_offset_x, 0),
+      _coerce_int(recognition_offset_y, 0),
+    )
+
+  overrides_config = getattr(config, "REGION_ADJUSTER_CONFIG", {}) or {}
+  _, _, overrides_path = resolve_region_adjuster_profiles(overrides_config)
+  constants.apply_region_overrides(overrides_path=overrides_path, force=force_overrides)
+
+
 def _focus_default_windows() -> bool:
   if gw is None:
     error("pygetwindow is not available; cannot control emulator window.")

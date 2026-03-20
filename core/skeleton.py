@@ -1,3 +1,4 @@
+import copy
 import pyautogui
 import os
 import cv2
@@ -85,12 +86,42 @@ SCENARIO_NAME_ALIASES = {
 }
 MAX_SCENARIO_DETECTION_ATTEMPTS = 5
 runtime_debug_counter = 0
+TRACKBLAZER_INVENTORY_STATE_KEYS = (
+  "trackblazer_inventory",
+  "trackblazer_inventory_controls",
+  "trackblazer_inventory_summary",
+  "trackblazer_inventory_flow",
+)
+last_trackblazer_shop_refresh_turn = None
 
 
 def _canonicalize_scenario_name(name):
   if not name:
     return ""
   return SCENARIO_NAME_ALIASES.get(name, name)
+
+
+def _copy_trackblazer_inventory_snapshot(state_obj, prefix="trackblazer_inventory_pre_shop"):
+  if not isinstance(state_obj, dict):
+    return
+  for key in TRACKBLAZER_INVENTORY_STATE_KEYS:
+    suffix = key.replace("trackblazer_inventory", "", 1)
+    state_obj[f"{prefix}{suffix}"] = copy.deepcopy(state_obj.get(key))
+
+
+def _merge_trackblazer_shop_result(state_obj, shop_result):
+  if not isinstance(state_obj, dict) or not isinstance(shop_result, dict):
+    return state_obj
+  for key in ("trackblazer_shop_items", "trackblazer_shop_summary", "trackblazer_shop_flow"):
+    if key in shop_result:
+      state_obj[key] = shop_result[key]
+  return state_obj
+
+
+def _trackblazer_turn_key(state_obj):
+  if not isinstance(state_obj, dict):
+    return None
+  return (state_obj.get("year"), state_obj.get("turn"))
 
 
 def _scenario_banner_templates():
@@ -637,11 +668,26 @@ def _base_ocr_debug_entries(state_obj):
   return [_apply_runtime_ocr_debug(entry, state_obj) for entry in entries]
 
 
+def _action_value(action, key, default=None):
+  if isinstance(action, dict):
+    return action.get(key, default)
+  if hasattr(action, "get"):
+    return action.get(key, default)
+  return default
+
+
+def _action_func(action):
+  if isinstance(action, dict):
+    return action.get("func")
+  return getattr(action, "func", None)
+
+
 def _planned_clicks_for_action(action):
-  if not hasattr(action, "func"):
+  action_func = _action_func(action)
+  if not action_func:
     return []
-  if action.func == "do_training":
-    training_name = action.get("training_name")
+  if action_func == "do_training":
+    training_name = _action_value(action, "training_name")
     return [
       _planned_click("Open training menu", "assets/buttons/training_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
@@ -650,34 +696,64 @@ def _planned_clicks_for_action(action):
         note="Double-click training slot",
       ),
     ]
-  if action.func == "do_rest":
+  if action_func == "do_rest":
     return [
       _planned_click("Click rest button", "assets/buttons/rest_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer rest button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
-  if action.func == "do_recreation":
+  if action_func == "do_recreation":
     return [
       _planned_click("Open recreation menu", "assets/buttons/recreation_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer recreation button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
-  if action.func == "do_infirmary":
+  if action_func == "do_infirmary":
     return [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
-  if action.func == "do_race":
-    race_name = action.get("race_name")
-    race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else action.get("race_image_path") or "assets/ui/match_track.png"
+  if action_func == "do_race":
+    race_name = _action_value(action, "race_name")
+    race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
     return [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan/select race entry", race_template, region_key="RACE_LIST_BOX_BBOX"),
       _planned_click("Confirm race", "assets/buttons/race_btn.png"),
       _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
     ]
-  if action.func == "buy_skill":
+  if action_func == "buy_skill":
     return [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR and template scan only"),
       _planned_click("Confirm selected skills", "assets/buttons/confirm_btn.png"),
       _planned_click("Learn selected skills", "assets/buttons/learn_btn.png"),
       _planned_click("Exit skill screen", "assets/buttons/back_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+    ]
+  if action_func == "check_inventory":
+    return [
+      _planned_click("Open use-items inventory", region_key="SCREEN_BOTTOM_BBOX", note="Locate the Trackblazer use-items entry button"),
+      _planned_click("Scan inventory item rows", region_key="MANT_INVENTORY_ITEMS_REGION", note="OCR and native-scale template scan only"),
+      _planned_click("Verify inventory controls", region_key="GAME_WINDOW_BBOX", note="Check use/close button visibility"),
+      _planned_click("Close inventory", note="Dismiss the inventory overlay after scan"),
+    ]
+  if action_func == "prepare_training_items_for_use":
+    use_items = bool(_action_value(action, "use_items"))
+    clicks = [
+      _planned_click("Open use-items inventory", region_key="SCREEN_BOTTOM_BBOX", note="Locate the Trackblazer use-items entry button"),
+      _planned_click("Scan inventory item rows", region_key="MANT_INVENTORY_ITEMS_REGION", note="Pair items to increment controls"),
+      _planned_click("Increment Vita 65", note="Select one Vita 65 for confirm-use verification"),
+      _planned_click("Increment Reset Whistle", note="Select one Reset Whistle for confirm-use verification"),
+      _planned_click("Verify confirm-use controls", note="Ensure confirm/cancel controls are available"),
+    ]
+    clicks.append(
+      _planned_click(
+        "Press confirm-use scaffold" if use_items else "Close inventory without confirm-use",
+        note="Manual operator-console selection test final step",
+      )
+    )
+    return clicks
+  if action_func == "check_shop":
+    return [
+      _planned_click("Open Trackblazer shop", region_key="GAME_WINDOW_BBOX", note="Locate the shop entry button"),
+      _planned_click("Scan shop coin display", region_key="MANT_SHOP_COIN_REGION", note="OCR coin count"),
+      _planned_click("Scan shop item rows", region_key="GAME_WINDOW_BBOX", note="Template scan for visible shop stock"),
+      _planned_click("Close shop", note="Dismiss the shop overlay after scan"),
     ]
   return []
 
@@ -689,10 +765,12 @@ def _build_trackblazer_planned_actions(state_obj, action):
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   inventory_flow = state_obj.get("trackblazer_inventory_flow") or {}
+  pre_shop_inventory_summary = state_obj.get("trackblazer_inventory_pre_shop_summary") or inventory_summary
+  pre_shop_inventory_flow = state_obj.get("trackblazer_inventory_pre_shop_flow") or inventory_flow
   shop_items = list(state_obj.get("trackblazer_shop_items") or [])
   shop_summary = state_obj.get("trackblazer_shop_summary") or {}
   shop_flow = state_obj.get("trackblazer_shop_flow") or {}
-  held_quantities = inventory_summary.get("held_quantities") or {}
+  held_quantities = pre_shop_inventory_summary.get("held_quantities") or {}
   item_use_plan = plan_item_usage(
     policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
     state_obj=state_obj,
@@ -706,7 +784,7 @@ def _build_trackblazer_planned_actions(state_obj, action):
   )
 
   would_use = list(item_use_plan.get("candidates") or [])
-  actionable_items = list(inventory_summary.get("actionable_items") or [])
+  actionable_items = list(pre_shop_inventory_summary.get("actionable_items") or [])
 
   detected_shop_keys = set(shop_items or shop_summary.get("items_detected") or [])
   would_buy = []
@@ -746,9 +824,9 @@ def _build_trackblazer_planned_actions(state_obj, action):
   would_buy = would_buy[:8]
 
   inventory_status = "unknown"
-  if inventory_flow.get("opened") or inventory_flow.get("already_open"):
+  if pre_shop_inventory_flow.get("opened") or pre_shop_inventory_flow.get("already_open"):
     inventory_status = "scanned"
-  elif inventory_flow.get("skipped"):
+  elif pre_shop_inventory_flow.get("skipped"):
     inventory_status = "skipped"
 
   shop_status = "unknown"
@@ -760,9 +838,9 @@ def _build_trackblazer_planned_actions(state_obj, action):
   return {
     "inventory_scan": {
       "status": inventory_status,
-      "reason": inventory_flow.get("reason") or "",
-      "button_visible": inventory_flow.get("use_training_items_button_visible"),
-      "items_detected": inventory_summary.get("items_detected") or [],
+      "reason": pre_shop_inventory_flow.get("reason") or "",
+      "button_visible": pre_shop_inventory_flow.get("use_training_items_button_visible"),
+      "items_detected": pre_shop_inventory_summary.get("items_detected") or [],
       "actionable_items": actionable_items,
     },
     "would_use": would_use,
@@ -861,6 +939,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
     state_summary["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
     state_summary["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
+    state_summary["trackblazer_inventory_pre_shop_summary"] = state_obj.get("trackblazer_inventory_pre_shop_summary")
+    state_summary["trackblazer_inventory_pre_shop_flow"] = state_obj.get("trackblazer_inventory_pre_shop_flow")
     state_summary["trackblazer_shop_summary"] = state_obj.get("trackblazer_shop_summary")
     state_summary["trackblazer_shop_flow"] = state_obj.get("trackblazer_shop_flow")
     shop_policy_context = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
@@ -874,44 +954,23 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
   selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,
+    "training_function": action.get("training_function") if hasattr(action, "get") else None,
     "race_name": action.get("race_name") if hasattr(action, "get") else None,
     "score_tuple": action.get("training_data", {}).get("score_tuple") if hasattr(action, "get") else None,
+    "stat_gains": action.get("training_data", {}).get("stat_gains") if hasattr(action, "get") else None,
+    "failure": action.get("training_data", {}).get("failure") if hasattr(action, "get") else None,
+    "total_supports": action.get("training_data", {}).get("total_supports") if hasattr(action, "get") else None,
+    "total_rainbow_friends": action.get("training_data", {}).get("total_rainbow_friends") if hasattr(action, "get") else None,
+    "prefer_rival_race": action.get("prefer_rival_race") if hasattr(action, "get") else None,
+    "rival_scout": action.get("rival_scout") if hasattr(action, "get") else None,
   }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
-  if not available_trainings and isinstance(state_obj, dict):
-    raw_training_results = state_obj.get("training_results", {}) or {}
-    for training_name, training_data in raw_training_results.items():
-      ranked_trainings.append(
-        {
-          "name": training_name,
-          "score_tuple": None,
-          "failure": training_data.get("failure"),
-          "max_allowed_failure": training_data.get("max_allowed_failure"),
-          "risk_increase": training_data.get("risk_increase", 0),
-          "total_supports": training_data.get("total_supports"),
-          "total_rainbow_friends": None,
-          "total_friendship_increases": None,
-          "stat_gains": training_data.get("stat_gains"),
-          "unity_gauge_fills": training_data.get("unity_gauge_fills"),
-          "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
-        }
-      )
-  for training_name, training_data in available_trainings.items():
-    ranked_trainings.append(
-      {
-        "name": training_name,
-        "score_tuple": training_data.get("score_tuple"),
-        "failure": training_data.get("failure"),
-        "max_allowed_failure": training_data.get("max_allowed_failure"),
-        "risk_increase": training_data.get("risk_increase", 0),
-        "total_supports": training_data.get("total_supports"),
-        "total_rainbow_friends": training_data.get("total_rainbow_friends"),
-        "total_friendship_increases": training_data.get("total_friendship_increases"),
-        "stat_gains": training_data.get("stat_gains"),
-        "unity_gauge_fills": training_data.get("unity_gauge_fills"),
-        "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
-      }
+  if isinstance(state_obj, dict):
+    ranked_trainings = _build_ranked_training_snapshot(
+      state_obj=state_obj,
+      available_trainings=available_trainings,
+      training_function=selected_action.get("training_function"),
     )
   return {
     "scenario_name": constants.SCENARIO_NAME or "default",
@@ -924,6 +983,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "available_actions": list(getattr(action, "available_actions", [])),
     "ranked_trainings": ranked_trainings,
     "trackblazer_inventory": state_obj.get("trackblazer_inventory") if isinstance(state_obj, dict) else None,
+    "trackblazer_inventory_pre_shop": state_obj.get("trackblazer_inventory_pre_shop") if isinstance(state_obj, dict) else None,
     "trackblazer_shop_items": state_obj.get("trackblazer_shop_items") if isinstance(state_obj, dict) else None,
     "planned_actions": _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {},
     "reasoning_notes": reasoning_notes or "",
@@ -932,6 +992,97 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "ocr_debug": debug_entries,
     "planned_clicks": planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action),
   }
+
+
+def _get_training_filter_settings(training_function):
+  settings = {
+    "use_risk_taking": False,
+    "check_stat_caps": False,
+  }
+  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain"):
+    settings["use_risk_taking"] = True
+  if training_function in ("rainbow_training", "most_support_cards", "meta_training"):
+    settings["check_stat_caps"] = True
+  return settings
+
+
+def _summarize_training_exclusion(training_name, training_data, state_obj, training_function):
+  settings = _get_training_filter_settings(training_function)
+  current_stats = state_obj.get("current_stats") or {}
+  current_stat = current_stats.get(training_name)
+  stat_cap = config.STAT_CAPS.get(training_name)
+  failure = training_data.get("failure")
+  risk_increase = 0
+  max_allowed_failure = config.MAX_FAILURE
+
+  if settings["use_risk_taking"]:
+    risk_taking_key = None
+    if isinstance(training_function, str):
+      strategy = Strategy()
+      training_template = strategy.get_training_template(state_obj) or {}
+      risk_taking_key = training_template.get("risk_taking_set")
+    risk_taking_set = config.RISK_TAKING.get(risk_taking_key, {}) if risk_taking_key else {}
+    if risk_taking_set:
+      from core.trainings import calculate_risk_increase
+      risk_increase = calculate_risk_increase(training_data, risk_taking_set)
+      max_allowed_failure += risk_increase
+
+  reason = "filtered"
+  if settings["check_stat_caps"] and current_stat is not None and stat_cap is not None and current_stat >= stat_cap:
+    reason = f"stat cap ({current_stat}/{stat_cap})"
+  elif failure is not None and int(failure) > max_allowed_failure:
+    reason = f"fail {int(failure)}% > {int(max_allowed_failure)}%"
+  elif training_function:
+    reason = f"not selected by {training_function}"
+
+  return max_allowed_failure, risk_increase, reason
+
+
+def _build_ranked_training_snapshot(state_obj, available_trainings, training_function):
+  raw_training_results = state_obj.get("training_results", {}) or {}
+  merged_trainings = CleanDefaultDict()
+
+  for training_name, training_data in raw_training_results.items():
+    max_allowed_failure, risk_increase, exclusion_reason = _summarize_training_exclusion(
+      training_name=training_name,
+      training_data=training_data,
+      state_obj=state_obj,
+      training_function=training_function,
+    )
+    merged_trainings[training_name] = {
+      "name": training_name,
+      "score_tuple": None,
+      "failure": training_data.get("failure"),
+      "max_allowed_failure": max_allowed_failure,
+      "risk_increase": risk_increase,
+      "total_supports": training_data.get("total_supports"),
+      "total_rainbow_friends": None,
+      "total_friendship_increases": None,
+      "stat_gains": training_data.get("stat_gains"),
+      "unity_gauge_fills": training_data.get("unity_gauge_fills"),
+      "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+      "filtered_out": True,
+      "excluded_reason": exclusion_reason,
+    }
+
+  for training_name, training_data in available_trainings.items():
+    merged_trainings[training_name] = {
+      "name": training_name,
+      "score_tuple": training_data.get("score_tuple"),
+      "failure": training_data.get("failure"),
+      "max_allowed_failure": training_data.get("max_allowed_failure"),
+      "risk_increase": training_data.get("risk_increase", 0),
+      "total_supports": training_data.get("total_supports"),
+      "total_rainbow_friends": training_data.get("total_rainbow_friends"),
+      "total_friendship_increases": training_data.get("total_friendship_increases"),
+      "stat_gains": training_data.get("stat_gains"),
+      "unity_gauge_fills": training_data.get("unity_gauge_fills"),
+      "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+      "filtered_out": False,
+      "excluded_reason": None,
+    }
+
+  return list(merged_trainings.values())
 
 
 def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_notes=None, available_actions=None):
@@ -1203,10 +1354,11 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       return "failed"
 
 def career_lobby(dry_run_turn=False):
-  global last_state, action_count, non_match_count, scenario_detection_attempts
+  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn
   non_match_count = 0
   action_count=0
   scenario_detection_attempts = 0
+  last_trackblazer_shop_refresh_turn = None
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
   constants.SCENARIO_NAME = ""
@@ -1409,14 +1561,32 @@ def career_lobby(dry_run_turn=False):
           state_obj,
           allow_open_non_execute=execution_intent in ("check_only", "preview_clicks"),
         )
+        _copy_trackblazer_inventory_snapshot(state_obj)
         if execution_intent == "check_only":
-          update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
-          from scenarios.trackblazer import check_trackblazer_shop_inventory
-          shop_result = check_trackblazer_shop_inventory(trigger="automatic")
-          if isinstance(shop_result, dict):
-            for key in ("trackblazer_shop_items", "trackblazer_shop_summary", "trackblazer_shop_flow"):
-              if key in shop_result:
-                state_obj[key] = shop_result[key]
+          current_trackblazer_turn = _trackblazer_turn_key(state_obj)
+          if current_trackblazer_turn != last_trackblazer_shop_refresh_turn:
+            update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
+            from scenarios.trackblazer import check_trackblazer_shop_inventory
+            shop_result = check_trackblazer_shop_inventory(trigger="automatic")
+            _merge_trackblazer_shop_result(state_obj, shop_result)
+            shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
+            if shop_flow.get("entered") and shop_flow.get("closed"):
+              update_operator_snapshot(
+                phase="checking_inventory",
+                message="Refreshing Trackblazer inventory after shop.",
+                sub_phase="scan_items_post_shop",
+              )
+              state_obj = collect_trackblazer_inventory(
+                state_obj,
+                allow_open_non_execute=True,
+                trigger="post_shop_refresh",
+              )
+              last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+          else:
+            info(
+              "[TB_SHOP] Skipping automatic shop recheck for this turn; "
+              f"already refreshed inventory after shop for {current_trackblazer_turn}."
+            )
 
       if state_obj["turn"] == "Race Day":
         action.func = "do_race"
