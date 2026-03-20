@@ -1189,14 +1189,19 @@ def get_aptitudes():
   h, w = image.shape[:2]
   for key, (xr, yr, wr, hr) in APTITUDE_BOX_RATIOS.items():
     x, y, ww, hh = int(xr*w), int(yr*h), int(wr*w), int(hr*h)
-    cropped_image = np.array(image[y:y+hh, x:x+ww])
+    # Extend crop by 2px to avoid clipping bottom/right edges due to ratio rounding
+    cropped_image = np.array(image[y:min(y+hh+2, h), x:min(x+ww+2, w)])
     record_runtime_ocr_debug(f"aptitude_{key}", image=cropped_image)
-    matches = device_action.multi_match_templates(constants.APTITUDE_IMAGES, cropped_image, stop_after_first_match=True)
-    for name, match in matches.items():
-      if match:
-        aptitudes[key] = name
-        if config.VERBOSE_ACTIONS:
-          info(f"[APT] {key} -> {name}")
+    best_name, best_score = None, 0.0
+    for name, path in constants.APTITUDE_IMAGES.items():
+      match = device_action.best_template_match(path, cropped_image, grayscale=True)
+      if match and match["score"] > best_score:
+        best_score = match["score"]
+        best_name = name
+    if best_name and best_score >= 0.75:
+      aptitudes[key] = best_name
+      if config.VERBOSE_ACTIONS:
+        info(f"[APT] {key} -> {best_name} (score={best_score:.3f})")
         #debug_window(cropped_image)
 
   missing_keys = [key for key in APTITUDE_BOX_RATIOS.keys() if key not in aptitudes]

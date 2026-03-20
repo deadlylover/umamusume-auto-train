@@ -308,12 +308,12 @@ def match_cached_templates(cached_templates, region_ltrb=None, threshold=0.85, t
   print(f"Results: {results}")
   return results
 
-def multi_match_templates(templates, screenshot: np.ndarray, threshold=0.85, text: str = "", template_scaling=1.0, stop_after_first_match=False):
+def multi_match_templates(templates, screenshot: np.ndarray, threshold=0.85, text: str = "", template_scaling=1.0, stop_after_first_match=False, grayscale=False):
   results = {}
   for name, path in templates.items():
     if text and args.device_debug:
       text = f"[{name}] {text}"
-    results[name] = match_template(path, screenshot, threshold, text, template_scaling=template_scaling)
+    results[name] = match_template(path, screenshot, threshold, text, template_scaling=template_scaling, grayscale=grayscale)
     if stop_after_first_match and len(results[name]) > 0:
       debug(f"Template found: {name}")
       break
