@@ -204,6 +204,7 @@ class OperatorConsole:
       ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
     self._trackblazer_use_items_var = tk.BooleanVar(value=bot.get_trackblazer_use_items_enabled())
+    self._skill_dry_run_var = tk.BooleanVar(value=bot.get_skill_dry_run_enabled())
     self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
     self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
     tk.Checkbutton(
@@ -263,6 +264,17 @@ class OperatorConsole:
       fg="#9aa4ad",
       bg="#101418",
     ).pack(side=tk.LEFT)
+    tk.Checkbutton(
+      tertiary_controls,
+      text="Dry-run skills",
+      variable=self._skill_dry_run_var,
+      command=self._toggle_skill_dry_run,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(12, 0))
 
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
@@ -450,6 +462,8 @@ class OperatorConsole:
       self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
     if self._trackblazer_use_items_var is not None:
       self._trackblazer_use_items_var.set(bool(runtime_state.get("trackblazer_use_items_enabled")))
+    if self._skill_dry_run_var is not None:
+      self._skill_dry_run_var.set(bool(runtime_state.get("skill_dry_run_enabled")))
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
     self._bot_button.configure(text="Stop Bot" if runtime_state.get("is_bot_running") else "Start Bot")
@@ -779,6 +793,18 @@ class OperatorConsole:
       "Trackblazer item use scaffold enabled."
       if enabled else
       "Trackblazer item use dry-run enabled."
+    )
+    self.publish()
+
+  def _toggle_skill_dry_run(self):
+    if self._skill_dry_run_var is None:
+      return
+    enabled = bool(self._skill_dry_run_var.get())
+    bot.set_skill_dry_run_enabled(enabled)
+    self._message_value.set(
+      "Skill purchase dry-run enabled (scan only, no confirm)."
+      if enabled else
+      "Skill purchase live mode (will confirm + learn)."
     )
     self.publish()
 

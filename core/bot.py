@@ -59,6 +59,7 @@ execution_intent = "execute"
 control_callbacks = {}
 manual_control_active = False
 trackblazer_use_items_enabled = False
+skill_dry_run_enabled = False
 
 
 def set_phase(phase, status="active", message="", error=""):
@@ -84,6 +85,7 @@ def get_runtime_state():
       "manual_control_active": manual_control_active,
       "execution_intent": execution_intent,
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
+      "skill_dry_run_enabled": skill_dry_run_enabled,
       "is_bot_running": is_bot_running,
       "backend_state": get_backend_state(),
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
@@ -172,6 +174,18 @@ def set_trackblazer_use_items_enabled(enabled):
 def get_trackblazer_use_items_enabled():
   with runtime_lock:
     return trackblazer_use_items_enabled
+
+
+def set_skill_dry_run_enabled(enabled):
+  global skill_dry_run_enabled, runtime_updated_at
+  with runtime_lock:
+    skill_dry_run_enabled = bool(enabled)
+    runtime_updated_at = time.time()
+
+
+def get_skill_dry_run_enabled():
+  with runtime_lock:
+    return skill_dry_run_enabled
 
 
 def set_control_backend_state(

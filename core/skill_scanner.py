@@ -66,6 +66,14 @@ _INCREMENT_TEMPLATE = "assets/buttons/skill_increment.png"
 _CONFIRM_TEMPLATE = "assets/buttons/confirm_btn.png"
 _CONFIRM_THRESHOLD = 0.8
 
+# Learn / finalize detection.
+_LEARN_TEMPLATE = "assets/buttons/learn_btn.png"
+_LEARN_THRESHOLD = 0.8
+_CLOSE_TEMPLATE = "assets/buttons/close_btn.png"
+_CLOSE_THRESHOLD = 0.8
+_LEARN_SETTLE_SECONDS = 0.5
+_CLOSE_SETTLE_SECONDS_POST_LEARN = 0.5
+
 # Skills page open/close.
 _SKILLS_BTN_TEMPLATE = "assets/buttons/skills_btn.png"
 _BACK_BTN_TEMPLATE = "assets/buttons/back_btn.png"
@@ -913,8 +921,63 @@ def _detect_confirm_button(screenshot=None):
     }
 
 
+def _click_confirm_button(confirm_result):
+    """Click the confirm button using the detected match coordinates."""
+    if not confirm_result or not confirm_result.get("detected"):
+        return {"clicked": False, "reason": "confirm_not_detected"}
+    match = confirm_result["matches"][0]
+    ui_left, ui_top, _, _ = [int(v) for v in _skill_ui_region()]
+    click_x = ui_left + match[0] + match[2] // 2
+    click_y = ui_top + match[1] + match[3] // 2
+    info(f"[SKILL] Clicking confirm at ({click_x}, {click_y})...")
+    device_action.click(target=(click_x, click_y), duration=0.15)
+    sleep(0.5)
+    return {"clicked": True, "target": [click_x, click_y]}
+
+
+def _click_learn_and_close():
+    """After confirm, click learn → close to finalize the skill purchase.
+
+    Returns a dict describing what was clicked.
+    """
+    result = {
+        "learn_clicked": False,
+        "close_clicked": False,
+        "timing": {},
+    }
+    t0 = _time()
+
+    # Click learn button.
+    learn_clicked = device_action.locate_and_click(
+        _LEARN_TEMPLATE,
+        min_search_time=get_secs(2),
+    )
+    result["learn_clicked"] = bool(learn_clicked)
+    result["timing"]["learn"] = round(_time() - t0, 4)
+    if not learn_clicked:
+        warning("[SKILL] Learn button not found after confirm.")
+        return result
+    sleep(_LEARN_SETTLE_SECONDS)
+
+    # Click close button (the post-learn summary dialog).
+    t_close = _time()
+    close_clicked = device_action.locate_and_click(
+        _CLOSE_TEMPLATE,
+        min_search_time=get_secs(2),
+    )
+    result["close_clicked"] = bool(close_clicked)
+    result["timing"]["close"] = round(_time() - t_close, 4)
+    if close_clicked:
+        sleep(_CLOSE_SETTLE_SECONDS_POST_LEARN)
+    else:
+        warning("[SKILL] Close button not found after learn.")
+
+    result["timing"]["total"] = round(_time() - t0, 4)
+    return result
+
+
 # ---------------------------------------------------------------------------
-# Main scan + purchase flow (Phase 1 — dry run)
+# Main scan + purchase flow
 # ---------------------------------------------------------------------------
 
 def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=True,
@@ -1388,16 +1451,30 @@ def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow,
     confirm = _detect_confirm_button()
     flow["confirm_detect_result"] = confirm
     flow["confirm_available"] = confirm.get("detected", False)
-    if confirm.get("detected"):
-        info("Skill scanner: confirm button detected! (not clicking)")
-        flow["reason"] = "increment_clicked_confirm_detected" if not dry_run else "dry_run_confirm_detected"
-    else:
-        if dry_run:
-            info("Skill scanner: confirm not detected (expected — dry run did not click increment).")
-            flow["reason"] = "dry_run_complete"
+
+    if dry_run:
+        if confirm.get("detected"):
+            info("Skill scanner: [DRY RUN] confirm button detected (not clicking).")
+            flow["reason"] = "dry_run_confirm_detected"
         else:
-            info("Skill scanner: confirm button NOT detected after increment.")
-            flow["reason"] = "increment_clicked_confirm_not_detected"
+            info("Skill scanner: [DRY RUN] confirm not detected (expected — did not click increment).")
+            flow["reason"] = "dry_run_complete"
+    elif confirm.get("detected"):
+        # Live mode: click confirm → learn → close to finalize purchase.
+        info("Skill scanner: confirm button detected, finalizing purchase...")
+        flow["confirm_click_result"] = _click_confirm_button(confirm)
+        learn_close = _click_learn_and_close()
+        flow["learn_close_result"] = learn_close
+        if learn_close.get("learn_clicked") and learn_close.get("close_clicked"):
+            info(f"Skill scanner: purchase finalized for '{target_match.get('match_name')}'.")
+            flow["reason"] = "purchase_finalized"
+        elif learn_close.get("learn_clicked"):
+            flow["reason"] = "purchase_learned_close_failed"
+        else:
+            flow["reason"] = "confirm_clicked_learn_failed"
+    else:
+        info("Skill scanner: confirm button NOT detected after increment.")
+        flow["reason"] = "increment_clicked_confirm_not_detected"
 
     flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
     return flow
@@ -1585,10 +1662,21 @@ def scan_and_increment_skills(target_skills, dry_run=False,
             confirm = _detect_confirm_button()
             entry["confirm_detect_result"] = confirm
             entry["confirm_available"] = confirm.get("detected", False)
-            if confirm.get("detected"):
-                entry["reason"] = "increment_clicked_confirm_detected" if not dry_run else "dry_run_confirm_detected"
+            if dry_run:
+                entry["reason"] = "dry_run_confirm_detected" if confirm.get("detected") else "dry_run_complete"
+            elif confirm.get("detected"):
+                entry["confirm_click_result"] = _click_confirm_button(confirm)
+                learn_close = _click_learn_and_close()
+                entry["learn_close_result"] = learn_close
+                if learn_close.get("learn_clicked") and learn_close.get("close_clicked"):
+                    info(f"Skill scanner: purchase finalized for '{skill_name}'.")
+                    entry["reason"] = "purchase_finalized"
+                elif learn_close.get("learn_clicked"):
+                    entry["reason"] = "purchase_learned_close_failed"
+                else:
+                    entry["reason"] = "confirm_clicked_learn_failed"
             else:
-                entry["reason"] = "increment_clicked_confirm_not_detected" if not dry_run else "dry_run_complete"
+                entry["reason"] = "increment_clicked_confirm_not_detected"
             flow["target_results"].append(entry)
 
         flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_scan_done)
@@ -1855,12 +1943,11 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         flow["opened"] = True
         flow["reason"] = "skills_page_assumed_open"
 
-    # Step 2: Scan and optionally increment.
-    info("[SKILL] Scanning skill list...")
+    # Step 2: Scan and increment all targets from the shortlist.
+    info(f"[SKILL] Scanning skill list (dry_run={dry_run})...")
     t0 = _time()
-    scan_result = scan_and_increment_skill(
-        target_skill=target_skill,
-        skill_shortlist=skill_shortlist,
+    scan_result = scan_and_increment_skills(
+        target_skills=skill_shortlist,
         dry_run=dry_run,
         save_debug_frames=enable_debug_frames,
         debug_session_name=debug_session_name,
@@ -1868,35 +1955,17 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
     flow["timing_scan"] = round(_time() - t0, 3)
     flow["scanned"] = True
     flow["scan_result"] = {
-        "target_found": scan_result.get("target_found"),
-        "target_skill": scan_result.get("target_skill"),
-        "confirm_available": scan_result.get("confirm_available"),
+        "target_skills": scan_result.get("target_skills"),
+        "target_results": scan_result.get("target_results"),
         "reason": scan_result.get("reason"),
         "scan_timing": scan_result.get("scan_timing"),
+        "frame_count": scan_result.get("frame_signatures_seen", 0),
+        "unique_frames": scan_result.get("frame_signatures_unique", 0),
     }
-    if scan_result.get("target_row"):
-        flow["scan_result"]["target_row"] = {
-            "text_raw": scan_result["target_row"].get("text_raw"),
-            "match_score": scan_result["target_row"].get("match_score"),
-            "match_type": scan_result["target_row"].get("match_type"),
-            "increment_match": scan_result["target_row"].get("increment_match"),
-        }
-    if scan_result.get("increment_click_result"):
-        flow["scan_result"]["increment_click_result"] = scan_result["increment_click_result"]
-    if scan_result.get("confirm_detect_result"):
-        flow["scan_result"]["confirm_detect_result"] = scan_result["confirm_detect_result"]
     if scan_result.get("drag_result"):
         flow["scan_result"]["drag_result"] = scan_result["drag_result"]
     if scan_result.get("bottom_completion_result"):
         flow["scan_result"]["bottom_completion_result"] = scan_result["bottom_completion_result"]
-    if scan_result.get("seekback_result"):
-        flow["scan_result"]["seekback_result"] = scan_result["seekback_result"]
-    if scan_result.get("reacquire_result"):
-        flow["scan_result"]["reacquire_result"] = scan_result["reacquire_result"]
-    flow["scan_result"]["target_frame_index"] = scan_result.get("target_frame_index")
-    flow["scan_result"]["target_scrollbar_ratio"] = scan_result.get("target_scrollbar_ratio")
-    flow["scan_result"]["frame_count"] = scan_result.get("frame_signatures_seen", 0)
-    flow["scan_result"]["unique_frames"] = scan_result.get("frame_signatures_unique", 0)
     result["skill_purchase_scan"] = scan_result
 
     # Step 3: Close skills page (skip if it was already open before we started).

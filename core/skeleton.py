@@ -13,7 +13,8 @@ import utils.constants as constants
 from scenarios.unity import unity_cup_function
 from core.events import select_event
 from core.claw_machine import play_claw_machine
-from core.skill import buy_skill, init_skill_py, get_skill_purchase_context
+from core.skill import init_skill_py, get_skill_purchase_context, update_skill_action_count
+from core.skill_scanner import collect_skill_purchase
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
 
@@ -1022,12 +1023,22 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
     return "failed"
   if execution_intent != "execute":
     return "previewed"
-  buy_skill(state_obj, current_action_count, race_check=race_check)
+  update_skill_action_count(current_action_count)
+  dry_run = bot.get_skill_dry_run_enabled()
+  purchase_result = collect_skill_purchase(
+    skill_shortlist=context.get("shopping_list"),
+    trigger="automatic",
+    dry_run=dry_run,
+  )
+  purchase_flow = purchase_result.get("skill_purchase_flow", {})
+  result_message = (
+    f"Skill purchase {'dry-run' if dry_run else 'flow'} complete: {purchase_flow.get('reason', '?')}"
+  )
   update_operator_snapshot(
     state_obj,
     skill_action,
     phase="executing_action",
-    message="Skill purchase flow executed.",
+    message=result_message,
     reasoning_notes=reasoning_notes,
     sub_phase="confirm_skill_purchase",
     ocr_debug=context.get("ocr_debug"),

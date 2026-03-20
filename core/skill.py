@@ -19,6 +19,11 @@ def init_skill_py():
   previous_action_count = -1
 
 
+def update_skill_action_count(action_count):
+  global previous_action_count
+  previous_action_count = action_count
+
+
 def get_skill_purchase_context(state, action_count, race_check=False):
   global previous_action_count
   current_sp = state.get("current_stats", {}).get("sp", 0)
