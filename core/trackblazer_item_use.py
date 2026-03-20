@@ -32,6 +32,15 @@ _HAMMER_TIERS = (
   "master_cleat_hammer",
   "artisan_cleat_hammer",
 )
+_ENERGY_ITEM_KEYS = (
+  "vita_65",
+  "vita_40",
+  "vita_20",
+  "royal_kale_juice",
+  "energy_drink_max",
+  "energy_drink_max_ex",
+)
+_FAILSAFE_ITEM_KEYS = _ENERGY_ITEM_KEYS + ("good_luck_charm",)
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
     "usage_group": "training_burst",
@@ -423,6 +432,107 @@ def _current_held_quantity(item_key, inventory, held_quantities):
   return 0
 
 
+def _training_snapshot(training_name, training_data):
+  training_data = training_data if isinstance(training_data, dict) else {}
+  stat_gains = training_data.get("stat_gains") or {}
+  total_stat_gain = sum(_safe_int(value, 0) for value in stat_gains.values())
+  return {
+    "training_name": training_name,
+    "failure": _safe_int(training_data.get("failure"), 0),
+    "score": _safe_float((training_data.get("score_tuple") or (0.0, 0))[0], 0.0),
+    "supports": _safe_int(training_data.get("total_supports"), 0),
+    "matching_stat_gain": _safe_int(stat_gains.get(training_name), 0),
+    "total_stat_gain": total_stat_gain,
+  }
+
+
+def _affordable_shop_support_items(state_obj):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  shop_summary = state_obj.get("trackblazer_shop_summary") or {}
+  detected_shop_keys = set(state_obj.get("trackblazer_shop_items") or shop_summary.get("items_detected") or [])
+  shop_coins = _safe_int(shop_summary.get("shop_coins", state_obj.get("shop_coins")), -1)
+  if shop_coins < 0 or not detected_shop_keys:
+    return []
+
+  affordable = []
+  for item in get_shop_catalog():
+    item_key = item.get("key")
+    if item_key not in _FAILSAFE_ITEM_KEYS:
+      continue
+    if item_key not in detected_shop_keys:
+      continue
+    cost = _safe_int(item.get("cost"), 0)
+    if cost > shop_coins:
+      continue
+    affordable.append(
+      {
+        "key": item_key,
+        "name": item.get("display_name") or _humanize_item_key(item_key),
+        "cost": cost,
+      }
+    )
+  return affordable
+
+
+def _summer_reroll_signal(state_obj, current_context):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  if not current_context.get("summer_window"):
+    return {}
+
+  try:
+    import core.config as config
+    max_failure = _safe_int(getattr(config, "MAX_FAILURE", 5), 5)
+  except Exception:
+    max_failure = 5
+
+  training_results = state_obj.get("training_results") or {}
+  if not isinstance(training_results, dict):
+    return {}
+
+  risky_candidates = []
+  safe_non_wit_exists = False
+  for training_name, training_data in training_results.items():
+    if training_name == "wit":
+      continue
+    snapshot = _training_snapshot(training_name, training_data)
+    if snapshot["failure"] <= max_failure:
+      safe_non_wit_exists = True
+    if snapshot["failure"] <= max_failure:
+      continue
+    if (
+      snapshot["supports"] < 2
+      and snapshot["matching_stat_gain"] < 16
+      and snapshot["total_stat_gain"] < 24
+      and snapshot["score"] < 4.0
+    ):
+      continue
+    risky_candidates.append(snapshot)
+
+  if safe_non_wit_exists or not risky_candidates:
+    return {
+      "needs_reroll": False,
+      "risky_training_name": None,
+      "risky_training_failure": None,
+    }
+
+  risky_candidates.sort(
+    key=lambda entry: (
+      entry["supports"],
+      entry["score"],
+      entry["matching_stat_gain"],
+      entry["total_stat_gain"],
+      -entry["failure"],
+    ),
+    reverse=True,
+  )
+  top_candidate = risky_candidates[0]
+  return {
+    "needs_reroll": True,
+    "risky_training_name": top_candidate["training_name"],
+    "risky_training_failure": top_candidate["failure"],
+  }
+
+
 def _hammer_usage_state(held_quantities):
   tiers = []
   for item_key in _HAMMER_TIERS:
@@ -435,6 +545,10 @@ def _hammer_usage_state(held_quantities):
 
 
 def _usage_context(state_obj, action):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  inventory = state_obj.get("trackblazer_inventory") or {}
+  inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
+  held_quantities = dict(inventory_summary.get("held_quantities") or {})
   training_data = action.get("training_data") if hasattr(action, "get") else {}
   training_data = training_data if isinstance(training_data, dict) else {}
   training_name = action.get("training_name") if hasattr(action, "get") else None
@@ -468,6 +582,27 @@ def _usage_context(state_obj, action):
     and total_stat_gain < 20
     and score_value < 5.0
   )
+  held_support_items = []
+  for item_key in _FAILSAFE_ITEM_KEYS:
+    held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
+    if held_quantity <= 0:
+      continue
+    held_support_items.append(
+      {
+        "key": item_key,
+        "name": _humanize_item_key(item_key),
+        "held_quantity": held_quantity,
+      }
+    )
+  affordable_shop_support_items = _affordable_shop_support_items(state_obj)
+  reroll_signal = _summer_reroll_signal(
+    state_obj,
+    {
+      "summer_window": timeline_label in _SUMMER_WINDOWS,
+    },
+  )
+  held_support_keys = {entry["key"] for entry in held_support_items}
+  affordable_shop_support_keys = {entry["key"] for entry in affordable_shop_support_items}
   return {
     "timeline_label": timeline_label,
     "summer_window": timeline_label in _SUMMER_WINDOWS,
@@ -484,6 +619,13 @@ def _usage_context(state_obj, action):
     "total_stat_gain": total_stat_gain,
     "rainbow_count": rainbow_count,
     "support_count": support_count,
+    "held_support_item_names": [entry["name"] for entry in held_support_items],
+    "affordable_shop_support_item_names": [entry["name"] for entry in affordable_shop_support_items],
+    "held_energy_available": any(item_key in _ENERGY_ITEM_KEYS for item_key in held_support_keys),
+    "held_charm_available": "good_luck_charm" in held_support_keys,
+    "affordable_shop_energy_available": any(item_key in _ENERGY_ITEM_KEYS for item_key in affordable_shop_support_keys),
+    "affordable_shop_charm_available": "good_luck_charm" in affordable_shop_support_keys,
+    "has_followup_failsafe": bool(held_support_keys or affordable_shop_support_keys),
     "high_value_training": bool(
       getattr(action, "func", None) == "do_training"
       and (
@@ -504,7 +646,9 @@ def _usage_context(state_obj, action):
       )
     ),
     "strong_burst_training": strong_burst_training,
-    "weak_summer_training": weak_summer_training,
+    "weak_summer_training": weak_summer_training or bool(reroll_signal.get("needs_reroll")),
+    "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
+    "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
     "commit_training_after_items": strong_burst_training,
     "is_tsc": timeline_label == "Finale Underway",
   }
@@ -602,10 +746,15 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
 
   if usage_group == "burst_setup":
     if context["action_func"] != "do_training":
-      return None
+      if not context["weak_summer_training"]:
+        return None
     if not context["summer_window"]:
       return {
         "defer_reason": "save for summer burst windows",
+      }
+    if not context["has_followup_failsafe"]:
+      return {
+        "defer_reason": "save whistle until energy or a Good-Luck Charm is available",
       }
     if context["commit_training_after_items"]:
       return {
@@ -615,9 +764,32 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return {
         "defer_reason": "current summer training is acceptable without a reroll",
       }
+    support_reasons = []
+    if context["held_support_item_names"]:
+      support_reasons.append(f"held follow-up support: {', '.join(context['held_support_item_names'])}")
+    if context["affordable_shop_support_item_names"]:
+      support_reasons.append(
+        f"affordable shop support: {', '.join(context['affordable_shop_support_item_names'])}"
+      )
+    target_hint = ""
+    if context.get("summer_reroll_target_name"):
+      target_hint = (
+        f"unsafe board led by "
+        f"{_TRAINING_LABELS.get(context['summer_reroll_target_name'], context['summer_reroll_target_name'])} "
+        f"at {context.get('summer_reroll_target_failure', 0)}% fail"
+      )
     return {
       "candidate_score": 480 + priority_score,
-      "reason": "summer reroll: no rainbow spike and gains are too weak, shuffle support cards",
+      # Reset Whistle only rerolls the board. After using it, the bot must
+      # rescan trainings and re-evaluate failure/energy before committing.
+      "reason": "; ".join(
+        part for part in [
+          "summer reroll: use whistle, then recheck trainings before committing",
+          target_hint or "current board is too weak or too unsafe to commit",
+          "shuffle support cards while follow-up recovery/fail-safe coverage exists",
+          *support_reasons,
+        ] if part
+      ),
       "reserved_quantity": reserve_quantity,
       "use_now": True,
     }
@@ -749,6 +921,10 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "support_count": context.get("support_count"),
       "strong_burst_training": context.get("strong_burst_training"),
       "weak_summer_training": context.get("weak_summer_training"),
+      "held_support_item_names": context.get("held_support_item_names"),
+      "affordable_shop_support_item_names": context.get("affordable_shop_support_item_names"),
+      "summer_reroll_target_name": context.get("summer_reroll_target_name"),
+      "summer_reroll_target_failure": context.get("summer_reroll_target_failure"),
       "commit_training_after_items": context.get("commit_training_after_items"),
     },
     "candidates": candidates[: max(0, int(limit))],

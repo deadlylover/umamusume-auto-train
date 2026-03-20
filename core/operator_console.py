@@ -883,6 +883,14 @@ class OperatorConsole:
 
   def _format_selected_action_line(self, selected_action):
     action_name = selected_action.get("func") or "-"
+    pre_action_items = selected_action.get("pre_action_item_use") or []
+    pre_action_label = ""
+    if pre_action_items:
+      item_names = ", ".join(entry.get("name") or entry.get("key") or "item" for entry in pre_action_items)
+      if selected_action.get("reassess_after_item_use"):
+        pre_action_label = f"Action: use {item_names} -> recheck trainings"
+      else:
+        pre_action_label = f"Action: use {item_names} -> "
     if action_name == "do_training":
       training_name = selected_action.get("training_name") or "unknown"
       parts = [f"Action: train {training_name}"]
@@ -903,11 +911,14 @@ class OperatorConsole:
       failure = selected_action.get("failure")
       if failure is not None:
         parts.append(f"fail {self._format_number(failure)}%")
-      return " | ".join(parts)
+      action_text = " | ".join(parts)
+      return pre_action_label + action_text if pre_action_label and not selected_action.get("reassess_after_item_use") else (pre_action_label or action_text)
     if action_name == "do_race":
       race_name = selected_action.get("race_name") or "unspecified"
-      return f"Action: race {race_name}"
-    return f"Action: {action_name}"
+      action_text = f"Action: race {race_name}"
+      return pre_action_label + action_text if pre_action_label and not selected_action.get("reassess_after_item_use") else (pre_action_label or action_text)
+    action_text = f"Action: {action_name}"
+    return pre_action_label + action_text if pre_action_label and not selected_action.get("reassess_after_item_use") else (pre_action_label or action_text)
 
   def _format_rival_line(self, selected_action, state_summary):
     rival_scout = selected_action.get("rival_scout") or {}

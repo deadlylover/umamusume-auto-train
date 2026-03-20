@@ -682,13 +682,62 @@ def _action_func(action):
   return getattr(action, "func", None)
 
 
+def _trackblazer_pre_action_items(action):
+  if hasattr(action, "get"):
+    return list(action.get("trackblazer_pre_action_items") or [])
+  if isinstance(action, dict):
+    return list(action.get("trackblazer_pre_action_items") or [])
+  return []
+
+
 def _planned_clicks_for_action(action):
   action_func = _action_func(action)
+  pre_action_items = _trackblazer_pre_action_items(action)
+  pre_action_clicks = []
+  if pre_action_items:
+    pre_action_clicks.append(
+      _planned_click(
+        "Open use-items inventory",
+        region_key="SCREEN_BOTTOM_BBOX",
+        note="Trackblazer pre-action item step before the main action",
+      )
+    )
+    pre_action_clicks.append(
+      _planned_click(
+        "Scan inventory item rows",
+        region_key="MANT_INVENTORY_ITEMS_REGION",
+        note="Pair the planned pre-action items to increment controls",
+      )
+    )
+    for item in pre_action_items:
+      pre_action_clicks.append(
+        _planned_click(
+          f"Increment {item.get('name') or item.get('key') or 'item'}",
+          note=item.get("reason") or "Select this item once before the main action",
+        )
+      )
+    pre_action_clicks.append(
+      _planned_click(
+        "Confirm planned item use",
+        note=(
+          "In execute mode the bot should commit the planned item use before the main action. "
+          "In check-only/preview modes this remains a simulation step."
+        ),
+      )
+    )
+    if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use"):
+      pre_action_clicks.append(
+        _planned_click(
+          "Rescan trainings after item use",
+          region_key="GAME_WINDOW_BBOX",
+          note="Reset Whistle changes the board, so the follow-up action must be re-evaluated",
+        )
+      )
   if not action_func:
-    return []
+    return pre_action_clicks
   if action_func == "do_training":
     training_name = _action_value(action, "training_name")
-    return [
+    return pre_action_clicks + [
       _planned_click("Open training menu", "assets/buttons/training_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         f"Select training: {training_name or 'unknown'}",
@@ -697,28 +746,28 @@ def _planned_clicks_for_action(action):
       ),
     ]
   if action_func == "do_rest":
-    return [
+    return pre_action_clicks + [
       _planned_click("Click rest button", "assets/buttons/rest_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer rest button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_recreation":
-    return [
+    return pre_action_clicks + [
       _planned_click("Open recreation menu", "assets/buttons/recreation_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer recreation button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_infirmary":
-    return [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
+    return pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
   if action_func == "do_race":
     race_name = _action_value(action, "race_name")
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
-    return [
+    return pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan/select race entry", race_template, region_key="RACE_LIST_BOX_BBOX"),
       _planned_click("Confirm race", "assets/buttons/race_btn.png"),
       _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
     ]
   if action_func == "buy_skill":
-    return [
+    return pre_action_clicks + [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR and template scan only"),
       _planned_click("Confirm selected skills", "assets/buttons/confirm_btn.png"),
@@ -749,13 +798,13 @@ def _planned_clicks_for_action(action):
     )
     return clicks
   if action_func == "check_shop":
-    return [
+    return pre_action_clicks + [
       _planned_click("Open Trackblazer shop", region_key="GAME_WINDOW_BBOX", note="Locate the shop entry button"),
       _planned_click("Scan shop coin display", region_key="MANT_SHOP_COIN_REGION", note="OCR coin count"),
       _planned_click("Scan shop item rows", region_key="GAME_WINDOW_BBOX", note="Template scan for visible shop stock"),
       _planned_click("Close shop", note="Dismiss the shop overlay after scan"),
     ]
-  return []
+  return pre_action_clicks
 
 
 def _build_trackblazer_planned_actions(state_obj, action):
@@ -853,6 +902,66 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "items_detected": shop_summary.get("items_detected") or shop_items,
     },
     "would_buy": would_buy,
+  }
+
+
+def _attach_trackblazer_pre_action_item_plan(state_obj, action):
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return action
+  if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
+    return action
+
+  item_use_plan = plan_item_usage(
+    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    state_obj=state_obj,
+    action=action,
+    limit=8,
+  )
+  candidates = list(item_use_plan.get("candidates") or [])
+  action["trackblazer_pre_action_items"] = candidates
+  action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
+  action["trackblazer_reassess_after_item_use"] = any(
+    entry.get("key") == "reset_whistle" for entry in candidates
+  )
+  return action
+
+
+def _execute_trackblazer_pre_action_items(state_obj, action):
+  planned_items = _trackblazer_pre_action_items(action)
+  if not planned_items:
+    return {"status": "skipped"}
+
+  from scenarios.trackblazer import apply_training_items_for_action
+
+  item_keys = [entry.get("key") for entry in planned_items if entry.get("key")]
+  if not item_keys:
+    return {"status": "skipped"}
+
+  result = apply_training_items_for_action(item_keys, trigger="automatic")
+  flow = result.get("trackblazer_inventory_flow") or {}
+  state_obj["trackblazer_inventory"] = result.get("trackblazer_inventory")
+  state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
+  state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
+  state_obj["trackblazer_inventory_flow"] = flow
+
+  if not result.get("success"):
+    return {
+      "status": "failed",
+      "result": result,
+      "reason": flow.get("reason") or "trackblazer_pre_action_items_failed",
+    }
+
+  if action.get("trackblazer_reassess_after_item_use"):
+    return {
+      "status": "reassess",
+      "result": result,
+      "reason": "trackblazer_item_use_requires_reassessment",
+    }
+
+  return {
+    "status": "executed",
+    "result": result,
+    "reason": flow.get("reason") or "trackblazer_pre_action_items_applied",
   }
 
 
@@ -963,6 +1072,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "total_rainbow_friends": action.get("training_data", {}).get("total_rainbow_friends") if hasattr(action, "get") else None,
     "prefer_rival_race": action.get("prefer_rival_race") if hasattr(action, "get") else None,
     "rival_scout": action.get("rival_scout") if hasattr(action, "get") else None,
+    "pre_action_item_use": action.get("trackblazer_pre_action_items") if hasattr(action, "get") else None,
+    "reassess_after_item_use": action.get("trackblazer_reassess_after_item_use") if hasattr(action, "get") else None,
   }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
@@ -1226,6 +1337,30 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     return "previewed"
   if pre_run_hook is not None:
     pre_run_hook()
+  pre_action_item_result = _execute_trackblazer_pre_action_items(state_obj, action)
+  if pre_action_item_result.get("status") == "failed":
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Pre-action item use failed: {pre_action_item_result.get('reason')}",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "failed"
+  if pre_action_item_result.get("status") == "reassess":
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="collecting_main_state",
+      message="Trackblazer items applied. Rechecking turn state before committing an action.",
+      sub_phase="reassess_after_item_use",
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "reassess"
   result = action.run()
   if not result:
     update_operator_snapshot(
@@ -1784,6 +1919,8 @@ def career_lobby(dry_run_turn=False):
         else:
           update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Rival race found! Proposing rival race.")
 
+      action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+
       if isinstance(action, dict):
         update_operator_snapshot(
           state_obj,
@@ -1822,6 +1959,8 @@ def career_lobby(dry_run_turn=False):
         executed_action = action_result == "executed"
         if action_result == "previewed":
           continue
+        elif action_result == "reassess":
+          continue
         elif action_result != "executed":
           if action.available_actions:  # Check if the list is not empty
             action.available_actions.pop(0)
@@ -1850,6 +1989,9 @@ def career_lobby(dry_run_turn=False):
             )
             if retry_result == "executed":
               executed_action = True
+              break
+            if retry_result == "reassess":
+              executed_action = False
               break
             if retry_result == "previewed":
               executed_action = False

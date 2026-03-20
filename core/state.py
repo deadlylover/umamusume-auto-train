@@ -9,7 +9,7 @@ from PIL import Image
 from utils.log import info, warning, error, debug, debug_window, args
 
 from utils.screenshot import enhanced_screenshot, enhance_image_for_ocr, binarize_between_colors, crop_after_plus_component, clean_noise, custom_grabcut
-from core.ocr import extract_text, extract_number, extract_allowed_text
+from core.ocr import extract_text, extract_number, extract_allowed_text, reader
 from core.recognizer import count_pixels_of_color, find_color_of_pixel, closest_color
 from utils.tools import click, sleep, get_secs, check_race_suitability, get_aptitude_index
 import utils.device_action_wrapper as device_action
@@ -925,7 +925,7 @@ def get_stat_gains(year=1, attempts=0, enable_debug=True, show_screenshot=False,
   return stat_gains
 
 
-def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None):
+def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None, min_confidence=0.3):
   enhanced = enhance_image_for_ocr(image, resize_factor=4, binarize_threshold=None)
   threshold_values = thresholds or [0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
 
@@ -939,10 +939,21 @@ def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None):
           return value
     return -1
 
+  img_np = np.array(enhanced)
   for threshold in threshold_values:
-    value = extract_number(enhanced, threshold=threshold)
-    if value != -1:
-      return value
+    result = reader.readtext(img_np, allowlist=allowlist, text_threshold=threshold)
+    # Filter by recognition confidence to discard ghost detections from
+    # button edges / background noise that EasyOCR's text detector picks up
+    # but the recogniser scores very low.
+    confident = [item for item in result if item[2] >= min_confidence]
+    if not confident:
+      continue
+    texts = [item[1] for item in sorted(confident, key=lambda x: x[0][0][0])]
+    digits = re.sub(r"[^\d]", "", "".join(texts))
+    if digits:
+      value = int(digits)
+      if 0 <= value <= 100:
+        return value
   return -1
 
 
@@ -1041,7 +1052,7 @@ def get_failure_chance(region_xywh=None):
     x = x + region_xywh[0]
     y = y + region_xywh[1]
 
-    digit_crop_width = max(40, int(round(w * 4.5)))
+    digit_crop_width = max(40, int(round(w * 2.8)))
     vertical_padding = max(3, int(round(h * 0.25)))
     failure_cropped = device_action.screenshot(
       region_ltrb=(

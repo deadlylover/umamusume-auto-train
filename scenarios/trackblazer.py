@@ -2334,6 +2334,215 @@ def prepare_training_items_for_use(
     return result
 
 
+def apply_training_items_for_action(item_names, trigger="automatic"):
+    """Apply planned Trackblazer training items for the live bot flow.
+
+    This is the production counterpart to ``prepare_training_items_for_use``.
+    It opens the inventory, increments each requested item once, confirms the
+    use flow, optionally handles one follow-up confirmation prompt, then
+    verifies that the inventory closes.
+    """
+    requested_items = [str(item_name) for item_name in (item_names or [])]
+    clear_runtime_ocr_debug()
+
+    flow = {
+        "trigger": str(trigger or "automatic"),
+        "execution_intent": bot.get_execution_intent(),
+        "requested_items": list(requested_items),
+        "opened": False,
+        "already_open": False,
+        "closed": False,
+        "success": False,
+        "reason": "",
+        "open_result": None,
+        "close_result": None,
+        "increment_attempts": [],
+        "missing_items": [],
+        "missing_increment_targets": [],
+        "confirm_use_available": False,
+        "confirm_use_state": None,
+        "confirm_use_click_target": None,
+        "confirm_use_clicked": False,
+        "confirm_use_click_result": None,
+        "post_confirm_controls": None,
+        "followup_confirm_visible": False,
+        "followup_confirm_entry": None,
+        "followup_confirm_clicked": False,
+        "followup_confirm_click_result": None,
+        "verification_checks": [],
+    }
+    result = {
+        "requested_items": list(requested_items),
+        "trackblazer_inventory": CleanDefaultDict(),
+        "trackblazer_inventory_summary": {
+            "items_detected": [],
+            "by_category": {},
+            "total_detected": 0,
+            "actionable_items": [],
+        },
+        "trackblazer_inventory_controls": {},
+        "trackblazer_inventory_flow": flow,
+        "inventory_ocr_debug_entries": [],
+        "ocr_runtime_debug": {},
+        "success": False,
+    }
+
+    t_total = _time()
+    inventory = CleanDefaultDict()
+    controls = {}
+
+    inventory_screen_open, _, precheck_entries = detect_inventory_screen()
+    flow["precheck"] = precheck_entries
+
+    if inventory_screen_open:
+        flow["opened"] = True
+        flow["already_open"] = True
+    else:
+        t0 = _time()
+        open_result = open_training_items_inventory(skip_precheck=True)
+        flow["timing_open"] = round(_time() - t0, 3)
+        flow["open_result"] = open_result
+        flow["opened"] = bool(open_result.get("opened"))
+        flow["already_open"] = bool(open_result.get("already_open"))
+        if not flow["opened"]:
+            flow["reason"] = "failed_to_open_inventory"
+
+    try:
+        if flow["opened"]:
+            t0 = _time()
+            inventory = scan_training_items_inventory()
+            flow["timing_scan"] = round(_time() - t0, 3)
+            flow["scan_timing"] = inventory.pop("_timing", None)
+            result["trackblazer_inventory"] = inventory
+            result["trackblazer_inventory_summary"] = build_inventory_summary(inventory)
+
+            for item_name in requested_items:
+                item_data = inventory.get(item_name) or {}
+                if not item_data.get("detected"):
+                    flow["missing_items"].append(item_name)
+                elif not item_data.get("increment_target"):
+                    flow["missing_increment_targets"].append(item_name)
+
+            if flow["missing_items"] or flow["missing_increment_targets"]:
+                flow["reason"] = "required_items_not_actionable"
+            else:
+                increment_t0 = _time()
+                for item_name in requested_items:
+                    item_data = inventory.get(item_name) or {}
+                    target = item_data.get("increment_target")
+                    attempt = {
+                        "item_name": item_name,
+                        "detected": bool(item_data.get("detected")),
+                        "increment_target": list(target) if target else None,
+                        "increment_match": item_data.get("increment_match"),
+                        "row_center_y": item_data.get("row_center_y"),
+                        "held_quantity": item_data.get("held_quantity"),
+                        "click_metrics": None,
+                        "clicked": False,
+                    }
+                    click_metrics = device_action.click_with_metrics(
+                        target,
+                        text=f"[TB_INV] Increment '{item_name}' once.",
+                    )
+                    attempt["click_metrics"] = click_metrics
+                    attempt["clicked"] = bool(click_metrics.get("clicked"))
+                    flow["increment_attempts"].append(attempt)
+                flow["timing_increments"] = round(_time() - increment_t0, 3)
+
+                controls_t0 = _time()
+                controls = detect_inventory_controls()
+                flow["timing_controls"] = round(_time() - controls_t0, 3)
+                result["trackblazer_inventory_controls"] = controls
+
+                confirm_use = controls.get("confirm_use") or {}
+                flow["confirm_use_state"] = confirm_use.get("button_state")
+                flow["confirm_use_available"] = confirm_use.get("button_state") == "available"
+                flow["confirm_use_click_target"] = list(confirm_use.get("click_target")) if confirm_use.get("click_target") else None
+                if not flow["confirm_use_available"]:
+                    flow["reason"] = "confirm_use_not_available"
+                else:
+                    confirm_t0 = _time()
+                    confirm_click_result = device_action.click_with_metrics(
+                        confirm_use.get("click_target"),
+                        text="[TB_INV] Confirm planned item use.",
+                    )
+                    flow["timing_confirm_use"] = round(_time() - confirm_t0, 3)
+                    flow["confirm_use_click_result"] = confirm_click_result
+                    flow["confirm_use_clicked"] = bool(confirm_click_result.get("clicked"))
+                    if not flow["confirm_use_clicked"]:
+                        flow["reason"] = "failed_to_click_confirm_use"
+                    else:
+                        sleep(0.25)
+                        post_confirm_controls_t0 = _time()
+                        post_confirm_controls = detect_inventory_controls()
+                        flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
+                        flow["post_confirm_controls"] = post_confirm_controls
+
+                        followup_confirm = ((post_confirm_controls.get("confirm_candidates") or {}).get("shop_confirm")) or {}
+                        flow["followup_confirm_visible"] = bool(followup_confirm.get("passed_threshold"))
+                        if flow["followup_confirm_visible"] and followup_confirm.get("click_target"):
+                            flow["followup_confirm_entry"] = followup_confirm
+                            followup_t0 = _time()
+                            followup_click_result = device_action.click_with_metrics(
+                                followup_confirm.get("click_target"),
+                                text="[TB_INV] Confirm item use follow-up prompt.",
+                            )
+                            flow["timing_followup_confirm"] = round(_time() - followup_t0, 3)
+                            flow["followup_confirm_click_result"] = followup_click_result
+                            flow["followup_confirm_clicked"] = bool(followup_click_result.get("clicked"))
+                            sleep(0.2)
+
+                        verify_t0 = _time()
+                        still_open, _, verify_checks = detect_inventory_screen()
+                        flow["timing_verify_closed"] = round(_time() - verify_t0, 3)
+                        flow["verification_checks"] = verify_checks
+                        flow["closed"] = not still_open
+                        if not flow["closed"]:
+                            close_t0 = _time()
+                            close_result = close_training_items_inventory()
+                            flow["timing_close"] = round(_time() - close_t0, 3)
+                            flow["close_result"] = close_result
+                            flow["closed"] = bool(close_result.get("closed"))
+                        if not flow["closed"] and not flow["reason"]:
+                            flow["reason"] = "inventory_did_not_close_after_confirm"
+
+                increments_requested = len(requested_items)
+                flow["increments_requested"] = increments_requested
+                flow["increments_clicked"] = sum(1 for attempt in flow["increment_attempts"] if attempt.get("clicked"))
+                flow["success"] = (
+                    not flow["missing_items"]
+                    and not flow["missing_increment_targets"]
+                    and flow["increments_clicked"] == increments_requested
+                    and flow["confirm_use_available"]
+                    and flow["confirm_use_clicked"]
+                    and flow["closed"]
+                )
+        else:
+            result["trackblazer_inventory_controls"] = controls
+    finally:
+        flow["timing_total"] = round(_time() - t_total, 3)
+        result["trackblazer_inventory_flow"] = flow
+        result["success"] = bool(flow.get("success"))
+        record_runtime_ocr_debug(
+            "trackblazer_inventory_apply_items",
+            extra={
+                "region_key": "MANT_INVENTORY_ITEMS_REGION",
+                "region_xywh": list(constants.MANT_INVENTORY_ITEMS_REGION),
+                "items_detected": result["trackblazer_inventory_summary"].get("items_detected", []),
+                "controls": result["trackblazer_inventory_controls"],
+                "flow": flow,
+            },
+        )
+        result["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+        result["inventory_ocr_debug_entries"] = _build_trackblazer_inventory_debug_entries(
+            flow,
+            result["trackblazer_inventory_controls"],
+            result["trackblazer_inventory"],
+        )
+
+    return result
+
+
 def detect_use_training_items_button(threshold=0.8):
     """Check if the 'Use Training Items' button is visible on screen.
 
