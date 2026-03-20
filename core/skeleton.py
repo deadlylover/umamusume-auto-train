@@ -17,6 +17,7 @@ from core.skill import init_skill_py, get_skill_purchase_context, update_skill_a
 from core.skill_scanner import collect_skill_purchase
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
+from core.trackblazer_shop import get_priority_preview, policy_context
 
 pyautogui.useImageNotFoundException(False)
 
@@ -763,6 +764,14 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
     state_summary["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
     state_summary["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
+    shop_policy_context = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
+    state_summary["trackblazer_shop_policy_context"] = shop_policy_context
+    state_summary["trackblazer_shop_priority_preview"] = get_priority_preview(
+      policy=config.TRACKBLAZER_SHOP_POLICY,
+      year=state_obj.get("year"),
+      turn=state_obj.get("turn"),
+      limit=10,
+    )
   selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,
@@ -1458,6 +1467,28 @@ def career_lobby(dry_run_turn=False):
       update_operator_snapshot(phase="evaluating_strategy", message="Evaluating strategy.")
       action = strategy.decide(state_obj, action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
+
+      # Trackblazer rival-race scout: if strategy wants a rival race,
+      # open the race list to check if one exists, then back out.
+      # If none found, revert to the original training decision.
+      if action.func == "do_race" and action.get("prefer_rival_race"):
+        update_operator_snapshot(state_obj, action, phase="scouting_rival_race", message="Scouting race list for rival race...")
+        from scenarios.trackblazer import scout_rival_race
+        scout_result = scout_rival_race()
+        action["rival_scout"] = scout_result
+        if not scout_result.get("rival_found"):
+          fallback_func = action.get("_rival_fallback_func", "do_training")
+          info(f"[RIVAL] No rival race found, reverting to {fallback_func}.")
+          action.func = fallback_func
+          if action.get("_rival_fallback_training_name"):
+            action["training_name"] = action["_rival_fallback_training_name"]
+          if action.get("_rival_fallback_training_data"):
+            action["training_data"] = action["_rival_fallback_training_data"]
+          action.options.pop("race_name", None)
+          action.options.pop("prefer_rival_race", None)
+          update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="No rival race available. Reverted to training.")
+        else:
+          update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Rival race found! Proposing rival race.")
 
       if isinstance(action, dict):
         update_operator_snapshot(

@@ -405,7 +405,25 @@ class Strategy:
       else:
         action.func = "do_rest"
     else:
-      debug(f"[ENERGY_MGMT] → ACTION ACCEPTED: No alternatives needed")
+      # Trackblazer rival-race fallback: when training is mediocre, prefer
+      # racing for the bonus stats that rival races provide.
+      if (
+        constants.SCENARIO_NAME in ("mant", "trackblazer")
+        and action.func == "do_training"
+        and training_score <= min_score
+        and state["turn"] != "Race Day"
+      ):
+        # Save the original training decision so we can revert if no rival
+        # race is found during scouting.
+        action["_rival_fallback_func"] = "do_training"
+        action["_rival_fallback_training_name"] = action.get("training_name")
+        action["_rival_fallback_training_data"] = action.get("training_data")
+        action.func = "do_race"
+        action["race_name"] = "any"
+        action["prefer_rival_race"] = True
+        info(f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) at or below minimum ({min_score}), attempting rival race for bonus stats")
+      else:
+        debug(f"[ENERGY_MGMT] → ACTION ACCEPTED: No alternatives needed")
     return action
 
   # helper functions

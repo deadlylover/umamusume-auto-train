@@ -67,6 +67,7 @@ _SHOP_SCROLLBAR_DRAG_END_PADDING = 10
 _SHOP_SCROLLBAR_RESET_DURATION_SECONDS = 1.4
 _SHOP_SCROLLBAR_ANALYSIS_WORKERS = 3
 _SHOP_SCROLLBAR_SEEK_DURATION_SECONDS = 0.8
+_RIVAL_RACE_MATCH_THRESHOLD = 0.75
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -2395,7 +2396,67 @@ def detect_shop_screen(threshold=0.7):
     return False, None, checks
 
 
-def enter_shop(threshold=0.8):
+def _start_trackblazer_shop_coins_ocr_task():
+    """Start shop-coin OCR without blocking the rest of the shop scan."""
+    result_queue = Queue(maxsize=1)
+    task = {
+        "started": True,
+        "thread": None,
+        "queue": result_queue,
+        "started_at": _time(),
+    }
+
+    def _run():
+        t0 = _time()
+        payload = {
+            "shop_coins": -1,
+            "error": "",
+            "timing": {
+                "ocr_wall": 0.0,
+            },
+        }
+        try:
+            payload["shop_coins"] = get_trackblazer_shop_coins()
+        except Exception as exc:
+            payload["error"] = str(exc)
+            warning(f"[TB_SHOP] shop coin OCR failed: {exc}")
+        payload["timing"]["ocr_wall"] = round(_time() - t0, 4)
+        result_queue.put(payload)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    task["thread"] = thread
+    thread.start()
+    return task
+
+
+def _resolve_trackblazer_shop_coins_ocr_task(task):
+    """Wait for a background shop-coin OCR task and return its result."""
+    result = {
+        "shop_coins": -1,
+        "error": "",
+        "timing": {},
+    }
+    if not task:
+        return result
+
+    thread = task.get("thread")
+    join_t0 = _time()
+    if thread is not None:
+        thread.join()
+    wait_elapsed = _time() - join_t0
+
+    result_queue = task.get("queue")
+    if result_queue is not None and not result_queue.empty():
+        result.update(result_queue.get())
+
+    timing = dict(result.get("timing") or {})
+    timing["join_wait"] = round(wait_elapsed, 4)
+    timing["lifetime"] = round(_time() - float(task.get("started_at") or _time()), 4)
+    result["timing"] = timing
+    return result
+
+
+def enter_shop(threshold=0.8, read_shop_coins=True):
     """Enter the Trackblazer shop using the best currently supported method.
 
     Supports refresh-dialog and lobby entry buttons when their templates are
@@ -2439,9 +2500,11 @@ def enter_shop(threshold=0.8):
         threshold=max(0.7, threshold - 0.1),
     ) if clicked else (False, None, [])
     timing["verify"] = round(_time() - t0, 4)
-    t0 = _time()
-    shop_coins = get_trackblazer_shop_coins() if shop_open else -1
-    timing["read_shop_coins"] = round(_time() - t0, 4)
+    shop_coins = -1
+    if shop_open and read_shop_coins:
+        t0 = _time()
+        shop_coins = get_trackblazer_shop_coins()
+        timing["read_shop_coins"] = round(_time() - t0, 4)
     timing["total"] = round(_time() - t_total, 4)
 
     info(f"[TB_SHOP] enter shop timing: {timing}")
@@ -2824,10 +2887,14 @@ def check_trackblazer_shop_inventory(
         "inventory_ocr_debug_entries": [],
         "success": False,
     }
+    coin_ocr_task = None
 
     try:
         t0 = _time()
-        entry_result = enter_shop(threshold=max(0.8, threshold))
+        entry_result = enter_shop(
+            threshold=max(0.8, threshold),
+            read_shop_coins=False,
+        )
         flow["timing_open"] = round(_time() - t0, 3)
         flow["entry_result"] = entry_result
         flow["entered"] = bool(entry_result.get("entered"))
@@ -2835,6 +2902,9 @@ def check_trackblazer_shop_inventory(
         if not flow["entered"]:
             flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
             return result
+
+        coin_ocr_task = _start_trackblazer_shop_coins_ocr_task()
+        flow["shop_coins_ocr_started"] = True
 
         t0 = _time()
         scan_result = scan_all_trackblazer_shop_items(
@@ -2859,6 +2929,17 @@ def check_trackblazer_shop_inventory(
         }
 
         t0 = _time()
+        coin_ocr_result = _resolve_trackblazer_shop_coins_ocr_task(coin_ocr_task)
+        flow["timing_shop_coins"] = round(_time() - t0, 3)
+        flow["shop_coins"] = int(coin_ocr_result.get("shop_coins", -1))
+        flow["shop_coins_ocr"] = coin_ocr_result
+        result["trackblazer_shop_summary"]["shop_coins"] = flow["shop_coins"]
+        entry_result["shop_coins"] = flow["shop_coins"]
+        entry_timing = dict(entry_result.get("timing") or {})
+        entry_timing["read_shop_coins_parallel"] = coin_ocr_result.get("timing") or {}
+        entry_result["timing"] = entry_timing
+
+        t0 = _time()
         close_result = close_trackblazer_shop()
         flow["timing_close"] = round(_time() - t0, 3)
         flow["close_result"] = close_result
@@ -2869,6 +2950,17 @@ def check_trackblazer_shop_inventory(
         flow["success"] = bool(flow["entered"] and flow["closed"] and flow["all_items"])
         result["success"] = bool(flow["success"])
     finally:
+        if coin_ocr_task and "shop_coins_ocr" not in flow:
+            coin_ocr_result = _resolve_trackblazer_shop_coins_ocr_task(coin_ocr_task)
+            flow["shop_coins_ocr"] = coin_ocr_result
+            flow["shop_coins"] = int(coin_ocr_result.get("shop_coins", flow.get("shop_coins", -1)))
+            result["trackblazer_shop_summary"]["shop_coins"] = flow["shop_coins"]
+            entry_result = flow.get("entry_result") or {}
+            if entry_result:
+                entry_result["shop_coins"] = flow["shop_coins"]
+                entry_timing = dict(entry_result.get("timing") or {})
+                entry_timing["read_shop_coins_parallel"] = coin_ocr_result.get("timing") or {}
+                entry_result["timing"] = entry_timing
         flow["timing_total"] = round(_time() - t_total, 3)
         flow["timing_controls"] = flow.get("timing_close")
         scan_result = flow.get("scan_result") or {}
@@ -2904,3 +2996,224 @@ def check_trackblazer_shop_inventory(
         f"close={flow.get('timing_close', '-')}"
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Rival-race detection for the Trackblazer race selection screen.
+# ---------------------------------------------------------------------------
+
+# Spatial offset from a rival-racer label to its 2-aptitude stars.
+# Measured empirically: stars are ~77px right, ~71px below the rival label.
+_RIVAL_TO_APTITUDE_DX = 77
+_RIVAL_TO_APTITUDE_DY = 71
+# How far the aptitude match can deviate from the expected position.
+_APTITUDE_PAIR_TOLERANCE = 40
+_APTITUDE_MATCH_THRESHOLD = 0.7
+_RIVAL_BUTTON_INDICATOR_THRESHOLD = 0.75
+
+# VS icon templates that appear on the race button when a rival race exists.
+# Summer and normal lobby have different assets.
+_RIVAL_BUTTON_INDICATORS = [
+    constants.TRACKBLAZER_RACE_TEMPLATES["summer_rival_race_button"],
+    # TODO: add normal lobby variant once captured
+    # constants.TRACKBLAZER_RACE_TEMPLATES["rival_race_button"],
+]
+
+
+def check_rival_race_indicator():
+    """Check the race button area for the VS rival-race indicator icon.
+
+    This is a cheap pre-check on the main lobby screen.  If the VS icon is
+    not present on the race button, there is no rival race this turn and we
+    can skip the expensive scout entirely.
+
+    Returns True if any rival indicator is detected.
+    """
+    screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    for template_path in _RIVAL_BUTTON_INDICATORS:
+        matches = device_action.match_template(
+            template_path,
+            screenshot,
+            threshold=_RIVAL_BUTTON_INDICATOR_THRESHOLD,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+        if matches:
+            info(f"[TB_RIVAL] Rival race indicator found on race button ({template_path}).")
+            return True
+    debug("[TB_RIVAL] No rival race indicator on race button.")
+    return False
+
+
+def find_rival_races_with_aptitude(screenshot=None):
+    """Scan the visible race list for rival races with 2 matching aptitudes.
+
+    Must be called while the race list UI is open.  Searches for all
+    'RIVAL RACER!' labels, then checks each one for a nearby 2-aptitude
+    star icon.  Only rivals with the aptitude confirmation are returned.
+
+    Returns a list of dicts, each with:
+        rival: (x, y, w, h) of the rival label
+        aptitude: (x, y, w, h) of the paired aptitude stars, or None
+        click_target: (x, y) absolute coords to click (the aptitude stars)
+
+    Both templates use inverse global scale (native-res Trackblazer assets).
+    """
+    rival_template = constants.TRACKBLAZER_RACE_TEMPLATES["rival_racer"]
+    aptitude_template = constants.TRACKBLAZER_RACE_TEMPLATES["race_recommend_2_aptitudes"]
+
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+
+    rival_matches = device_action.match_template(
+        rival_template,
+        screenshot,
+        threshold=_RIVAL_RACE_MATCH_THRESHOLD,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+    if not rival_matches:
+        return []
+
+    aptitude_matches = device_action.match_template(
+        aptitude_template,
+        screenshot,
+        threshold=_APTITUDE_MATCH_THRESHOLD,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+
+    results = []
+    for rival in rival_matches:
+        rx, ry = rival[0], rival[1]
+        # Expected aptitude position relative to this rival label.
+        expected_ax = rx + _RIVAL_TO_APTITUDE_DX
+        expected_ay = ry + _RIVAL_TO_APTITUDE_DY
+
+        paired_apt = None
+        for apt in aptitude_matches:
+            ax, ay = apt[0], apt[1]
+            if (abs(ax - expected_ax) < _APTITUDE_PAIR_TOLERANCE
+                    and abs(ay - expected_ay) < _APTITUDE_PAIR_TOLERANCE):
+                paired_apt = apt
+                break
+
+        if paired_apt:
+            # Click target is the centre of the aptitude stars.
+            apt_cx = paired_apt[0] + paired_apt[2] // 2
+            apt_cy = paired_apt[1] + paired_apt[3] // 2
+            results.append({
+                "rival": rival,
+                "aptitude": paired_apt,
+                "click_target": (apt_cx, apt_cy),
+            })
+            debug(
+                f"[TB_RIVAL] Paired rival at ({rx},{ry}) with aptitude at "
+                f"({paired_apt[0]},{paired_apt[1]})"
+            )
+        else:
+            debug(
+                f"[TB_RIVAL] Rival at ({rx},{ry}) has no 2-aptitude match nearby "
+                f"(expected ~({expected_ax},{expected_ay}))"
+            )
+
+    return results
+
+
+def scout_rival_race():
+    """Open the race list, scan for a rival race with good aptitudes, back out.
+
+    Returns a dict:
+        rival_found: bool — at least one rival with 2 aptitudes was found
+        match: first paired result dict, or None
+        all_matches: list of all paired results across all scroll pages
+        rivals_without_aptitude: count of rival labels seen without aptitude
+
+    This is non-committing — always backs out of the race list.
+    Checks the race button VS indicator first as a cheap early-exit.
+    """
+    _no_rival = {"rival_found": False, "match": None, "all_matches": [], "rivals_without_aptitude": 0}
+
+    # Cheap pre-check: is the VS icon on the race button?
+    if not check_rival_race_indicator():
+        return _no_rival
+
+    from utils.screenshot import are_screenshots_same
+    from core.actions import go_to_racebox_top
+
+    # Open race list.
+    races_btn = device_action.locate_and_click(
+        "assets/buttons/races_btn.png",
+        min_search_time=get_secs(10),
+        region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+    )
+    if not races_btn:
+        warning("[TB_RIVAL] Could not open race list for scouting.")
+        return _no_rival
+
+    sleep(1)
+
+    # Dismiss consecutive-race dialog if present.
+    consecutive_cancel_btn = device_action.locate(
+        "assets/buttons/cancel_btn.png", min_search_time=get_secs(1)
+    )
+    if consecutive_cancel_btn:
+        device_action.locate_and_click(
+            "assets/buttons/ok_btn.png", min_search_time=get_secs(1)
+        )
+    sleep(1)
+
+    go_to_racebox_top()
+
+    all_matches = []
+    rivals_without_aptitude = 0
+    for _ in range(10):
+        screenshot = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        page_results = find_rival_races_with_aptitude(screenshot)
+        all_matches.extend(page_results)
+
+        # Also count rival labels that didn't pair, for logging.
+        rival_template = constants.TRACKBLAZER_RACE_TEMPLATES["rival_racer"]
+        rival_only = device_action.match_template(
+            rival_template, screenshot,
+            threshold=_RIVAL_RACE_MATCH_THRESHOLD,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+        rivals_without_aptitude += max(0, len(rival_only) - len(page_results))
+
+        if all_matches:
+            break  # Found at least one good rival, no need to scroll further.
+
+        screenshot_before = screenshot
+        device_action.swipe(
+            constants.RACE_SCROLL_BOTTOM_MOUSE_POS,
+            constants.RACE_SCROLL_TOP_MOUSE_POS,
+        )
+        device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
+        sleep(0.25)
+        screenshot_after = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        if are_screenshots_same(screenshot_before, screenshot_after, diff_threshold=15):
+            break  # Reached end of list.
+
+    # Always back out.
+    device_action.locate_and_click(
+        "assets/buttons/back_btn.png",
+        min_search_time=get_secs(2),
+        region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+    )
+    sleep(0.5)
+
+    found = len(all_matches) > 0
+    if found:
+        info(
+            f"[TB_RIVAL] Scout found {len(all_matches)} rival race(s) with 2 aptitudes "
+            f"({rivals_without_aptitude} rival(s) without aptitude match)."
+        )
+    else:
+        info(
+            f"[TB_RIVAL] Scout: no suitable rival race. "
+            f"({rivals_without_aptitude} rival(s) seen but without 2-aptitude match)."
+        )
+    return {
+        "rival_found": found,
+        "match": all_matches[0] if all_matches else None,
+        "all_matches": all_matches,
+        "rivals_without_aptitude": rivals_without_aptitude,
+    }

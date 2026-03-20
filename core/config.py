@@ -1,6 +1,8 @@
 import json
 import os
 
+from core.trackblazer_shop import normalize_shop_policy
+
 #put a default for sleep time multiplier since it's an important value
 SLEEP_TIME_MULTIPLIER = 1
 
@@ -113,6 +115,10 @@ def reload_config(print_config=True):
     load_var('VERBOSE_OCR', debug_config.get("verbose_ocr", False))
     load_var('DEVICE_DEBUG_LOGGING', debug_config.get("device_debug", False))
     load_var('SAVE_DEBUG_IMAGES', debug_config.get("save_debug_images", False))
+
+    trackblazer_config = config.get("trackblazer", {})
+    load_var('TRACKBLAZER_CONFIG', trackblazer_config)
+    load_var('TRACKBLAZER_SHOP_POLICY', normalize_shop_policy(trackblazer_config.get("shop_policy")))
       
   except KeyError as e:
     raise RuntimeError(f"Missing config key: {e.args[0]}, please copy it to config.json from config.template.json and try again")

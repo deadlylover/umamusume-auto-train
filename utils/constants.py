@@ -271,6 +271,12 @@ TRACKBLAZER_ITEM_CATEGORIES = {
 }
 
 # Trackblazer shop purchase flow UI templates.
+TRACKBLAZER_RACE_TEMPLATES = {
+  "rival_racer": "assets/trackblazer/rival_racer.png",
+  "race_recommend_2_aptitudes": "assets/trackblazer/race_recommend_2_aptitudes.png",
+  "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
+}
+
 TRACKBLAZER_SHOP_UI_TEMPLATES = {
   "shop_confirm": "assets/trackblazer/shop_confirm.png",
   "shop_aftersale_close": "assets/trackblazer/shop_aftersale_close.png",

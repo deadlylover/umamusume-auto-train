@@ -9,6 +9,14 @@ from PIL import Image, ImageTk
 
 import core.bot as bot
 import core.config as config
+from core.trackblazer_shop import (
+  PRIORITY_LEVELS,
+  get_default_shop_policy,
+  get_effective_shop_items,
+  normalize_priority,
+  normalize_shop_policy,
+  policy_context,
+)
 import utils.constants as constants
 import utils.device_action_wrapper as device_action
 from core.platform.window_focus import focus_target_window
@@ -82,6 +90,11 @@ class OperatorConsole:
     self._ocr_debug_asset_photo = None
     self._ocr_debug_region_photo = None
     self._preview_windows = {}
+    self._shop_policy_window = None
+    self._shop_policy_rows = []
+    self._shop_policy_context_var = None
+    self._shop_policy_canvas = None
+    self._shop_policy_body = None
     self._bot_button = None
     self._pause_button = None
     self._resume_button = None
@@ -274,6 +287,11 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Button(
+      tertiary_controls,
+      text="Shop Policy",
+      command=self._open_trackblazer_shop_policy_window,
     ).pack(side=tk.LEFT, padx=(12, 0))
 
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
@@ -515,6 +533,24 @@ class OperatorConsole:
       "shop_flow": state_summary.get("trackblazer_shop_flow"),
       "shop_items": snapshot.get("trackblazer_shop_items"),
       "skill_purchase_flow": state_summary.get("skill_purchase_flow"),
+      "shop_policy_context": policy_context(
+        year=state_summary.get("year"),
+        turn=state_summary.get("turn"),
+      ),
+      "shop_priority_preview": [
+        {
+          "name": item.get("display_name"),
+          "priority": item.get("effective_priority"),
+          "max_quantity": item.get("max_quantity"),
+          "cost": item.get("cost"),
+          "asset_collected": item.get("asset_collected"),
+        }
+        for item in get_effective_shop_items(
+          policy=getattr(config, "TRACKBLAZER_SHOP_POLICY", None),
+          year=state_summary.get("year"),
+          turn=state_summary.get("turn"),
+        )[:12]
+      ],
     }
     self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
@@ -974,6 +1010,262 @@ class OperatorConsole:
         )
     except Exception as exc:  # pragma: no cover
       debug(f"Operator console failed to launch region adjuster: {exc}")
+
+  def _trackblazer_shop_policy_context(self):
+    runtime_state = bot.get_runtime_state()
+    snapshot = runtime_state.get("snapshot") or {}
+    state_summary = snapshot.get("state_summary") or {}
+    return policy_context(
+      year=state_summary.get("year"),
+      turn=state_summary.get("turn"),
+    )
+
+  def _open_trackblazer_shop_policy_window(self):
+    if self._root is None:
+      return
+
+    existing = self._shop_policy_window
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          self._refresh_trackblazer_shop_policy_window()
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    window = tk.Toplevel(self._root)
+    window.title("Trackblazer Shop Policy")
+    window.configure(bg="#101418")
+    window.geometry("1280x820")
+    window.rowconfigure(1, weight=1)
+    window.columnconfigure(0, weight=1)
+    window.bind(
+      "<Destroy>",
+      lambda event, root_window=window: self._clear_trackblazer_shop_policy_window() if event.widget is root_window else None,
+    )
+
+    header = tk.Frame(window, bg="#101418", padx=8, pady=8)
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    self._shop_policy_context_var = tk.StringVar(value="")
+    tk.Label(
+      header,
+      textvariable=self._shop_policy_context_var,
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+    ).grid(row=0, column=0, sticky="w")
+    tk.Button(header, text="Reload", command=self._refresh_trackblazer_shop_policy_window).grid(row=0, column=1, padx=(8, 0))
+    tk.Button(header, text="Reset Defaults", command=self._reset_trackblazer_shop_policy_defaults).grid(row=0, column=2, padx=(8, 0))
+    tk.Button(header, text="Save", command=self._save_trackblazer_shop_policy_from_window).grid(row=0, column=3, padx=(8, 0))
+
+    body_frame = tk.Frame(window, bg="#101418")
+    body_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    body_frame.rowconfigure(0, weight=1)
+    body_frame.columnconfigure(0, weight=1)
+
+    canvas = tk.Canvas(body_frame, bg="#101418", highlightthickness=0)
+    scrollbar = tk.Scrollbar(body_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+
+    inner = tk.Frame(canvas, bg="#101418")
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind(
+      "<Configure>",
+      lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.bind(
+      "<Configure>",
+      lambda event: canvas.itemconfigure("all", width=event.width),
+    )
+
+    self._shop_policy_window = window
+    self._shop_policy_canvas = canvas
+    self._shop_policy_body = inner
+    self._refresh_trackblazer_shop_policy_window()
+
+  def _clear_trackblazer_shop_policy_window(self):
+    self._shop_policy_window = None
+    self._shop_policy_rows = []
+    self._shop_policy_context_var = None
+    self._shop_policy_canvas = None
+    self._shop_policy_body = None
+
+  def _refresh_trackblazer_shop_policy_window(self):
+    if self._shop_policy_body is None:
+      return
+
+    context = self._trackblazer_shop_policy_context()
+    context_label = context.get("timeline_label") or "Unknown timeline context"
+    context_suffix = "" if context.get("known_timeline") else " (live sort is using base order only)"
+    if self._shop_policy_context_var is not None:
+      self._shop_policy_context_var.set(
+        f"Priority list is shown top-to-bottom for: {context_label}{context_suffix}"
+      )
+
+    for child in self._shop_policy_body.winfo_children():
+      child.destroy()
+    self._shop_policy_rows = []
+
+    headers = [
+      ("#", 0),
+      ("Item", 1),
+      ("Cost", 2),
+      ("Priority", 3),
+      ("Max", 4),
+      ("Effective", 5),
+      ("Asset", 6),
+      ("Notes", 7),
+    ]
+    for text, column in headers:
+      tk.Label(
+        self._shop_policy_body,
+        text=text,
+        fg="white",
+        bg="#151b22",
+        padx=6,
+        pady=4,
+        anchor="w",
+        font=("Helvetica", 10, "bold"),
+      ).grid(row=0, column=column, sticky="ew", padx=1, pady=(0, 4))
+
+    normalized_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
+    items = get_effective_shop_items(
+      policy=normalized_policy,
+      year=context.get("year"),
+      turn=context.get("turn"),
+    )
+
+    for row_index, item in enumerate(items, start=1):
+      row_bg = "#192028" if row_index % 2 else "#151b22"
+      key = item["key"]
+      item_policy = normalized_policy["items"].get(key, {})
+      priority_var = tk.StringVar(value=item_policy.get("priority", item.get("priority", "MED")))
+      max_var = tk.StringVar(value=str(item_policy.get("max_quantity", item.get("max_quantity", 0))))
+      self._shop_policy_rows.append(
+        {
+          "key": key,
+          "priority_var": priority_var,
+          "max_var": max_var,
+        }
+      )
+
+      tk.Label(self._shop_policy_body, text=str(row_index), fg="#d6dde5", bg=row_bg, padx=6, pady=3).grid(row=row_index, column=0, sticky="nsew", padx=1, pady=1)
+      tk.Label(
+        self._shop_policy_body,
+        text=f"{item['display_name']}\n{item['category']}",
+        fg="white",
+        bg=row_bg,
+        justify="left",
+        anchor="w",
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=1, sticky="nsew", padx=1, pady=1)
+      tk.Label(self._shop_policy_body, text=str(item["cost"]), fg="#d6dde5", bg=row_bg, padx=6, pady=3).grid(row=row_index, column=2, sticky="nsew", padx=1, pady=1)
+      priority_menu = tk.OptionMenu(self._shop_policy_body, priority_var, *PRIORITY_LEVELS)
+      priority_menu.configure(width=7, bg=row_bg, fg="white", highlightthickness=0, activebackground="#1f6feb")
+      priority_menu["menu"].configure(bg="#192028", fg="white")
+      priority_menu.grid(row=row_index, column=3, sticky="nsew", padx=1, pady=1)
+      tk.Spinbox(
+        self._shop_policy_body,
+        from_=0,
+        to=9,
+        width=4,
+        textvariable=max_var,
+        bg=row_bg,
+        fg="white",
+        buttonbackground="#2d333b",
+      ).grid(row=row_index, column=4, sticky="nsew", padx=1, pady=1)
+      effective_label = item["effective_priority"]
+      if item.get("active_timing_rules"):
+        effective_label = f"{effective_label} *"
+      tk.Label(
+        self._shop_policy_body,
+        text=effective_label,
+        fg="#8bd5ca" if item.get("active_timing_rules") else "#d6dde5",
+        bg=row_bg,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=5, sticky="nsew", padx=1, pady=1)
+      tk.Label(
+        self._shop_policy_body,
+        text="collected" if item.get("asset_collected") else "missing",
+        fg="#8bd5ca" if item.get("asset_collected") else "#ffb86c",
+        bg=row_bg,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=6, sticky="nsew", padx=1, pady=1)
+      notes_parts = [item.get("effect", ""), item.get("policy_notes", "")]
+      notes_parts.extend(
+        rule.get("note") for rule in (item.get("active_timing_rules") or []) if rule.get("note")
+      )
+      tk.Label(
+        self._shop_policy_body,
+        text="\n".join(part for part in notes_parts if part),
+        fg="#d6dde5",
+        bg=row_bg,
+        justify="left",
+        anchor="w",
+        wraplength=520,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=7, sticky="nsew", padx=1, pady=1)
+
+    for column in range(8):
+      weight = 1 if column in (1, 7) else 0
+      self._shop_policy_body.columnconfigure(column, weight=weight)
+
+  def _save_trackblazer_shop_policy_from_window(self):
+    current_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
+    items = current_policy.get("items", {})
+    for row in self._shop_policy_rows:
+      key = row["key"]
+      max_text = str(row["max_var"].get() or "").strip()
+      try:
+        max_quantity = max(0, int(max_text))
+      except ValueError:
+        max_quantity = items.get(key, {}).get("max_quantity", 0)
+      item_policy = dict(items.get(key, {}))
+      item_policy["priority"] = normalize_priority(row["priority_var"].get())
+      item_policy["max_quantity"] = max_quantity
+      items[key] = item_policy
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "items": items,
+    }
+    if not self._persist_config_value("trackblazer.shop_policy", policy):
+      self._message_value.set("Failed to save Trackblazer shop policy.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved Trackblazer shop policy, but reload failed: {exc}")
+      return
+
+    self._refresh_trackblazer_shop_policy_window()
+    self._message_value.set("Saved Trackblazer shop policy.")
+    self.publish()
+
+  def _reset_trackblazer_shop_policy_defaults(self):
+    if not self._persist_config_value("trackblazer.shop_policy", get_default_shop_policy()):
+      self._message_value.set("Failed to reset Trackblazer shop policy.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Reset Trackblazer shop policy, but reload failed: {exc}")
+      return
+
+    self._refresh_trackblazer_shop_policy_window()
+    self._message_value.set("Reset Trackblazer shop policy to defaults.")
+    self.publish()
 
 
 def ensure_operator_console():

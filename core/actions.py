@@ -222,9 +222,26 @@ def enter_race(race_name="any", race_image_path="", options=None):
     race_image_path = "assets/ui/match_track.png"
   sleep(1)
 
+  prefer_rival = options is not None and options.get("prefer_rival_race", False)
+
   go_to_racebox_top()
   while True:
     screenshot1 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+
+    # Trackblazer rival-race priority: find a rival race with 2 matching
+    # aptitudes and click the aptitude stars to select it.
+    if prefer_rival:
+      from scenarios.trackblazer import find_rival_races_with_aptitude
+      paired = find_rival_races_with_aptitude()
+      if paired:
+        click_target = paired[0]["click_target"]
+        # click_target is region-relative; add RACE_LIST_BOX_BBOX origin.
+        abs_x = click_target[0] + constants.RACE_LIST_BOX_BBOX[0]
+        abs_y = click_target[1] + constants.RACE_LIST_BOX_BBOX[1]
+        info(f"[RIVAL] Clicking rival race aptitude stars at ({abs_x}, {abs_y})")
+        device_action.click(target=(abs_x, abs_y), duration=0.15)
+        break
+
     if options is not None and "race_mission_available" in options and options["race_mission_available"]:
       mission_icon = device_action.locate("assets/icons/race_mission_icon.png", min_search_time=get_secs(1), region_ltrb=constants.RACE_LIST_BOX_BBOX, template_scaling=0.72)
       if mission_icon:
@@ -241,6 +258,12 @@ def enter_race(race_name="any", race_image_path="", options=None):
     sleep(0.25)
     screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
     if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
+      if prefer_rival:
+        info(f"[RIVAL] No rival race found in list, falling back to generic match.")
+        # Restart scan without rival preference so we pick any race.
+        options["prefer_rival_race"] = False
+        go_to_racebox_top()
+        continue
       info(f"Couldn't find race image")
       device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
       return False

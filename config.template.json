@@ -70,6 +70,9 @@
   },
   "use_skip_claw_machine": false,
   "scenario_gimmick_weight": 1.0,
+  "trackblazer": {
+    "shop_policy": {}
+  },
   "race_schedule": [
     {
       "name": "Satsuki Sho",
