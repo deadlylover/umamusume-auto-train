@@ -395,12 +395,13 @@ def most_stat_score(x, state, training_template):
   stat_gains = training_data['stat_gains']
   total_value = 0
 
-  # Sum up weighted stat gains, excluding capped stats
+  # Sum up weighted visible stat gains. Skill points are intentionally excluded
+  # from the training-value score so only main/secondary stats drive weighting.
   for stat, gain in stat_gains.items():
-    if stat != "sp":
-      stat_cap = config.STAT_CAPS[stat]
-    else:
-      stat_cap = 9999
+    if stat == "sp":
+      continue
+
+    stat_cap = config.STAT_CAPS[stat]
     current_stat = state['current_stats'][stat]
 
     # Skip this stat's contribution if at cap

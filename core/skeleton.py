@@ -1006,7 +1006,17 @@ def _get_training_filter_settings(training_function):
   return settings
 
 
-def _summarize_training_exclusion(training_name, training_data, state_obj, training_function):
+def _resolve_review_risk_taking_set(state_obj, training_function):
+  settings = _get_training_filter_settings(training_function)
+  if not settings["use_risk_taking"] or not isinstance(training_function, str):
+    return {}
+
+  training_template = Strategy().get_training_template(state_obj) or {}
+  risk_taking_set = training_template.get("risk_taking_set")
+  return risk_taking_set if isinstance(risk_taking_set, dict) else {}
+
+
+def _summarize_training_exclusion(training_name, training_data, state_obj, training_function, risk_taking_set=None):
   settings = _get_training_filter_settings(training_function)
   current_stats = state_obj.get("current_stats") or {}
   current_stat = current_stats.get(training_name)
@@ -1016,15 +1026,10 @@ def _summarize_training_exclusion(training_name, training_data, state_obj, train
   max_allowed_failure = config.MAX_FAILURE
 
   if settings["use_risk_taking"]:
-    risk_taking_key = None
-    if isinstance(training_function, str):
-      strategy = Strategy()
-      training_template = strategy.get_training_template(state_obj) or {}
-      risk_taking_key = training_template.get("risk_taking_set")
-    risk_taking_set = config.RISK_TAKING.get(risk_taking_key, {}) if risk_taking_key else {}
-    if risk_taking_set:
+    resolved_risk_taking_set = risk_taking_set if isinstance(risk_taking_set, dict) else {}
+    if resolved_risk_taking_set:
       from core.trainings import calculate_risk_increase
-      risk_increase = calculate_risk_increase(training_data, risk_taking_set)
+      risk_increase = calculate_risk_increase(training_data, resolved_risk_taking_set)
       max_allowed_failure += risk_increase
 
   reason = "filtered"
@@ -1041,6 +1046,7 @@ def _summarize_training_exclusion(training_name, training_data, state_obj, train
 def _build_ranked_training_snapshot(state_obj, available_trainings, training_function):
   raw_training_results = state_obj.get("training_results", {}) or {}
   merged_trainings = CleanDefaultDict()
+  risk_taking_set = _resolve_review_risk_taking_set(state_obj, training_function)
 
   for training_name, training_data in raw_training_results.items():
     max_allowed_failure, risk_increase, exclusion_reason = _summarize_training_exclusion(
@@ -1048,6 +1054,7 @@ def _build_ranked_training_snapshot(state_obj, available_trainings, training_fun
       training_data=training_data,
       state_obj=state_obj,
       training_function=training_function,
+      risk_taking_set=risk_taking_set,
     )
     merged_trainings[training_name] = {
       "name": training_name,

@@ -86,9 +86,7 @@ class OperatorConsole:
     self._details_notebook = None
     self._planned_actions_text = None
     self._timing_text = None
-    self._summary_notebook = None
-    self._summary_text = None
-    self._summary_raw_text = None
+    self._summary_raw_value = ""
     self._training_text = None
     self._inventory_text = None
     self._ocr_debug_entries = []
@@ -99,8 +97,8 @@ class OperatorConsole:
     self._ocr_debug_asset_photo = None
     self._ocr_debug_region_photo = None
     self._preview_windows = {}
-    self._training_collapsed = False
-    self._ocr_collapsed = False
+    self._training_collapsed = True
+    self._ocr_collapsed = True
     self._training_header = None
     self._training_panel = None
     self._training_toggle_label = None
@@ -387,17 +385,13 @@ class OperatorConsole:
     summary_header.columnconfigure(0, weight=1)
     summary_header.columnconfigure(1, weight=0)
     summary_header.columnconfigure(2, weight=0)
-    summary_header.columnconfigure(3, weight=0)
-    summary_header.columnconfigure(4, weight=1)
-    summary_header.columnconfigure(5, weight=0)
+    summary_header.columnconfigure(3, weight=1)
     tk.Label(summary_header, text="Planned Actions / Timing", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
     tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=1, sticky="e", padx=(0, 4))
     tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=2, sticky="e", padx=(0, 12))
-    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=4, sticky="w")
-    tk.Button(summary_header, text="Copy Summary", command=self._copy_active_summary).grid(row=0, column=5, sticky="e")
-    summary_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
-    summary_panel.grid(row=2, column=0, sticky="nsew", pady=(2, 6))
-    details_container = tk.Frame(summary_panel, bg="#101418")
+    tk.Button(summary_header, text="Copy Summary", command=self._copy_active_summary).grid(row=0, column=3, sticky="e")
+    details_container = tk.Frame(right, bg="#101418")
+    details_container.grid(row=2, column=0, sticky="nsew", pady=(2, 6))
     details_container.rowconfigure(0, weight=1)
     details_container.columnconfigure(0, weight=1)
     self._details_notebook = ttk.Notebook(details_container)
@@ -429,25 +423,6 @@ class OperatorConsole:
     self._details_notebook.add(planned_actions_frame, text="Planned Actions")
     self._details_notebook.add(timing_frame, text="Timing")
     self._details_notebook.select(planned_actions_frame)
-    summary_panel.add(details_container, minsize=self.NARROW_PANE_MIN_WIDTH)
-    summary_frame = tk.Frame(summary_panel, bg="#101418")
-    summary_frame.rowconfigure(0, weight=1)
-    summary_frame.columnconfigure(0, weight=1)
-    self._summary_notebook = ttk.Notebook(summary_frame)
-    self._summary_notebook.grid(row=0, column=0, sticky="nsew")
-    summary_brief_frame = tk.Frame(self._summary_notebook, bg="#101418")
-    summary_brief_frame.rowconfigure(0, weight=1)
-    summary_brief_frame.columnconfigure(0, weight=1)
-    self._summary_text = scrolledtext.ScrolledText(summary_brief_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._summary_text.grid(row=0, column=0, sticky="nsew")
-    summary_raw_frame = tk.Frame(self._summary_notebook, bg="#101418")
-    summary_raw_frame.rowconfigure(0, weight=1)
-    summary_raw_frame.columnconfigure(0, weight=1)
-    self._summary_raw_text = scrolledtext.ScrolledText(summary_raw_frame, height=8, bg="#192028", fg="#d6dde5", insertbackground="white")
-    self._summary_raw_text.grid(row=0, column=0, sticky="nsew")
-    self._summary_notebook.add(summary_brief_frame, text="Compact")
-    self._summary_notebook.add(summary_raw_frame, text="Raw")
-    summary_panel.add(summary_frame, minsize=220)
 
     training_header = tk.Frame(right, bg="#101418")
     training_header.grid(row=3, column=0, sticky="ew")
@@ -533,6 +508,13 @@ class OperatorConsole:
 
     tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
     tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=8, column=0, sticky="ew")
+    if self._training_collapsed:
+      self._training_toggle_label.configure(text="\u25b6 Ranked Trainings")
+      self._training_panel.grid_remove()
+    if self._ocr_collapsed:
+      self._ocr_toggle_label.configure(text="\u25b6 OCR Debug")
+      self._ocr_panel.grid_remove()
+    self._rebalance_right_pane_weights()
 
   def _make_stat(self, parent, column, title):
     row = 0 if column < 5 else 1
@@ -550,8 +532,7 @@ class OperatorConsole:
       return
     training_weight = 0 if self._training_collapsed else 1
     ocr_weight = 0 if self._ocr_collapsed else 3
-    # Give planned actions section more space when others collapse
-    planned_weight = 1 + (1 if self._training_collapsed else 0) + (3 if self._ocr_collapsed else 0)
+    planned_weight = 4 + (1 if self._training_collapsed else 0) + (3 if self._ocr_collapsed else 0)
     right.rowconfigure(2, weight=planned_weight)
     right.rowconfigure(4, weight=training_weight)
     right.rowconfigure(6, weight=ocr_weight)
@@ -684,8 +665,7 @@ class OperatorConsole:
       },
       "planned_clicks": snapshot.get("planned_clicks"),
     }
-    self._set_text(self._summary_text, self._format_compact_summary(snapshot))
-    self._set_text(self._summary_raw_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
+    self._summary_raw_value = json.dumps(summary_payload, indent=2, ensure_ascii=True)
     self._set_text(self._planned_actions_text, self._format_planned_actions(snapshot))
     self._set_text(self._timing_text, self._format_timing(snapshot))
     self._update_quick_bar(snapshot)
@@ -831,15 +811,9 @@ class OperatorConsole:
   def _copy_active_summary(self):
     if self._root is None:
       return
-    widget = self._summary_text
-    if self._summary_notebook is not None and self._summary_raw_text is not None:
-      try:
-        current_tab = self._summary_notebook.select()
-        if current_tab == str(self._summary_raw_text.master):
-          widget = self._summary_raw_text
-      except Exception:
-        widget = self._summary_text
-    self._copy_widget(widget)
+    self._root.clipboard_clear()
+    self._root.clipboard_append(self._summary_raw_value or "")
+    self._message_value.set("Copied raw summary to clipboard.")
 
   def _format_compact_summary(self, snapshot, include_prompt=True):
     state_summary = snapshot.get("state_summary") or {}
@@ -916,10 +890,8 @@ class OperatorConsole:
       if score_tuple:
         parts.append(f"score {self._format_number(score_tuple[0], digits=3)}")
       gains = selected_action.get("stat_gains") or {}
-      total_gain = sum(self._safe_int(value) for value in gains.values())
-      matching_gain = self._safe_int(gains.get(training_name))
-      if matching_gain:
-        parts.append(f"{training_name}+{matching_gain}")
+      total_gain = self._sum_visible_training_gains(gains)
+      parts.extend(self._format_training_gain_parts(training_name, gains))
       if total_gain:
         parts.append(f"total+{total_gain}")
       rainbows = selected_action.get("total_rainbow_friends")
@@ -960,7 +932,7 @@ class OperatorConsole:
       score_tuple = entry.get("score_tuple") or ()
       score_value = score_tuple[0] if score_tuple else None
       gains = entry.get("stat_gains") or {}
-      total_gain = sum(self._safe_int(value) for value in gains.values())
+      total_gain = self._sum_visible_training_gains(gains)
       entries.append(
         {
           "name": entry.get("name") or "?",
@@ -992,11 +964,9 @@ class OperatorConsole:
         parts.append(f"score {self._format_number(entry['score'], digits=3)}")
       elif entry.get("filtered_out"):
         parts.append("discarded")
+      parts.extend(self._format_training_gain_parts(entry["name"], entry.get("stat_gains") or {}))
       if entry["total_gain"]:
         parts.append(f"total+{entry['total_gain']}")
-      matching_gain = self._safe_int((entry.get("stat_gains") or {}).get(entry["name"]))
-      if matching_gain:
-        parts.append(f"{entry['name']}+{matching_gain}")
       if entry.get("rainbows") is not None:
         parts.append(f"rainbows {entry['rainbows']}")
       if entry.get("supports") is not None:
@@ -1259,6 +1229,29 @@ class OperatorConsole:
       return int(value)
     except (TypeError, ValueError):
       return default_value
+
+  def _visible_training_gains(self, gains):
+    visible = {}
+    for stat, value in (gains or {}).items():
+      if stat == "sp":
+        continue
+      amount = self._safe_int(value)
+      if amount:
+        visible[stat] = amount
+    return visible
+
+  def _sum_visible_training_gains(self, gains):
+    return sum(self._visible_training_gains(gains).values())
+
+  def _format_training_gain_parts(self, training_name, gains):
+    visible = self._visible_training_gains(gains)
+    ordered = []
+    main_gain = visible.pop(training_name, 0)
+    if main_gain:
+      ordered.append(f"{training_name}+{main_gain}")
+    for stat in sorted(visible):
+      ordered.append(f"{stat}+{visible[stat]}")
+    return ordered
 
   def _safe_float(self, value, default_value=None):
     try:
