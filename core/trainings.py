@@ -26,6 +26,8 @@ def create_training_score_entry(training_name, training_data, score_tuple):
   entry = {
     "score_tuple": score_tuple,
     "failure": training_data["failure"],
+    "max_allowed_failure": training_data.get("max_allowed_failure"),
+    "risk_increase": training_data.get("risk_increase", 0),
     "total_supports": training_data["total_supports"],
     "stat_gains": training_data["stat_gains"],
     "friendship_levels": training_data["total_friendship_levels"],
@@ -326,6 +328,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
 
     max_allowed_failure = config.MAX_FAILURE
     # Calculate max allowed failure (with or without risk bonuses)
+    risk_increase = 0
     if use_risk_taking:
       risk_increase = calculate_risk_increase(training_data, risk_taking_set)
       max_allowed_failure += risk_increase
@@ -345,6 +348,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
 
     training_data["is_capped"] = is_capped
     training_data["max_allowed_failure"] = max_allowed_failure
+    training_data["risk_increase"] = risk_increase
 
     filtered_results[training_name] = training_data
 

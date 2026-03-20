@@ -15,9 +15,10 @@ from core.events import select_event
 from core.claw_machine import play_claw_machine
 from core.skill import init_skill_py, get_skill_purchase_context, update_skill_action_count
 from core.skill_scanner import collect_skill_purchase
+from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
-from core.trackblazer_shop import get_priority_preview, policy_context
+from core.trackblazer_shop import get_effective_shop_items, get_priority_preview, policy_context
 
 pyautogui.useImageNotFoundException(False)
 
@@ -681,6 +682,102 @@ def _planned_clicks_for_action(action):
   return []
 
 
+def _build_trackblazer_planned_actions(state_obj, action):
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return {}
+
+  inventory = state_obj.get("trackblazer_inventory") or {}
+  inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
+  inventory_flow = state_obj.get("trackblazer_inventory_flow") or {}
+  shop_items = list(state_obj.get("trackblazer_shop_items") or [])
+  shop_summary = state_obj.get("trackblazer_shop_summary") or {}
+  shop_flow = state_obj.get("trackblazer_shop_flow") or {}
+  held_quantities = inventory_summary.get("held_quantities") or {}
+  item_use_plan = plan_item_usage(
+    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    state_obj=state_obj,
+    action=action,
+    limit=8,
+  )
+  effective_shop_items = get_effective_shop_items(
+    policy=config.TRACKBLAZER_SHOP_POLICY,
+    year=state_obj.get("year"),
+    turn=state_obj.get("turn"),
+  )
+
+  would_use = list(item_use_plan.get("candidates") or [])
+  actionable_items = list(inventory_summary.get("actionable_items") or [])
+
+  detected_shop_keys = set(shop_items or shop_summary.get("items_detected") or [])
+  would_buy = []
+  for item in effective_shop_items:
+    item_key = item.get("key")
+    if item_key not in detected_shop_keys:
+      continue
+    if item.get("effective_priority") == "NEVER":
+      continue
+    held_quantity = int(held_quantities.get(item_key) or 0)
+    max_quantity = int(item.get("max_quantity") or 0)
+    remaining_capacity = max(0, max_quantity - held_quantity)
+    if max_quantity > 0 and remaining_capacity <= 0:
+      continue
+    reason_parts = [f"policy={item.get('effective_priority')}"]
+    timing_rules = item.get("active_timing_rules") or []
+    if timing_rules:
+      rule = timing_rules[0]
+      reason_parts.append(rule.get("label") or "timing override")
+      if rule.get("note"):
+        reason_parts.append(rule["note"])
+    elif item.get("policy_notes"):
+      reason_parts.append(item["policy_notes"])
+    if max_quantity > 0:
+      reason_parts.append(f"hold {held_quantity}/{max_quantity}")
+    would_buy.append(
+      {
+        "key": item_key,
+        "name": item.get("display_name") or str(item_key or "").replace("_", " ").title(),
+        "priority": item.get("effective_priority"),
+        "cost": item.get("cost"),
+        "held_quantity": held_quantity,
+        "max_quantity": max_quantity,
+        "reason": "; ".join(part for part in reason_parts if part),
+      }
+    )
+  would_buy = would_buy[:8]
+
+  inventory_status = "unknown"
+  if inventory_flow.get("opened") or inventory_flow.get("already_open"):
+    inventory_status = "scanned"
+  elif inventory_flow.get("skipped"):
+    inventory_status = "skipped"
+
+  shop_status = "unknown"
+  if shop_flow.get("entered"):
+    shop_status = "scanned" if shop_flow.get("closed") else "open_failed_to_close"
+  elif shop_flow:
+    shop_status = "skipped" if shop_flow.get("reason") else "failed"
+
+  return {
+    "inventory_scan": {
+      "status": inventory_status,
+      "reason": inventory_flow.get("reason") or "",
+      "button_visible": inventory_flow.get("use_training_items_button_visible"),
+      "items_detected": inventory_summary.get("items_detected") or [],
+      "actionable_items": actionable_items,
+    },
+    "would_use": would_use,
+    "would_use_context": item_use_plan.get("context") or {},
+    "deferred_use": item_use_plan.get("deferred") or [],
+    "shop_scan": {
+      "status": shop_status,
+      "reason": shop_flow.get("reason") or "",
+      "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
+      "items_detected": shop_summary.get("items_detected") or shop_items,
+    },
+    "would_buy": would_buy,
+  }
+
+
 def _ocr_debug_for_action(state_obj, action):
   entries = _base_ocr_debug_entries(state_obj)
   if not hasattr(action, "func"):
@@ -760,10 +857,12 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "screenshot_backend": backend_state.get("screenshot_backend"),
     "device_id": backend_state.get("device_id"),
   }
-  if (constants.SCENARIO_NAME or "default") == "trackblazer":
+  if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
     state_summary["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
     state_summary["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
+    state_summary["trackblazer_shop_summary"] = state_obj.get("trackblazer_shop_summary")
+    state_summary["trackblazer_shop_flow"] = state_obj.get("trackblazer_shop_flow")
     shop_policy_context = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
     state_summary["trackblazer_shop_policy_context"] = shop_policy_context
     state_summary["trackblazer_shop_priority_preview"] = get_priority_preview(
@@ -788,6 +887,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
           "name": training_name,
           "score_tuple": None,
           "failure": training_data.get("failure"),
+          "max_allowed_failure": training_data.get("max_allowed_failure"),
+          "risk_increase": training_data.get("risk_increase", 0),
           "total_supports": training_data.get("total_supports"),
           "total_rainbow_friends": None,
           "total_friendship_increases": None,
@@ -802,6 +903,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
         "name": training_name,
         "score_tuple": training_data.get("score_tuple"),
         "failure": training_data.get("failure"),
+        "max_allowed_failure": training_data.get("max_allowed_failure"),
+        "risk_increase": training_data.get("risk_increase", 0),
         "total_supports": training_data.get("total_supports"),
         "total_rainbow_friends": training_data.get("total_rainbow_friends"),
         "total_friendship_increases": training_data.get("total_friendship_increases"),
@@ -821,6 +924,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "available_actions": list(getattr(action, "available_actions", [])),
     "ranked_trainings": ranked_trainings,
     "trackblazer_inventory": state_obj.get("trackblazer_inventory") if isinstance(state_obj, dict) else None,
+    "trackblazer_shop_items": state_obj.get("trackblazer_shop_items") if isinstance(state_obj, dict) else None,
+    "planned_actions": _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {},
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
     "backend_state": backend_state,
@@ -1298,8 +1403,20 @@ def career_lobby(dry_run_turn=False):
       state_obj = collect_main_state()
 
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        execution_intent = bot.get_execution_intent()
         update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
-        state_obj = collect_trackblazer_inventory(state_obj)
+        state_obj = collect_trackblazer_inventory(
+          state_obj,
+          allow_open_non_execute=execution_intent in ("check_only", "preview_clicks"),
+        )
+        if execution_intent == "check_only":
+          update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
+          from scenarios.trackblazer import check_trackblazer_shop_inventory
+          shop_result = check_trackblazer_shop_inventory(trigger="automatic")
+          if isinstance(shop_result, dict):
+            for key in ("trackblazer_shop_items", "trackblazer_shop_summary", "trackblazer_shop_flow"):
+              if key in shop_result:
+                state_obj[key] = shop_result[key]
 
       if state_obj["turn"] == "Race Day":
         action.func = "do_race"

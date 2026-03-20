@@ -1,6 +1,7 @@
 import json
 import os
 
+from core.trackblazer_item_use import normalize_item_use_policy
 from core.trackblazer_shop import normalize_shop_policy
 
 #put a default for sleep time multiplier since it's an important value
@@ -119,6 +120,7 @@ def reload_config(print_config=True):
     trackblazer_config = config.get("trackblazer", {})
     load_var('TRACKBLAZER_CONFIG', trackblazer_config)
     load_var('TRACKBLAZER_SHOP_POLICY', normalize_shop_policy(trackblazer_config.get("shop_policy")))
+    load_var('TRACKBLAZER_ITEM_USE_POLICY', normalize_item_use_policy(trackblazer_config.get("item_use_policy")))
       
   except KeyError as e:
     raise RuntimeError(f"Missing config key: {e.args[0]}, please copy it to config.json from config.template.json and try again")

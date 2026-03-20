@@ -71,7 +71,8 @@
   "use_skip_claw_machine": false,
   "scenario_gimmick_weight": 1.0,
   "trackblazer": {
-    "shop_policy": {}
+    "shop_policy": {},
+    "item_use_policy": {}
   },
   "race_schedule": [
     {

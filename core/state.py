@@ -436,6 +436,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     close_training_items_inventory,
     detect_inventory_screen,
     detect_inventory_controls,
+    detect_use_training_items_button,
   )
 
   if constants.SCENARIO_NAME not in ("mant", "trackblazer") and trigger != "manual_console":
@@ -469,10 +470,17 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
 
   inventory_screen_open, _, precheck_entries = detect_inventory_screen()
   flow["precheck"] = precheck_entries
+  use_items_button = detect_use_training_items_button()
+  flow["use_training_items_button_visible"] = bool(use_items_button)
+  flow["use_training_items_button_match"] = list(use_items_button) if use_items_button else None
 
   if inventory_screen_open:
     flow["opened"] = True
     flow["already_open"] = True
+  elif not use_items_button:
+    flow["skipped"] = True
+    flow["reason"] = "inventory_button_not_visible"
+    debug("[STATE] Trackblazer inventory button is not visible on the lobby.")
   elif bot.get_execution_intent() != "execute" and not allow_open_non_execute:
     flow["skipped"] = True
     flow["reason"] = "inventory_open_requires_execute_intent"
@@ -524,6 +532,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
   state_object["trackblazer_inventory_flow"] = flow
 
   detected = summary.get("items_detected", [])
+  summary["inventory_button_visible"] = flow.get("use_training_items_button_visible", False)
   if detected:
     info(f"[STATE] Trackblazer items detected: {detected}")
   else:
@@ -549,7 +558,11 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
 
 def collect_training_state(state_object, training_function_name):
   check_stat_gains = False
-  if training_function_name == "meta_training" or training_function_name == "most_stat_gain":
+  if (
+    training_function_name == "meta_training"
+    or training_function_name == "most_stat_gain"
+    or constants.SCENARIO_NAME in ("mant", "trackblazer")
+  ):
     check_stat_gains = True
 
   if config.VERBOSE_ACTIONS:

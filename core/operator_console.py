@@ -1,7 +1,7 @@
 import json
 import queue
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
 import threading
 from pathlib import Path
 
@@ -9,6 +9,11 @@ from PIL import Image, ImageTk
 
 import core.bot as bot
 import core.config as config
+from core.trackblazer_item_use import (
+  get_default_item_use_policy,
+  get_effective_item_use_items,
+  normalize_item_use_policy,
+)
 from core.trackblazer_shop import (
   PRIORITY_LEVELS,
   get_default_shop_policy,
@@ -78,6 +83,8 @@ class OperatorConsole:
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._phase_labels = {}
+    self._details_notebook = None
+    self._planned_actions_text = None
     self._timing_text = None
     self._summary_text = None
     self._training_text = None
@@ -95,6 +102,11 @@ class OperatorConsole:
     self._shop_policy_context_var = None
     self._shop_policy_canvas = None
     self._shop_policy_body = None
+    self._item_policy_window = None
+    self._item_policy_rows = []
+    self._item_policy_context_var = None
+    self._item_policy_canvas = None
+    self._item_policy_body = None
     self._bot_button = None
     self._pause_button = None
     self._resume_button = None
@@ -290,6 +302,11 @@ class OperatorConsole:
     ).pack(side=tk.LEFT, padx=(12, 0))
     tk.Button(
       tertiary_controls,
+      text="Item Policy",
+      command=self._open_trackblazer_item_policy_window,
+    ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Button(
+      tertiary_controls,
       text="Shop Policy",
       command=self._open_trackblazer_shop_policy_window,
     ).pack(side=tk.LEFT, padx=(12, 0))
@@ -327,15 +344,35 @@ class OperatorConsole:
     summary_header.grid(row=0, column=0, sticky="ew")
     summary_header.columnconfigure(0, weight=1)
     summary_header.columnconfigure(1, weight=0)
-    summary_header.columnconfigure(2, weight=1)
+    summary_header.columnconfigure(2, weight=0)
     summary_header.columnconfigure(3, weight=0)
-    tk.Label(summary_header, text="Timing", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=1, sticky="e", padx=(0, 12))
-    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=2, sticky="w")
-    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=3, sticky="e")
+    summary_header.columnconfigure(4, weight=1)
+    summary_header.columnconfigure(5, weight=0)
+    tk.Label(summary_header, text="Planned Actions / Timing", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
+    tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=1, sticky="e", padx=(0, 4))
+    tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=2, sticky="e", padx=(0, 12))
+    tk.Label(summary_header, text="Summary", fg="white", bg="#101418", anchor="w").grid(row=0, column=4, sticky="w")
+    tk.Button(summary_header, text="Copy Summary", command=lambda: self._copy_widget(self._summary_text)).grid(row=0, column=5, sticky="e")
     summary_panel = tk.PanedWindow(right, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#101418")
     summary_panel.grid(row=1, column=0, sticky="nsew", pady=(2, 6))
-    timing_frame = tk.Frame(summary_panel, bg="#101418")
+    details_container = tk.Frame(summary_panel, bg="#101418")
+    details_container.rowconfigure(0, weight=1)
+    details_container.columnconfigure(0, weight=1)
+    self._details_notebook = ttk.Notebook(details_container)
+    self._details_notebook.grid(row=0, column=0, sticky="nsew")
+    planned_actions_frame = tk.Frame(self._details_notebook, bg="#101418")
+    planned_actions_frame.rowconfigure(0, weight=1)
+    planned_actions_frame.columnconfigure(0, weight=1)
+    self._planned_actions_text = scrolledtext.ScrolledText(
+      planned_actions_frame,
+      height=8,
+      width=self.NARROW_TEXT_WIDTH,
+      bg="#192028",
+      fg="#d6dde5",
+      insertbackground="white",
+    )
+    self._planned_actions_text.grid(row=0, column=0, sticky="nsew")
+    timing_frame = tk.Frame(self._details_notebook, bg="#101418")
     timing_frame.rowconfigure(0, weight=1)
     timing_frame.columnconfigure(0, weight=1)
     self._timing_text = scrolledtext.ScrolledText(
@@ -347,7 +384,10 @@ class OperatorConsole:
       insertbackground="white",
     )
     self._timing_text.grid(row=0, column=0, sticky="nsew")
-    summary_panel.add(timing_frame, minsize=self.NARROW_PANE_MIN_WIDTH)
+    self._details_notebook.add(planned_actions_frame, text="Planned Actions")
+    self._details_notebook.add(timing_frame, text="Timing")
+    self._details_notebook.select(planned_actions_frame)
+    summary_panel.add(details_container, minsize=self.NARROW_PANE_MIN_WIDTH)
     summary_frame = tk.Frame(summary_panel, bg="#101418")
     summary_frame.rowconfigure(0, weight=1)
     summary_frame.columnconfigure(0, weight=1)
@@ -522,6 +562,7 @@ class OperatorConsole:
       "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._set_text(self._summary_text, json.dumps(summary_payload, indent=2, ensure_ascii=True))
+    self._set_text(self._planned_actions_text, self._format_planned_actions(snapshot))
     self._set_text(self._timing_text, self._format_timing(snapshot))
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
     inventory_payload = {
@@ -547,6 +588,21 @@ class OperatorConsole:
         }
         for item in get_effective_shop_items(
           policy=getattr(config, "TRACKBLAZER_SHOP_POLICY", None),
+          year=state_summary.get("year"),
+          turn=state_summary.get("turn"),
+        )[:12]
+      ],
+      "item_use_priority_preview": [
+        {
+          "name": item.get("display_name"),
+          "priority": item.get("effective_priority"),
+          "reserve_quantity": item.get("reserve_quantity"),
+          "usage_group": item.get("usage_group"),
+          "target_training": item.get("target_training"),
+          "asset_collected": item.get("asset_collected"),
+        }
+        for item in get_effective_item_use_items(
+          policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
           year=state_summary.get("year"),
           turn=state_summary.get("turn"),
         )[:12]
@@ -619,6 +675,12 @@ class OperatorConsole:
       lines.append("=== Close Breakdown ===")
       lines.extend(self._format_timing_mapping(close_timing))
     return "\n".join(lines)
+
+  def _format_planned_actions(self, snapshot):
+    planned = snapshot.get("planned_actions") or {}
+    if not planned:
+      return "No planned actions yet"
+    return json.dumps(planned, indent=2, ensure_ascii=True)
 
   def _format_timing_mapping(self, mapping, indent="  "):
     lines = []
@@ -1020,6 +1082,9 @@ class OperatorConsole:
       turn=state_summary.get("turn"),
     )
 
+  def _trackblazer_item_policy_context(self):
+    return self._trackblazer_shop_policy_context()
+
   def _open_trackblazer_shop_policy_window(self):
     if self._root is None:
       return
@@ -1088,12 +1153,87 @@ class OperatorConsole:
     self._shop_policy_body = inner
     self._refresh_trackblazer_shop_policy_window()
 
+  def _open_trackblazer_item_policy_window(self):
+    if self._root is None:
+      return
+
+    existing = self._item_policy_window
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          self._refresh_trackblazer_item_policy_window()
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    window = tk.Toplevel(self._root)
+    window.title("Trackblazer Item Use Policy")
+    window.configure(bg="#101418")
+    window.geometry("1320x820")
+    window.rowconfigure(1, weight=1)
+    window.columnconfigure(0, weight=1)
+    window.bind(
+      "<Destroy>",
+      lambda event, root_window=window: self._clear_trackblazer_item_policy_window() if event.widget is root_window else None,
+    )
+
+    header = tk.Frame(window, bg="#101418", padx=8, pady=8)
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    self._item_policy_context_var = tk.StringVar(value="")
+    tk.Label(
+      header,
+      textvariable=self._item_policy_context_var,
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+    ).grid(row=0, column=0, sticky="w")
+    tk.Button(header, text="Reload", command=self._refresh_trackblazer_item_policy_window).grid(row=0, column=1, padx=(8, 0))
+    tk.Button(header, text="Reset Defaults", command=self._reset_trackblazer_item_policy_defaults).grid(row=0, column=2, padx=(8, 0))
+    tk.Button(header, text="Save", command=self._save_trackblazer_item_policy_from_window).grid(row=0, column=3, padx=(8, 0))
+
+    body_frame = tk.Frame(window, bg="#101418")
+    body_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    body_frame.rowconfigure(0, weight=1)
+    body_frame.columnconfigure(0, weight=1)
+
+    canvas = tk.Canvas(body_frame, bg="#101418", highlightthickness=0)
+    scrollbar = tk.Scrollbar(body_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+
+    inner = tk.Frame(canvas, bg="#101418")
+    canvas.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind(
+      "<Configure>",
+      lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.bind(
+      "<Configure>",
+      lambda event: canvas.itemconfigure("all", width=event.width),
+    )
+
+    self._item_policy_window = window
+    self._item_policy_canvas = canvas
+    self._item_policy_body = inner
+    self._refresh_trackblazer_item_policy_window()
+
   def _clear_trackblazer_shop_policy_window(self):
     self._shop_policy_window = None
     self._shop_policy_rows = []
     self._shop_policy_context_var = None
     self._shop_policy_canvas = None
     self._shop_policy_body = None
+
+  def _clear_trackblazer_item_policy_window(self):
+    self._item_policy_window = None
+    self._item_policy_rows = []
+    self._item_policy_context_var = None
+    self._item_policy_canvas = None
+    self._item_policy_body = None
 
   def _refresh_trackblazer_shop_policy_window(self):
     if self._shop_policy_body is None:
@@ -1219,6 +1359,142 @@ class OperatorConsole:
       weight = 1 if column in (1, 7) else 0
       self._shop_policy_body.columnconfigure(column, weight=weight)
 
+  def _refresh_trackblazer_item_policy_window(self):
+    if self._item_policy_body is None:
+      return
+
+    context = self._trackblazer_item_policy_context()
+    context_label = context.get("timeline_label") or "Unknown timeline context"
+    context_suffix = "" if context.get("known_timeline") else " (live sort is using base order only)"
+    if self._item_policy_context_var is not None:
+      self._item_policy_context_var.set(
+        f"Item-use priority list is shown top-to-bottom for: {context_label}{context_suffix}"
+      )
+
+    for child in self._item_policy_body.winfo_children():
+      child.destroy()
+    self._item_policy_rows = []
+
+    headers = [
+      ("#", 0),
+      ("Item", 1),
+      ("Rule", 2),
+      ("Priority", 3),
+      ("Reserve", 4),
+      ("Effective", 5),
+      ("Asset", 6),
+      ("Notes", 7),
+    ]
+    for text, column in headers:
+      tk.Label(
+        self._item_policy_body,
+        text=text,
+        fg="white",
+        bg="#151b22",
+        padx=6,
+        pady=4,
+        anchor="w",
+        font=("Helvetica", 10, "bold"),
+      ).grid(row=0, column=column, sticky="ew", padx=1, pady=(0, 4))
+
+    normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    items = get_effective_item_use_items(
+      policy=normalized_policy,
+      year=context.get("year"),
+      turn=context.get("turn"),
+    )
+
+    for row_index, item in enumerate(items, start=1):
+      row_bg = "#192028" if row_index % 2 else "#151b22"
+      key = item["key"]
+      item_policy = normalized_policy["items"].get(key, {})
+      priority_var = tk.StringVar(value=item_policy.get("priority", item.get("priority", "MED")))
+      reserve_var = tk.StringVar(value=str(item_policy.get("reserve_quantity", item.get("reserve_quantity", 0))))
+      self._item_policy_rows.append(
+        {
+          "key": key,
+          "priority_var": priority_var,
+          "reserve_var": reserve_var,
+        }
+      )
+
+      tk.Label(self._item_policy_body, text=str(row_index), fg="#d6dde5", bg=row_bg, padx=6, pady=3).grid(row=row_index, column=0, sticky="nsew", padx=1, pady=1)
+      tk.Label(
+        self._item_policy_body,
+        text=f"{item['display_name']}\n{item['category']}",
+        fg="white",
+        bg=row_bg,
+        justify="left",
+        anchor="w",
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=1, sticky="nsew", padx=1, pady=1)
+      rule_parts = [item.get("usage_group") or "utility"]
+      if item.get("target_training"):
+        rule_parts.append(item["target_training"])
+      tk.Label(
+        self._item_policy_body,
+        text="\n".join(rule_parts),
+        fg="#d6dde5",
+        bg=row_bg,
+        justify="left",
+        anchor="w",
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=2, sticky="nsew", padx=1, pady=1)
+      priority_menu = tk.OptionMenu(self._item_policy_body, priority_var, *PRIORITY_LEVELS)
+      priority_menu.configure(width=7, bg=row_bg, fg="white", highlightthickness=0, activebackground="#1f6feb")
+      priority_menu["menu"].configure(bg="#192028", fg="white")
+      priority_menu.grid(row=row_index, column=3, sticky="nsew", padx=1, pady=1)
+      tk.Spinbox(
+        self._item_policy_body,
+        from_=0,
+        to=9,
+        width=4,
+        textvariable=reserve_var,
+        bg=row_bg,
+        fg="white",
+        buttonbackground="#2d333b",
+      ).grid(row=row_index, column=4, sticky="nsew", padx=1, pady=1)
+      effective_label = item["effective_priority"]
+      if item.get("active_timing_rules"):
+        effective_label = f"{effective_label} *"
+      tk.Label(
+        self._item_policy_body,
+        text=effective_label,
+        fg="#8bd5ca" if item.get("active_timing_rules") else "#d6dde5",
+        bg=row_bg,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=5, sticky="nsew", padx=1, pady=1)
+      tk.Label(
+        self._item_policy_body,
+        text="collected" if item.get("asset_collected") else "missing",
+        fg="#8bd5ca" if item.get("asset_collected") else "#ffb86c",
+        bg=row_bg,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=6, sticky="nsew", padx=1, pady=1)
+      notes_parts = [item.get("effect", ""), item.get("policy_notes", "")]
+      notes_parts.extend(
+        rule.get("note") for rule in (item.get("active_timing_rules") or []) if rule.get("note")
+      )
+      tk.Label(
+        self._item_policy_body,
+        text="\n".join(part for part in notes_parts if part),
+        fg="#d6dde5",
+        bg=row_bg,
+        justify="left",
+        anchor="w",
+        wraplength=520,
+        padx=6,
+        pady=3,
+      ).grid(row=row_index, column=7, sticky="nsew", padx=1, pady=1)
+
+    for column in range(8):
+      weight = 1 if column in (1, 7) else 0
+      self._item_policy_body.columnconfigure(column, weight=weight)
+
   def _save_trackblazer_shop_policy_from_window(self):
     current_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
     items = current_policy.get("items", {})
@@ -1265,6 +1541,54 @@ class OperatorConsole:
 
     self._refresh_trackblazer_shop_policy_window()
     self._message_value.set("Reset Trackblazer shop policy to defaults.")
+    self.publish()
+
+  def _save_trackblazer_item_policy_from_window(self):
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    items = current_policy.get("items", {})
+    for row in self._item_policy_rows:
+      key = row["key"]
+      reserve_text = str(row["reserve_var"].get() or "").strip()
+      try:
+        reserve_quantity = max(0, int(reserve_text))
+      except ValueError:
+        reserve_quantity = items.get(key, {}).get("reserve_quantity", 0)
+      item_policy = dict(items.get(key, {}))
+      item_policy["priority"] = normalize_priority(row["priority_var"].get())
+      item_policy["reserve_quantity"] = reserve_quantity
+      items[key] = item_policy
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "items": items,
+    }
+    if not self._persist_config_value("trackblazer.item_use_policy", policy):
+      self._message_value.set("Failed to save Trackblazer item-use policy.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved Trackblazer item-use policy, but reload failed: {exc}")
+      return
+
+    self._refresh_trackblazer_item_policy_window()
+    self._message_value.set("Saved Trackblazer item-use policy.")
+    self.publish()
+
+  def _reset_trackblazer_item_policy_defaults(self):
+    if not self._persist_config_value("trackblazer.item_use_policy", get_default_item_use_policy()):
+      self._message_value.set("Failed to reset Trackblazer item-use policy.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Reset Trackblazer item-use policy, but reload failed: {exc}")
+      return
+
+    self._refresh_trackblazer_item_policy_window()
+    self._message_value.set("Reset Trackblazer item-use policy to defaults.")
     self.publish()
 
 
