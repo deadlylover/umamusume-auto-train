@@ -59,6 +59,7 @@ execution_intent = "execute"
 control_callbacks = {}
 manual_control_active = False
 trackblazer_use_items_enabled = False
+trackblazer_scoring_mode = "stat_focused"  # "legacy" = use timeline template, "stat_focused" = stat_weight_training
 skill_dry_run_enabled = False
 
 
@@ -85,6 +86,7 @@ def get_runtime_state():
       "manual_control_active": manual_control_active,
       "execution_intent": execution_intent,
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
+      "trackblazer_scoring_mode": trackblazer_scoring_mode,
       "skill_dry_run_enabled": skill_dry_run_enabled,
       "is_bot_running": is_bot_running,
       "backend_state": get_backend_state(),
@@ -177,6 +179,24 @@ def set_trackblazer_use_items_enabled(enabled):
 def get_trackblazer_use_items_enabled():
   with runtime_lock:
     return trackblazer_use_items_enabled
+
+
+def set_trackblazer_scoring_mode(mode):
+  global trackblazer_scoring_mode, runtime_updated_at
+  if mode == "default":
+    normalized = "legacy"
+  elif mode in ("legacy", "stat_focused"):
+    normalized = mode
+  else:
+    normalized = "stat_focused"
+  with runtime_lock:
+    trackblazer_scoring_mode = normalized
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_scoring_mode():
+  with runtime_lock:
+    return trackblazer_scoring_mode
 
 
 def set_skill_dry_run_enabled(enabled):

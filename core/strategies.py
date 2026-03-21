@@ -38,7 +38,12 @@ class Strategy:
     action = self.get_action(state, training_template, action)
 
     action["energy_level"] = state["energy_level"]
-    action["training_function"] = training_template["training_function"]
+    # Store the actual training function used (may be overridden by scoring mode)
+    import core.bot as _bot
+    if constants.SCENARIO_NAME in ("mant", "trackblazer") and _bot.get_trackblazer_scoring_mode() == "stat_focused":
+      action["training_function"] = "stat_weight_training"
+    else:
+      action["training_function"] = training_template["training_function"]
 
     if action.available_actions:
       debug(f"Available actions: {action.available_actions}")
@@ -118,6 +123,15 @@ class Strategy:
     action_sequence = training_template['action_sequence_set']
 
     training_function_name = training_template['training_function']
+
+    # Trackblazer scoring mode override
+    import core.bot as bot
+    if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+      scoring_mode = bot.get_trackblazer_scoring_mode()
+      if scoring_mode == "stat_focused":
+        training_function_name = "stat_weight_training"
+        info(f"Trackblazer scoring override: {scoring_mode} → {training_function_name}")
+
     info(f"Selected training: {training_function_name}")
 
     training_type = getattr(core.trainings, training_function_name)

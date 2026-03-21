@@ -6,7 +6,7 @@ from utils.shared import CleanDefaultDict
 import utils.constants as constants
 
 # Training function names:
-# max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training
+# max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
 
 def create_training_score_entry(training_name, training_data, score_tuple):
   """
@@ -231,6 +231,48 @@ def most_stat_gain(state, training_template, action):
   action = fill_trainings_for_action(action, training_scores)
 
   return action
+
+def stat_weight_training(state, training_template, action):
+  """Stat-focused scoring for Trackblazer. Score is just the weighted sum of
+  visible stat gains. Supports/rainbows already affect the stat numbers shown
+  on screen, so they are not counted again."""
+  filtered_results = filter_safe_trainings(state, training_template, use_risk_taking=True, check_stat_caps=True)
+  if not filtered_results:
+    info("No safe training found for stat weight training.")
+    return action
+
+  # Use Trackblazer-specific weights from config if set, else fall back to template
+  stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+  if not isinstance(stat_weights, dict) or not stat_weights:
+    stat_weights = training_template["stat_weight_set"]
+
+  training_scores = {}
+  for training_name, training_data in filtered_results.items():
+    stat_gains = training_data['stat_gains']
+    total_value = 0
+
+    for stat, gain in stat_gains.items():
+      if stat == "sp":
+        continue
+      stat_cap = config.STAT_CAPS[stat]
+      current_stat = state['current_stats'][stat]
+      if current_stat >= stat_cap:
+        continue
+      weight = stat_weights.get(stat, 1)
+      total_value += gain * weight
+
+    priority_index = get_priority_index((training_name, training_data))
+    tiebreaker = -priority_index
+
+    training_scores[training_name] = create_training_score_entry(
+      training_name, training_data, (total_value, tiebreaker)
+    )
+    debug(f"stat_weight_training: {training_name} -> score={total_value:.1f} gains={stat_gains}")
+
+  info(f"stat_weight_training scores: {training_scores}")
+  action = fill_trainings_for_action(action, training_scores)
+  return action
+
 
 def meta_training(state, training_template, action):
   filtered_results = filter_safe_trainings(state, training_template, use_risk_taking=True, check_stat_caps=True)

@@ -1300,9 +1300,9 @@ def _get_training_filter_settings(training_function):
     "use_risk_taking": False,
     "check_stat_caps": False,
   }
-  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain"):
+  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain", "stat_weight_training"):
     settings["use_risk_taking"] = True
-  if training_function in ("rainbow_training", "most_support_cards", "meta_training"):
+  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "stat_weight_training"):
     settings["check_stat_caps"] = True
   return settings
 
@@ -1375,6 +1375,23 @@ def _score_training_for_display(training_name, training_data, state_obj, trainin
       return (non_max[0] * config.NON_MAX_SUPPORT_WEIGHT + support[0], support[1])
     if training_function == "most_stat_gain":
       return most_stat_score(x, state_obj, training_template)
+    if training_function == "stat_weight_training":
+      stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+      if not isinstance(stat_weights, dict) or not stat_weights:
+        stat_weights = training_template.get("stat_weight_set", {})
+      stat_gains = td.get("stat_gains", {})
+      total_value = 0
+      current_stats = state_obj.get("current_stats") or {}
+      for stat, gain in stat_gains.items():
+        if stat == "sp":
+          continue
+        if current_stats.get(stat, 0) >= config.STAT_CAPS.get(stat, 9999):
+          continue
+        weight = stat_weights.get(stat, 1)
+        total_value += gain * weight
+      from core.trainings import get_priority_index
+      priority_index = get_priority_index(x)
+      return (total_value, -priority_index)
     if training_function == "max_out_friendships":
       max_f = max_out_friendships_score(x)
       max_f = add_scenario_gimmick_score(x, max_f, state_obj)
@@ -2148,6 +2165,12 @@ def career_lobby(dry_run_turn=False):
             action.func = None
 
       training_function_name = strategy.get_training_template(state_obj)['training_function']
+
+      # Apply Trackblazer scoring mode override so operator console shows correct function
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        scoring_mode = bot.get_trackblazer_scoring_mode()
+        if scoring_mode == "stat_focused":
+          training_function_name = "stat_weight_training"
 
       update_operator_snapshot(phase="collecting_training_state", message="Scanning all trainings.")
       state_obj = collect_training_state(state_obj, training_function_name)

@@ -82,6 +82,7 @@ class OperatorConsole:
     self._trackblazer_use_items_var = None
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
+    self._trackblazer_scoring_mode_var = None
     self._phase_labels = {}
     self._details_notebook = None
     self._planned_actions_text = None
@@ -119,6 +120,8 @@ class OperatorConsole:
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
+    self._stat_weights_window = None
+    self._stat_weights_entries = {}
     self._start_bot_button = None
     self._stop_bot_button = None
     self._pause_button = None
@@ -228,6 +231,7 @@ class OperatorConsole:
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
+    tk.Button(primary_controls, text="Stat Weights", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "execute"):
       tk.Radiobutton(
@@ -325,7 +329,26 @@ class OperatorConsole:
       text="Shop Policy",
       command=self._open_trackblazer_shop_policy_window,
     ).pack(side=tk.LEFT, padx=(12, 0))
-
+    tk.Label(
+      tertiary_controls,
+      text="Scoring:",
+      fg="#9aa4ad",
+      bg="#101418",
+    ).pack(side=tk.LEFT, padx=(12, 0))
+    self._trackblazer_scoring_mode_var = tk.StringVar(value=bot.get_trackblazer_scoring_mode())
+    for mode_val, mode_label in (("legacy", "legacy"), ("stat_focused", "stat focused")):
+      tk.Radiobutton(
+        tertiary_controls,
+        text=mode_label,
+        value=mode_val,
+        variable=self._trackblazer_scoring_mode_var,
+        command=self._set_trackblazer_scoring_mode,
+        fg="white",
+        bg="#101418",
+        selectcolor="#192028",
+        activebackground="#101418",
+        activeforeground="white",
+      ).pack(side=tk.LEFT, padx=(4, 0))
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
     right = tk.Frame(root, bg="#101418")
@@ -622,6 +645,8 @@ class OperatorConsole:
       self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
     if self._trackblazer_use_items_var is not None:
       self._trackblazer_use_items_var.set(bool(runtime_state.get("trackblazer_use_items_enabled")))
+    if self._trackblazer_scoring_mode_var is not None:
+      self._trackblazer_scoring_mode_var.set(runtime_state.get("trackblazer_scoring_mode") or "stat_focused")
     if self._skill_dry_run_var is not None:
       self._skill_dry_run_var.set(bool(runtime_state.get("skill_dry_run_enabled")))
     self._message_value.set(runtime_state.get("message") or "")
@@ -1526,6 +1551,15 @@ class OperatorConsole:
       self._message_value.set(f"Skip full stats/aptitude {'enabled' if enabled else 'disabled'}.")
     self.publish()
 
+  def _set_trackblazer_scoring_mode(self):
+    if self._trackblazer_scoring_mode_var is None:
+      return
+    mode = self._trackblazer_scoring_mode_var.get()
+    bot.set_trackblazer_scoring_mode(mode)
+    label = "stat focused" if mode == "stat_focused" else "legacy (timeline)"
+    self._message_value.set(f"Trackblazer scoring mode: {label}.")
+    self.publish()
+
   def _toggle_trackblazer_use_items(self):
     if self._trackblazer_use_items_var is None:
       return
@@ -2237,6 +2271,118 @@ class OperatorConsole:
 
     self._refresh_trackblazer_item_policy_window()
     self._message_value.set("Reset Trackblazer item-use policy to defaults.")
+    self.publish()
+
+  # --- Stat Weights window ---
+
+  _DEFAULT_STAT_WEIGHTS = {"spd": 1.0, "sta": 1.0, "pwr": 1.0, "guts": 1.0, "wit": 1.0}
+  _STAT_LABELS = {"spd": "Speed", "sta": "Stamina", "pwr": "Power", "guts": "Guts", "wit": "Wit"}
+
+  def _get_active_stat_weights(self):
+    weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+    if isinstance(weights, dict) and weights:
+      return weights
+    return dict(self._DEFAULT_STAT_WEIGHTS)
+
+  def _open_stat_weights_window(self):
+    if self._root is None:
+      return
+
+    existing = self._stat_weights_window
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          self._refresh_stat_weights_window()
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    window = tk.Toplevel(self._root)
+    window.title("Trackblazer Stat Weights")
+    window.configure(bg="#101418")
+    window.geometry("340x260")
+    window.resizable(False, False)
+    window.bind(
+      "<Destroy>",
+      lambda event, root_window=window: self._clear_stat_weights_window() if event.widget is root_window else None,
+    )
+
+    header = tk.Frame(window, bg="#101418", padx=8, pady=8)
+    header.pack(fill=tk.X)
+    tk.Label(
+      header,
+      text="Stat weights for stat_focused scoring (gain × weight)",
+      fg="#9aa4ad",
+      bg="#101418",
+    ).pack(side=tk.LEFT)
+
+    body = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    active = self._get_active_stat_weights()
+    self._stat_weights_entries = {}
+    for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
+      label = self._STAT_LABELS.get(stat, stat)
+      tk.Label(
+        body, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
+      ).grid(row=row_idx, column=0, sticky="w", pady=2)
+      var = tk.StringVar(value=str(active.get(stat, 1.0)))
+      entry = tk.Entry(body, textvariable=var, width=8, bg="#192028", fg="white", insertbackground="white")
+      entry.grid(row=row_idx, column=1, sticky="w", padx=(8, 0), pady=2)
+      self._stat_weights_entries[stat] = var
+
+    buttons = tk.Frame(window, bg="#101418", padx=8, pady=8)
+    buttons.pack(fill=tk.X)
+    tk.Button(buttons, text="Save", command=self._save_stat_weights).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(buttons, text="Reset Defaults", command=self._reset_stat_weights_defaults).pack(side=tk.LEFT, padx=(0, 8))
+
+    self._stat_weights_window = window
+
+  def _clear_stat_weights_window(self):
+    self._stat_weights_window = None
+    self._stat_weights_entries = {}
+
+  def _refresh_stat_weights_window(self):
+    active = self._get_active_stat_weights()
+    for stat, var in self._stat_weights_entries.items():
+      var.set(str(active.get(stat, 1.0)))
+
+  def _save_stat_weights(self):
+    weights = {}
+    for stat, var in self._stat_weights_entries.items():
+      try:
+        weights[stat] = round(float(var.get()), 2)
+      except ValueError:
+        self._message_value.set(f"Invalid weight for {self._STAT_LABELS.get(stat, stat)}.")
+        return
+
+    if not self._persist_config_value("trackblazer.stat_weights", weights):
+      self._message_value.set("Failed to save stat weights.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved stat weights, but reload failed: {exc}")
+      return
+
+    self._message_value.set(f"Saved stat weights: {weights}")
+    self.publish()
+
+  def _reset_stat_weights_defaults(self):
+    if not self._persist_config_value("trackblazer.stat_weights", dict(self._DEFAULT_STAT_WEIGHTS)):
+      self._message_value.set("Failed to reset stat weights.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Reset stat weights, but reload failed: {exc}")
+      return
+
+    self._refresh_stat_weights_window()
+    self._message_value.set("Reset stat weights to defaults.")
     self.publish()
 
 
