@@ -50,18 +50,20 @@ In `check_only` and `preview_clicks`, these remain preview steps only.
 
 If the planned pre-action items include `Reset Whistle`, the bot must not continue straight into the previously previewed training click.
 
+When `Reset Whistle` is present in the candidate list, the attachment step strips all non-whistle items from the first pass. Energy items, burst items, and stat-matching items all depend on the post-whistle board state, so they must not be committed before seeing the rerolled trainings. Those items are naturally re-planned in the reassess pass against the new board.
+
 After a successful whistle use, the bot stops the current action path and returns to the main turn loop for a fresh evaluation.
 
 Required behavior:
 
-1. use `Reset Whistle`
+1. use `Reset Whistle` (only the whistle — no other items in this pass)
 2. return `reassess`
 3. rescan turn state and trainings
 4. run strategy again on the rerolled board
-5. rebuild the pre-action item plan from that new board
+5. rebuild the pre-action item plan from that new board (energy, burst, stat items evaluated here)
 6. only then preview/execute the final action
 
-This is the key guarantee that prevents the whistle from being wasted on the old board.
+This is the key guarantee that prevents items from being wasted on a board that hasn't been evaluated yet.
 
 ### 4. The reassess pass can add more items
 

@@ -840,6 +840,25 @@ def _build_trackblazer_planned_actions(state_obj, action):
   )
 
   would_use = list(item_use_plan.get("candidates") or [])
+  deferred_use = list(item_use_plan.get("deferred") or [])
+  planned_pre_action_items = _trackblazer_pre_action_items(action)
+  if planned_pre_action_items:
+    planned_item_keys = {entry.get("key") for entry in planned_pre_action_items if entry.get("key")}
+    if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use"):
+      deferred_keys = {entry.get("key") for entry in deferred_use if isinstance(entry, dict)}
+      for entry in would_use:
+        item_key = entry.get("key")
+        if not item_key or item_key in planned_item_keys or item_key in deferred_keys:
+          continue
+        deferred_entry = dict(entry)
+        existing_reason = deferred_entry.get("reason") or ""
+        deferred_entry["reason"] = (
+          f"{existing_reason}; deferred until post-whistle reassess"
+          if existing_reason else
+          "deferred until post-whistle reassess"
+        )
+        deferred_use.append(deferred_entry)
+    would_use = list(planned_pre_action_items)
   actionable_items = list(pre_shop_inventory_summary.get("actionable_items") or [])
 
   detected_shop_keys = set(shop_items or shop_summary.get("items_detected") or [])
@@ -901,7 +920,7 @@ def _build_trackblazer_planned_actions(state_obj, action):
     },
     "would_use": would_use,
     "would_use_context": item_use_plan.get("context") or {},
-    "deferred_use": item_use_plan.get("deferred") or [],
+    "deferred_use": deferred_use,
     "shop_scan": {
       "status": shop_status,
       "reason": shop_flow.get("reason") or "",
@@ -925,11 +944,15 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     limit=8,
   )
   candidates = list(item_use_plan.get("candidates") or [])
+  has_whistle = any(entry.get("key") == "reset_whistle" for entry in candidates)
+  if has_whistle:
+    # Reset Whistle reshuffles the board. Other items (energy, burst, stat)
+    # depend on the post-whistle board, so defer them to the reassess pass
+    # where they'll be re-planned against the new training state.
+    candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
   action["trackblazer_pre_action_items"] = candidates
   action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
-  action["trackblazer_reassess_after_item_use"] = any(
-    entry.get("key") == "reset_whistle" for entry in candidates
-  )
+  action["trackblazer_reassess_after_item_use"] = has_whistle
   return action
 
 
