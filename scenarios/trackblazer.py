@@ -3285,6 +3285,12 @@ def find_rival_races_with_aptitude(screenshot=None):
         click_target: (x, y) absolute coords to click (the aptitude stars)
 
     Both templates use inverse global scale (native-res Trackblazer assets).
+
+    Important: the race list often shows only ~2 rows at once, and the bottom
+    row can be partially occluded. Seeing ``rival_racer`` without the aptitude
+    stars below it should not immediately disqualify the row forever; a later
+    refinement should rescan after a small scroll when the rival marker is near
+    the list edge.
     """
     rival_template = constants.TRACKBLAZER_RACE_TEMPLATES["rival_racer"]
     aptitude_template = constants.TRACKBLAZER_RACE_TEMPLATES["race_recommend_2_aptitudes"]
@@ -3378,11 +3384,13 @@ def scout_rival_race():
 
     sleep(1)
 
-    # Dismiss consecutive-race dialog if present.
-    consecutive_cancel_btn = device_action.locate(
+    # If the consecutive-race warning dialog appeared, click OK to proceed
+    # past it into the race list. We detect the cancel button to confirm the
+    # dialog is present, then click OK since scouting always backs out after.
+    consecutive_warning_present = device_action.locate(
         "assets/buttons/cancel_btn.png", min_search_time=get_secs(1)
     )
-    if consecutive_cancel_btn:
+    if consecutive_warning_present:
         device_action.locate_and_click(
             "assets/buttons/ok_btn.png", min_search_time=get_secs(1)
         )

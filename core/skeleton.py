@@ -20,6 +20,7 @@ from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
 from core.trackblazer_shop import get_effective_shop_items, get_priority_preview, policy_context
+from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 pyautogui.useImageNotFoundException(False)
 
@@ -759,13 +760,45 @@ def _planned_clicks_for_action(action):
     return pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
   if action_func == "do_race":
     race_name = _action_value(action, "race_name")
+    race_grade_target = _action_value(action, "race_grade_target")
+    prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
-    return pre_action_clicks + [
+    clicks = pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
-      _planned_click("Scan/select race entry", race_template, region_key="RACE_LIST_BOX_BBOX"),
+      _planned_click(
+        "Check consecutive-race warning",
+        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+        region_key="GAME_WINDOW_BBOX",
+        note=(
+          "If this warning appears after clicking Races, decide whether to continue with OK "
+          "or back out with Cancel before opening the race list."
+        ),
+      ),
+      _planned_click(
+        "Continue through warning (OK)",
+        "assets/buttons/ok_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note="Use this when the race gate accepts a third consecutive race.",
+      ),
+      _planned_click(
+        "Back out from warning (Cancel)",
+        "assets/buttons/cancel_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note="Use this when the race gate rejects a third consecutive race and returns to lobby.",
+      ),
+      _planned_click(
+        "Scan/select race entry",
+        race_template,
+        region_key="RACE_LIST_BOX_BBOX",
+        note=(
+          f"target={race_grade_target or 'any'}"
+          + ("; prefer rival row when present" if prefer_rival_race else "")
+        ),
+      ),
       _planned_click("Confirm race", "assets/buttons/race_btn.png"),
       _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
     ]
+    return clicks
   if action_func == "buy_skill":
     return pre_action_clicks + [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
@@ -881,7 +914,47 @@ def _build_trackblazer_planned_actions(state_obj, action):
   elif shop_flow:
     shop_status = "skipped" if shop_flow.get("reason") else "failed"
 
+  race_decision = action.get("trackblazer_race_decision") if hasattr(action, "get") else {}
+  race_planned = {}
+  race_entry_gate = {}
+  if isinstance(race_decision, dict) and race_decision:
+    race_info = race_decision.get("race_tier_info") or {}
+    race_planned = {
+      "should_race": race_decision.get("should_race"),
+      "reason": race_decision.get("reason"),
+      "training_total_stats": race_decision.get("training_total_stats"),
+      "is_summer": race_decision.get("is_summer"),
+      "g1_forced": race_decision.get("g1_forced"),
+      "prefer_rival_race": race_decision.get("prefer_rival_race"),
+      "race_tier_target": race_decision.get("race_tier_target"),
+      "race_name": race_decision.get("race_name"),
+      "race_available": race_decision.get("race_available"),
+      "rival_indicator": race_decision.get("rival_indicator"),
+      "available_grades": race_info.get("available_grades"),
+      "best_grade": race_info.get("best_grade"),
+      "race_count": race_info.get("race_count"),
+    }
+    if _action_func(action) == "do_race" or race_decision.get("should_race"):
+      # Decide expected consecutive-race warning behavior.
+      # The race gate already filters weak signals, so should_race=True means
+      # the signal was strong enough to justify racing. G1 or should_race both
+      # continue; otherwise back out to the lobby.
+      if race_decision.get("g1_forced") or race_decision.get("should_race"):
+        expected_branch = "continue_to_race_list"
+      else:
+        expected_branch = "return_to_lobby"
+      race_entry_gate = {
+        "opens_from_lobby": True,
+        "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+        "warning_meaning": "This race would become the third consecutive race",
+        "ok_action": "continue_to_race_list",
+        "cancel_action": "return_to_lobby",
+        "expected_branch": expected_branch,
+      }
+
   return {
+    "race_decision": race_planned,
+    "race_entry_gate": race_entry_gate,
     "inventory_scan": {
       "status": inventory_status,
       "reason": pre_shop_inventory_flow.get("reason") or "",
@@ -1178,6 +1251,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "rival_scout": action.get("rival_scout") if hasattr(action, "get") else None,
     "pre_action_item_use": action.get("trackblazer_pre_action_items") if hasattr(action, "get") else None,
     "reassess_after_item_use": action.get("trackblazer_reassess_after_item_use") if hasattr(action, "get") else None,
+    "trackblazer_race_decision": action.get("trackblazer_race_decision") if hasattr(action, "get") else None,
   }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
@@ -2024,8 +2098,79 @@ def career_lobby(dry_run_turn=False):
       action = strategy.decide(state_obj, action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
 
-      # Trackblazer rival-race scout: if strategy wants a rival race,
-      # open the race list to check if one exists, then back out.
+      # Trackblazer race-vs-training gate: evaluate whether a race is
+      # preferable to the strategy's default action. This replaces the
+      # older rival-only fallback with a broader heuristic that covers
+      # G1 forcing, summer bias, weak-training bias, and rival bonus.
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        update_operator_snapshot(
+          state_obj, action,
+          phase="evaluating_strategy",
+          message="Evaluating Trackblazer race decision.",
+          sub_phase="evaluate_trackblazer_race",
+          reasoning_notes="Applying Trackblazer race-vs-training gate.",
+        )
+        race_decision = evaluate_trackblazer_race(state_obj, action)
+        action["trackblazer_race_decision"] = race_decision
+
+        if race_decision["should_race"] and action.func != "do_race":
+          # Save fallback in case rival scout fails and we need to revert.
+          action["_rival_fallback_func"] = action.func
+          action["_rival_fallback_training_name"] = action.get("training_name")
+          action["_rival_fallback_training_data"] = action.get("training_data")
+          action.func = "do_race"
+          action["race_name"] = race_decision.get("race_name") or "any"
+          action["race_grade_target"] = race_decision.get("race_tier_target")
+          if race_decision["prefer_rival_race"]:
+            action["prefer_rival_race"] = True
+          info(f"[TB_RACE] Overriding to race: {race_decision['reason']}")
+          update_operator_snapshot(
+            state_obj, action,
+            phase="evaluating_strategy",
+            message=f"Trackblazer race gate: {race_decision['reason']}",
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes=(
+              f"should_race={race_decision.get('should_race')} | "
+              f"target={race_decision.get('race_tier_target') or '-'} | "
+              f"race={race_decision.get('race_name') or '-'} | "
+              f"training_total={race_decision.get('training_total_stats')}"
+            ),
+          )
+        elif race_decision["should_race"] and action.func == "do_race":
+          if race_decision.get("race_name") and action.get("race_name") in (None, "", "any"):
+            action["race_name"] = race_decision["race_name"]
+          if race_decision.get("race_tier_target") and not action.get("race_grade_target"):
+            action["race_grade_target"] = race_decision["race_tier_target"]
+
+        elif not race_decision["should_race"] and action.func == "do_race" and not action.get("scheduled_race") and not action.get("is_race_day"):
+          # Strategy wanted to race (e.g. rival fallback from evaluate_training_alternatives)
+          # but the Trackblazer gate says train. Revert if fallback data is available.
+          fallback_func = action.get("_rival_fallback_func")
+          if fallback_func:
+            action.func = fallback_func
+            if action.get("_rival_fallback_training_name"):
+              action["training_name"] = action["_rival_fallback_training_name"]
+            if action.get("_rival_fallback_training_data"):
+              action["training_data"] = action["_rival_fallback_training_data"]
+            action.options.pop("race_name", None)
+            action.options.pop("prefer_rival_race", None)
+            action.options.pop("race_grade_target", None)
+            info(f"[TB_RACE] Race gate vetoed race, reverted to {fallback_func}: {race_decision['reason']}")
+          update_operator_snapshot(
+            state_obj, action,
+            phase="evaluating_strategy",
+            message=f"Trackblazer race gate: prefer training — {race_decision['reason']}",
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes=(
+              f"should_race={race_decision.get('should_race')} | "
+              f"target={race_decision.get('race_tier_target') or '-'} | "
+              f"race={race_decision.get('race_name') or '-'} | "
+              f"training_total={race_decision.get('training_total_stats')}"
+            ),
+          )
+
+      # Trackblazer rival-race scout: if the action is do_race with rival
+      # preference, open the race list to check if one exists, then back out.
       # If none found, revert to the original training decision.
       if action.func == "do_race" and action.get("prefer_rival_race"):
         update_operator_snapshot(state_obj, action, phase="scouting_rival_race", message="Scouting race list for rival race...")

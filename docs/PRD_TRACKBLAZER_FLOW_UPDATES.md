@@ -9,6 +9,7 @@ In progress. The repo now has:
 - a prose bot flow reference in `docs/BOT_FLOW.md`
 - a gameplay/mechanics brief in `docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md`
 - Trackblazer inventory scan / item-use scaffolding and console timing visibility
+- a first-pass Trackblazer race-vs-training gate in `core/trackblazer_race_logic.py`
 
 What is still missing is a Trackblazer-specific flow model that the code can follow.
 
@@ -22,6 +23,7 @@ What is still missing is a Trackblazer-specific flow model that the code can fol
 - [x] Trackblazer shop scan now has a scrollbar-aware read-only flow with top reset, bottom detection, buffered drag capture, and overlapped frame analysis.
 - [x] Shop scan output now preserves per-frame visible rows, scrollbar ratios, and timing slices that are usable as a search index for later purchase routing.
 - [x] Generic race selection preview clicks exist for the main snapshot flow.
+- [x] A first-pass `evaluate_trackblazer_race` sub-phase now exists and can override training to race using simple policy inputs.
 - [ ] Dedicated Trackblazer flow boundaries for checkpoint progress, Grade Points, Shop Coins, fatigue, and Twinkle Star Climax are still not modeled as first-class runtime sub-phases.
 
 ## Why This Exists
@@ -47,6 +49,7 @@ This PRD exists to move Trackblazer support from "add branches where needed" to 
 - `docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md`
 - `docs/PRD_MANT_TRACKBLAZER.md`
 - `docs/PRD_SEMI_AUTO_REVIEW_MODE.md`
+- `docs/TRACKBLAZER_RACE_LOGIC.md`
 
 ## Product Goal
 

@@ -270,11 +270,14 @@ TRACKBLAZER_ITEM_CATEGORIES = {
   "yumy_cat_food": "energy",
 }
 
-# Trackblazer shop purchase flow UI templates.
+# Trackblazer race-related templates (rival indicators, grade badges, warnings).
 TRACKBLAZER_RACE_TEMPLATES = {
   "rival_racer": "assets/trackblazer/rival_racer.png",
   "race_recommend_2_aptitudes": "assets/trackblazer/race_recommend_2_aptitudes.png",
   "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
+  "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
+  "race_g2": "assets/trackblazer/race_g2.png",
+  "race_g3": "assets/trackblazer/race_g3.png",
 }
 
 TRACKBLAZER_SHOP_UI_TEMPLATES = {

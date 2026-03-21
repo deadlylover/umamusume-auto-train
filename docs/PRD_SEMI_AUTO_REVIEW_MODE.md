@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress. The pause/review workflow is now usable in the current branch, with remaining work focused on richer snapshot content, persistence, and polish.
+In progress. As of March 21, 2026, the pause/review workflow and operator console are fully usable for day-to-day inspection, including Trackblazer inventory/shop debugging. The remaining work is mostly deeper Trackblazer race-review coverage, richer reasoning/snapshot detail, and persistence/polish.
 
 ## Current Progress
 
@@ -48,6 +48,7 @@ Implemented in the current branch:
 - `check_only` now prevents action clicks from committing and keeps the bot on the same turn for inspection.
 - Skill purchasing now has its own review path with dedicated sub-phases and planned-click/OCR-debug payloads.
 - The console now has a dedicated OCR Debug pane.
+- The console now has a dedicated Timing pane that renders inventory, shop, and skill flow timing details.
 - The console now has copy-to-clipboard buttons for:
   - summary
   - ranked trainings
@@ -55,6 +56,18 @@ Implemented in the current branch:
 - `F2` still works as continue while paused, but the GUI is now sufficient without hotkeys.
 - `execution_mode` is now in config and loaded by `core/config.py`.
 - macOS Tk crash was fixed by moving Tk window creation to the main thread and running the server in a background thread.
+- Manual operator-console checks now exist for Trackblazer inventory scan, Trackblazer inventory item-selection test, and Trackblazer shop scan.
+- Trackblazer review snapshots now include planned-actions sections derived from live policy/state:
+  - inventory scan status
+  - `Would Use`
+  - `Deferred Use`
+  - shop scan status
+  - `Would Buy`
+- In `check_only`, the main loop now exercises non-destructive Trackblazer inventory/shop plumbing so review snapshots include current held items, visible shop stock, and buy/use recommendations.
+- In `execute`, review approval now feeds into real pre-action Trackblazer plumbing:
+  - policy-driven shop purchases
+  - policy-driven training item use
+  - reassessment after `Reset Whistle`
 
 Implementation note to preserve during debugging:
 
@@ -66,9 +79,12 @@ Implementation note to preserve during debugging:
 Not implemented yet:
 
 - richer reasoning text beyond the current snapshot payload
-- scenario-specific snapshot fields beyond the current generic/unity-focused training data
-- full Trackblazer-specific sub-phase coverage for shop/inventory/race flows
-- real action preview payloads for Trackblazer shop/item usage flows
+- threshold/min-score/scenario-score details in the main decision snapshot
+- first-class Trackblazer race-review coverage:
+  - race candidate scoring details
+  - checkpoint/fatigue/rival rationale
+  - clearer race-specific sub-phases
+- concrete planned-click preview payloads for Trackblazer shop-purchase steps
 - screenshot preview inside the console
 - dedicated server/web endpoint or persisted JSON for the latest decision snapshot
 - operator override actions beyond pause/resume/continue
@@ -465,6 +481,7 @@ Acceptance:
 - [x] Include OCR region/debug provenance entries for fields used in the decision.
 - [x] Ensure non-training actions also produce useful snapshots.
 - [x] Add phase/error metadata to the runtime state used by the console.
+- [x] Include Trackblazer inventory/shop planned-action data in the snapshot.
 
 Acceptance:
 
@@ -507,7 +524,8 @@ Acceptance:
 - [x] Highlight current phase and error phase distinctly.
 - [ ] Add short labels for common blocked states such as OCR failure, unknown screen, missing template, and waiting for user.
 - [x] Add detailed sub-phase display for skill flow.
-- [ ] Add detailed sub-phase display for Trackblazer shop flow, inventory checks, and race flow.
+- [x] Add detailed/manual sub-phase display coverage for Trackblazer inventory and shop checks.
+- [ ] Add detailed sub-phase display for Trackblazer race flow.
 
 Acceptance:
 
@@ -518,6 +536,7 @@ Acceptance:
 - [ ] Improve log formatting for decision snapshots.
 - [ ] Optionally persist the last paused snapshot to a JSON file or server endpoint.
 - [ ] Optionally attach screenshot/debug capture paths to the snapshot.
+- [ ] Add a richer Trackblazer race-debug payload before live race automation is trusted.
 - [x] Show active OCR region keys and adjusted coordinates in the console.
 - [x] Show planned click targets before commit in preview mode.
 

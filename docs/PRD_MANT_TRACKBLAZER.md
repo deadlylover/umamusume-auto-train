@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress. Trackblazer detection, console visibility, inventory/item-use scaffolding, and a fast shop scan path are in the branch, but real scenario scoring and full shop commit routing are still incomplete.
+In progress. As of March 21, 2026, the branch now has working Trackblazer detection, operator-console visibility, inventory scan/use plumbing, shop scan/purchase plumbing, policy-driven buy/use planning, and a first-pass Trackblazer race-vs-training gate. The main critical implementation still missing is richer race candidate scoring driven by real scenario state, plus the scenario-state/scoring work that should feed it.
 
 ## Current Progress
 
@@ -46,6 +46,29 @@ Implemented in support of Trackblazer bring-up:
 - [x] Trackblazer shop scan now uses scrollbar-aware reset/seek plus buffered frame capture during a continuous scrollbar drag.
 - [x] Shop scan timing now separates drag runtime, buffered capture, overlapped analysis, and total wall time in the flow snapshot.
 - [x] Shop row selection scaffolding now exists for "find item while scrolling, seek back to its band, and click only that row checkbox without pressing confirm".
+- [x] Canonical Trackblazer shop policy now lives in `core/trackblazer_shop.py`, with timeline-aware priority preview and quantity caps surfaced in the console.
+- [x] Canonical Trackblazer item-use policy now lives in `core/trackblazer_item_use.py`, with selected-action-aware `Would Use` / `Deferred Use` planning.
+- [x] `core/skeleton.py` now attaches a Trackblazer pre-action item-use plan and Trackblazer shop buy plan to the chosen action before review/execute.
+- [x] `run_action_with_review()` now runs Trackblazer pre-action steps in the real execution path:
+  - policy-driven shop purchases before the main action
+  - policy-driven training-item use before the main action
+  - reassessment after `Reset Whistle`
+- [x] `scenarios/trackblazer.py::execute_trackblazer_shop_purchases(...)` now implements the production purchase path:
+  - enter shop
+  - select planned rows
+  - press confirm
+  - dismiss after-sale prompt
+  - close the shop
+- [x] `scenarios/trackblazer.py::execute_training_items(...)` now implements the production item-use path with dry-run / confirm-only / full commit modes, increment-target verification, confirm-use detection, follow-up confirm handling, and close/verify behavior.
+- [x] In `check_only`, the main loop now does automatic non-destructive Trackblazer inventory scan plus one shop scan/refresh pass per turn so review snapshots include current held items, visible shop items, and would-buy / would-use output.
+- [x] The operator console now exposes dedicated manual checks for Trackblazer inventory scan, Trackblazer item-selection test, and Trackblazer shop scan, and renders their flow timings in the Timing pane.
+- [x] A first-pass Trackblazer race gate now lives in `core/trackblazer_race_logic.py` and is wired into `core/skeleton.py` under the `evaluate_trackblazer_race` sub-phase.
+- [x] The race gate currently implements:
+  - force `G1`
+  - summer bias toward training
+  - weak-training threshold routing toward optional races
+  - rival-indicator bias toward racing
+- [x] Trackblazer race decision payloads now appear in the review snapshot and operator console so live testing feedback can be tied back to concrete gate inputs.
 
 Shop-related template assets added:
 
@@ -84,13 +107,32 @@ Trackblazer shop item assets added under `assets/trackblazer/`:
 - `select_checked.png` — Green checkmark (selected state). Indicates an item row is currently selected for use.
 - `select_unchecked.png` — Grey/empty checkbox (unselected state). Indicates an item row is not selected.
 
-Not implemented yet:
+Highest-priority remaining work:
 
-- real Trackblazer OCR extraction for grade points / shop coins / shop state
-- Trackblazer scoring
-- Trackblazer shop/item commit logic beyond the current refresh-popup dismissal, buffered scan, and row-selection scaffolding (price OCR, confirm purchase, after-sale handling, and production item use are not yet implemented)
-- Trackblazer-specific action routing
-- Item price/cost OCR for shop decision-making
+- Richer Trackblazer race decision logic:
+  - candidate race evaluation using checkpoint pressure, rival value, fatigue/race cadence, and finale context
+  - live race-list-backed grade detection instead of schedule-only assumptions
+  - better integration than the current generic race-day / mission / goal / scheduled-race branches plus the first-pass race gate
+- Real Trackblazer scenario-state extraction for the race planner:
+  - Grade Points / checkpoint progress
+  - race bonus / progression pressure
+  - fatigue or consecutive-race risk
+  - Twinkle Star Climax phase awareness
+- Trackblazer training/scenario scoring in `core/trainings.py` so training value and race value are compared on scenario-aware inputs rather than generic logic alone
+- Live-run hardening:
+  - execute a few real turns
+  - validate open/close reliability for inventory/shop in normal play
+  - tune OCR thresholds and policy defaults from actual run logs
+
+Still not implemented:
+
+- real Grade Point/checkpoint OCR that feeds decision-making
+- Trackblazer-specific training score contribution in `core/trainings.py`
+- first-class Trackblazer race candidate scoring and selection
+- TSC-specific planning/execution flow
+- item price OCR from the shop UI itself
+- fatigue-aware race cadence logic
+- checkpoint / Grade Point / Race Bonus aware race forcing
 
 ## Why This Exists
 
@@ -391,12 +433,13 @@ Acceptance:
 - [x] Add Trackblazer OCR/template regions to `utils/constants.py`.
 - [x] Implement initial scenario branching in `core/state.py`.
 - [ ] Replace placeholder MANT regions with tuned scenario-specific values.
-- [ ] Implement real Trackblazer state extraction for grade points / shop coins / shop state.
+- [ ] Implement real Trackblazer state extraction for grade points / checkpoint progress / race pressure.
+- [x] Implement real Trackblazer shop coin extraction on the shop screen.
 - [x] Surface placeholder Trackblazer OCR provenance in the operator/debug console snapshot.
-- [ ] Implement inventory/item-state extraction needed for Trackblazer debugging.
+- [x] Implement inventory/item-state extraction needed for Trackblazer debugging.
 - [ ] Save debug crops for each new recognition area.
 - [ ] Document every new state key and its expected range/meaning.
-- [ ] Feed those new state fields into the operator/debug console snapshot.
+- [x] Feed inventory/shop state fields into the operator/debug console snapshot.
 
 Acceptance:
 
@@ -417,12 +460,13 @@ Acceptance:
 
 ### Phase 4: Exclusive Action Handling
 
-- [ ] Create `scenarios/trackblazer.py`.
-- [ ] Add routing from `core/skeleton.py`.
+- [x] Create `scenarios/trackblazer.py`.
+- [x] Add routing from `core/skeleton.py` for inventory scan, shop scan, pre-action item use, and pre-action shop purchase plumbing.
 - [ ] Handle mandatory confirmation / route-selection / checkpoint screens.
 - [ ] Add retry/escape behavior when the handler cannot confirm state.
 - [x] Add `check_only` review paths for skill buying and generic action/race selection review.
-- [ ] Add `check_only` review paths for Trackblazer shop interaction and inventory checks.
+- [x] Add `check_only` review paths for Trackblazer shop interaction and inventory checks.
+- [ ] Add first-class Trackblazer race-routing and race review paths beyond the current generic race preview flow.
 
 Acceptance:
 
@@ -456,12 +500,13 @@ Acceptance:
 - [x] Update `core/state.py` to read Trackblazer inventory state and surface debug/timing data.
 - [x] Update `core/skeleton.py` detection/routing for scenario-aware inventory handling and console snapshots.
 - [ ] Update `core/trainings.py` with scenario score function and debug fields.
-- [x] Add `scenarios/trackblazer.py` for inventory scanning, item-use testing, and shop-entry helpers.
+- [x] Add `scenarios/trackblazer.py` for inventory scanning, item-use testing, shop scanning, shop purchase execution, rival-race scouting, and shop-entry helpers.
 - [x] Ensure Trackblazer fields are included in the operator/debug console snapshot.
-- [ ] Add Trackblazer console sub-phases for shop, inventory, and race selection.
+- [x] Add Trackblazer console/manual coverage for inventory and shop checks.
+- [ ] Add Trackblazer console sub-phases for race selection and race planning.
 - [x] Add skill-buy console sub-phases and review flow.
 - [x] Add Trackblazer OCR provenance entries showing region key and adjusted bounds.
-- [ ] Add Trackblazer planned-click preview entries for shop actions.
+- [ ] Add Trackblazer planned-click preview entries for the concrete shop-purchase click sequence.
 - [x] Add planned-click preview entries for race and skill actions.
 - [ ] Update `config.template.json` and `core/config.py` if new knobs are needed.
 - [ ] Update web UI types/components if new knobs should be user-editable.
@@ -477,8 +522,8 @@ Acceptance:
 
 ## Open Questions
 
-- What exact scenario mechanic matters most for decision quality in Trackblazer?
-- Does the scenario need its own race-day or event handling logic?
+- What exact mix of checkpoint pressure, rival value, fatigue, and TSC prep should dominate race selection?
+- Does the scenario need its own race-day or event handling logic beyond the current generic branches?
 - Are the training panel and support icons placed differently enough to require dedicated regions?
 - Is there an upstream implementation to port later, or are we designing this from scratch?
 - Should Trackblazer tuning reuse `scenario_gimmick_weight`, or does it need separate sub-weights?

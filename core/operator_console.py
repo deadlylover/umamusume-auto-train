@@ -850,6 +850,14 @@ class OperatorConsole:
     if rival_line:
       lines.append(rival_line)
 
+    race_gate_lines = self._format_trackblazer_race_lines(selected_action)
+    if race_gate_lines:
+      lines.extend(race_gate_lines)
+
+    race_entry_lines = self._format_trackblazer_race_entry_lines(planned)
+    if race_entry_lines:
+      lines.extend(race_entry_lines)
+
     training_lines = self._format_training_lines(ranked_trainings, selected_action)
     if training_lines:
       lines.append("")
@@ -932,6 +940,54 @@ class OperatorConsole:
     if mission is not None:
       return f"Race mission available: {mission}"
     return ""
+
+  def _format_trackblazer_race_lines(self, selected_action):
+    decision = selected_action.get("trackblazer_race_decision") or {}
+    if not isinstance(decision, dict) or not decision:
+      return []
+
+    outcome = "race" if decision.get("should_race") else "train"
+    parts = [f"Race Gate: {outcome}"]
+    target = decision.get("race_tier_target")
+    if target:
+      parts.append(f"target {target}")
+    race_name = decision.get("race_name")
+    if race_name:
+      parts.append(f"race {race_name}")
+    training_total = decision.get("training_total_stats")
+    if training_total is not None:
+      parts.append(f"training_total {training_total}")
+    if decision.get("rival_indicator"):
+      parts.append("rival yes")
+    if decision.get("is_summer"):
+      parts.append("summer yes")
+
+    lines = [" | ".join(parts)]
+    reason = decision.get("reason")
+    if reason:
+      lines.append(f"Race Gate Reason: {reason}")
+    return lines
+
+  def _format_trackblazer_race_entry_lines(self, planned):
+    entry_gate = planned.get("race_entry_gate") or {}
+    if not isinstance(entry_gate, dict) or not entry_gate:
+      return []
+
+    parts = ["Race Entry Gate: lobby -> race list"]
+    expected_branch = entry_gate.get("expected_branch")
+    if expected_branch:
+      parts.append(f"expected {expected_branch}")
+    lines = [" | ".join(parts)]
+
+    meaning = entry_gate.get("warning_meaning")
+    if meaning:
+      lines.append(f"Race Warning: {meaning}")
+
+    ok_action = entry_gate.get("ok_action")
+    cancel_action = entry_gate.get("cancel_action")
+    if ok_action or cancel_action:
+      lines.append(f"Race Warning Buttons: ok={ok_action or '-'} | cancel={cancel_action or '-'}")
+    return lines
 
   def _format_training_lines(self, ranked_trainings, selected_action):
     if not ranked_trainings:
@@ -1070,6 +1126,8 @@ class OperatorConsole:
   def _format_planned_action_sections(self, planned):
     lines = []
     for section_name, payload in (
+      ("Race Decision", planned.get("race_decision") or {}),
+      ("Race Entry Gate", planned.get("race_entry_gate") or {}),
       ("Inventory Scan", planned.get("inventory_scan") or {}),
       ("Would Use", planned.get("would_use") or []),
       ("Deferred Use", planned.get("deferred_use") or []),
