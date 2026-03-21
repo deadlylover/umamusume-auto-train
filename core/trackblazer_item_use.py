@@ -631,6 +631,7 @@ def _usage_context(state_obj, action):
     "total_stat_gain": total_stat_gain,
     "rainbow_count": rainbow_count,
     "support_count": support_count,
+    "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
     "held_support_item_names": [entry["name"] for entry in held_support_items],
     "affordable_shop_support_item_names": [entry["name"] for entry in affordable_shop_support_items],
     "held_energy_available": any(item_key in _ENERGY_ITEM_KEYS for item_key in held_support_keys),
@@ -664,6 +665,102 @@ def _usage_context(state_obj, action):
     "commit_training_after_items": strong_burst_training,
     "is_tsc": timeline_label == "Finale Underway",
   }
+
+
+def _evaluate_item_candidates(effective_items, context, inventory, held_quantities, hammer_spendable):
+  candidates = []
+  deferred = []
+  for item in effective_items:
+    item_key = item["key"]
+    held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
+    if held_quantity <= 0:
+      continue
+    evaluation = _evaluate_item_candidate(item, context, held_quantity, hammer_spendable)
+    if not evaluation:
+      continue
+    base_entry = {
+      "key": item_key,
+      "name": item.get("display_name") or _humanize_item_key(item_key),
+      "priority": item.get("effective_priority"),
+      "usage_group": item.get("usage_group"),
+      "target_training": item.get("target_training"),
+      "held_quantity": held_quantity,
+      "reserve_quantity": evaluation.get("reserved_quantity", item.get("reserve_quantity", 0)),
+      "reason": evaluation.get("reason") or evaluation.get("defer_reason") or "",
+    }
+    if evaluation.get("use_now"):
+      base_entry["candidate_score"] = evaluation.get("candidate_score", 0)
+      candidates.append(base_entry)
+    elif evaluation.get("defer_reason"):
+      deferred.append(base_entry)
+
+  candidates.sort(
+    key=lambda entry: (
+      _safe_int(entry.get("candidate_score"), 0),
+      _PRIORITY_INDEX.get(str(entry.get("priority") or "MED"), 1),
+      _safe_int(entry.get("held_quantity"), 0),
+      entry.get("name", ""),
+    ),
+    reverse=True,
+  )
+  return candidates, deferred
+
+
+def _apply_energy_candidate_stacking(candidates, deferred, context):
+  candidates = list(candidates or [])
+  deferred = list(deferred or [])
+
+  # Prevent energy item stacking. Prefer the smallest restore value that still
+  # helps; mild overcapping from a single item is acceptable, but once the
+  # deficit is covered don't pile on more items.
+  energy_level = _safe_int(context.get("energy_level"), 0)
+  max_energy = _safe_int(context.get("max_energy"), energy_level)
+  energy_candidates = [entry for entry in candidates if entry.get("usage_group") == "energy"]
+  kept_energy = []
+  if energy_candidates:
+    non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
+    energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
+    planned_energy_restored = 0
+    for entry in energy_candidates:
+      restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
+      remaining_deficit = max(0, max_energy - (energy_level + planned_energy_restored))
+      if planned_energy_restored > 0 and remaining_deficit <= 0:
+        entry.pop("candidate_score", None)
+        entry["reason"] = (
+          f"energy already sufficient ({energy_level}+{planned_energy_restored}"
+          f" >= max {max_energy})"
+        )
+        deferred.append(entry)
+        continue
+      if planned_energy_restored > 0 and restore > remaining_deficit:
+        entry.pop("candidate_score", None)
+        entry["reason"] = (
+          f"would overcap on top of earlier items ({energy_level}"
+          f"+{planned_energy_restored}+{restore} > max {max_energy})"
+        )
+        deferred.append(entry)
+        continue
+      planned_energy_restored += restore
+      kept_energy.append(entry)
+    candidates = non_energy + kept_energy
+
+  return candidates, deferred, kept_energy
+
+
+def _should_commit_after_energy(context, kept_energy):
+  if context.get("commit_training_after_items"):
+    return False
+  if context.get("action_func") != "do_training":
+    return False
+  if not kept_energy:
+    return False
+  if not context.get("summer_window"):
+    return False
+  if not context.get("high_value_training"):
+    return False
+  if context.get("failure_bypassed_by_items"):
+    return True
+  return False
 
 
 def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
@@ -882,76 +979,28 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       held_quantities[item_key] = _current_held_quantity(item_key, inventory, held_quantities)
   _, hammer_spendable = _hammer_usage_state(held_quantities)
 
-  candidates = []
-  deferred = []
-  for item in effective_items:
-    item_key = item["key"]
-    held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
-    if held_quantity <= 0:
-      continue
-    evaluation = _evaluate_item_candidate(item, context, held_quantity, hammer_spendable)
-    if not evaluation:
-      continue
-    base_entry = {
-      "key": item_key,
-      "name": item.get("display_name") or _humanize_item_key(item_key),
-      "priority": item.get("effective_priority"),
-      "usage_group": item.get("usage_group"),
-      "target_training": item.get("target_training"),
-      "held_quantity": held_quantity,
-      "reserve_quantity": evaluation.get("reserved_quantity", item.get("reserve_quantity", 0)),
-      "reason": evaluation.get("reason") or evaluation.get("defer_reason") or "",
-    }
-    if evaluation.get("use_now"):
-      base_entry["candidate_score"] = evaluation.get("candidate_score", 0)
-      candidates.append(base_entry)
-    elif evaluation.get("defer_reason"):
-      deferred.append(base_entry)
-
-  candidates.sort(
-    key=lambda entry: (
-      _safe_int(entry.get("candidate_score"), 0),
-      _PRIORITY_INDEX.get(str(entry.get("priority") or "MED"), 1),
-      _safe_int(entry.get("held_quantity"), 0),
-      entry.get("name", ""),
-    ),
-    reverse=True,
+  candidates, deferred = _evaluate_item_candidates(
+    effective_items,
+    context,
+    inventory,
+    held_quantities,
+    hammer_spendable,
   )
+  candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
 
-  # Prevent energy item stacking.  Prefer the smallest restore value that
-  # still helps; mild overcapping from a single item is acceptable, but once
-  # the deficit is covered don't pile on more items.
-  energy_level = _safe_int(context.get("energy_level"), 0)
-  max_energy = _safe_int(context.get("max_energy"), energy_level)
-  energy_candidates = [e for e in candidates if e.get("usage_group") == "energy"]
-  if energy_candidates:
-    non_energy = [e for e in candidates if e.get("usage_group") != "energy"]
-    # Smallest restore value first so we pick the cheapest sufficient item.
-    energy_candidates.sort(key=lambda e: _ENERGY_RESTORE_VALUES.get(e["key"], 0))
-    planned_energy_restored = 0
-    kept_energy = []
-    for entry in energy_candidates:
-      restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
-      remaining_deficit = max(0, max_energy - (energy_level + planned_energy_restored))
-      if planned_energy_restored > 0 and remaining_deficit <= 0:
-        entry.pop("candidate_score", None)
-        entry["reason"] = (
-          f"energy already sufficient ({energy_level}+{planned_energy_restored}"
-          f" >= max {max_energy})"
-        )
-        deferred.append(entry)
-        continue
-      if planned_energy_restored > 0 and restore > remaining_deficit:
-        entry.pop("candidate_score", None)
-        entry["reason"] = (
-          f"would overcap on top of earlier items ({energy_level}"
-          f"+{planned_energy_restored}+{restore} > max {max_energy})"
-        )
-        deferred.append(entry)
-        continue
-      planned_energy_restored += restore
-      kept_energy.append(entry)
-    candidates = non_energy + kept_energy
+  if _should_commit_after_energy(context, kept_energy):
+    context = {
+      **context,
+      "commit_training_after_items": True,
+    }
+    candidates, deferred = _evaluate_item_candidates(
+      effective_items,
+      context,
+      inventory,
+      held_quantities,
+      hammer_spendable,
+    )
+    candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
 
   return {
     "context": {
@@ -968,6 +1017,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "support_count": context.get("support_count"),
       "strong_burst_training": context.get("strong_burst_training"),
       "weak_summer_training": context.get("weak_summer_training"),
+      "failure_bypassed_by_items": context.get("failure_bypassed_by_items"),
       "held_support_item_names": context.get("held_support_item_names"),
       "affordable_shop_support_item_names": context.get("affordable_shop_support_item_names"),
       "summer_reroll_target_name": context.get("summer_reroll_target_name"),

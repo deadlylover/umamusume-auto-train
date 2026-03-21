@@ -1037,6 +1037,7 @@ class OperatorConsole:
           "filtered_out": bool(entry.get("filtered_out")),
           "excluded_reason": entry.get("excluded_reason"),
           "max_allowed_failure": entry.get("max_allowed_failure"),
+          "failure_bypassed_by_items": bool(entry.get("failure_bypassed_by_items")),
         }
       )
     entries.sort(
@@ -1063,6 +1064,8 @@ class OperatorConsole:
         parts.append(f"supports {entry['supports']}")
       if entry.get("failure") is not None:
         parts.append(f"fail {self._format_number(entry['failure'])}%")
+      if entry.get("failure_bypassed_by_items"):
+        parts.append("items clear")
       if entry.get("filtered_out") and entry.get("max_allowed_failure") is not None:
         parts.append(f"limit {self._format_number(entry['max_allowed_failure'])}%")
       if entry.get("excluded_reason"):

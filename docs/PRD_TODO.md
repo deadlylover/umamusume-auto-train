@@ -144,3 +144,58 @@ the actual execution path instead of only surfacing a review payload.
 - The live-UI grade/rival signals and the consecutive-race gate should be
   treated as execution correctness work, not just operator-console
   observability.
+
+## Trackblazer Megaphone Active-State Detection
+
+### Problem
+
+Trackblazer megaphones last multiple turns, but the current inventory/item-use
+flow does not explicitly detect whether a megaphone buff is already active.
+That creates overlap risk:
+
+- the bot can attempt to reuse a megaphone while its previous buff is still
+  running
+- the inventory increment button may be greyed out / disabled for an item that
+  cannot currently be used, but we do not have an asset for that state
+- when the relevant megaphone is no longer present in inventory, the bot cannot
+  infer active state from inventory alone
+
+The desired behavior is waterfall-aware:
+
+- if a lower-tier buff is active, a stronger megaphone should still be allowed
+  to override it
+- if a stronger buff is active, the weaker megaphone should be blocked
+
+### Goal
+
+Add reliable active-state detection for Trackblazer megaphones so pre-action
+item planning and execution avoid invalid or wasteful overlapping uses while
+still allowing valid upgrades.
+
+### Proposed Direction
+
+- Capture a greyed-out / disabled increment-button asset for the Trackblazer
+  inventory item row and wire it into inventory-control detection.
+- Treat the greyed increment state as a first-class execution signal, not just
+  the absence of a normal increment match.
+- Capture buff-icon assets for active megaphone effects so the bot can detect
+  the currently active training-bonus state even when the corresponding item is
+  absent from inventory.
+- Extend Trackblazer inventory/state payloads to surface:
+  - whether a megaphone row is actionable
+  - whether its increment button is disabled
+  - which megaphone buff icon, if any, is active on the current turn
+- Add item-use policy logic that encodes waterfall override rules between
+  megaphones, so stronger buffs can replace weaker ones but not vice versa.
+- Prefer explicit live UI detection over deduction from remaining inventory
+  quantity alone.
+
+### Notes
+
+- This should land in the Trackblazer item-use path, not as a generic inventory
+  scanner heuristic.
+- Relevant implementation points will likely include
+  `scenarios/trackblazer.py`, `core/state.py`, `core/trackblazer_item_use.py`,
+  and `utils/constants.py`.
+- The operator console should eventually expose the detected active megaphone
+  state and the reason an increment button is considered blocked.

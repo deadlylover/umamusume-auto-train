@@ -357,6 +357,35 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
   risk_taking_set = training_template['risk_taking_set']
   filtered_results = CleanDefaultDict()
 
+  # Trackblazer: check if held energy items / good luck charm would clear failure
+  _tb_items_bypass_failure = False
+  if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    inv_summary = state.get("trackblazer_inventory_summary") or {}
+    held_quantities = inv_summary.get("held_quantities") or {}
+    if held_quantities:
+      has_charm = held_quantities.get("good_luck_charm", 0) > 0
+      if has_charm:
+        _tb_items_bypass_failure = True
+        info("Trackblazer failure bypass: good luck charm available")
+      else:
+        from core.trackblazer_item_use import _ENERGY_RESTORE_VALUES
+        energy_level = state.get("energy_level", 0)
+        max_energy = state.get("max_energy", 0)
+        if max_energy > 0:
+          safe_threshold = max_energy * 0.50
+          # Find the smallest held energy restore that brings us above the safe threshold
+          held_restores = sorted(
+            rv for ik, rv in _ENERGY_RESTORE_VALUES.items()
+            if held_quantities.get(ik, 0) > 0 and rv > 0
+          )
+          for restore in held_restores:
+            projected_energy = min(energy_level + restore, max_energy)
+            if projected_energy >= safe_threshold:
+              _tb_items_bypass_failure = True
+              projected_pct = projected_energy / max_energy
+              info(f"Trackblazer failure bypass: energy item +{restore} clears fails ({energy_level:.0f}+{restore} = {projected_energy:.0f}/{max_energy:.0f} = {projected_pct:.0%})")
+              break
+
   for training_name, training_data in training_results.items():
     # Check if primary stat is at cap
     stat_cap = config.STAT_CAPS[training_name]
@@ -378,15 +407,23 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
       # Check failure rate with dynamic threshold
       failure_rate = int(training_data["failure"])
       if failure_rate > max_allowed_failure:
-        if risk_increase > 0:
-          debug(f"Skipping {training_name.upper()}: {failure_rate}% > {max_allowed_failure}% (base: {config.MAX_FAILURE}, bonus: +{risk_increase})")
-        continue
+        if _tb_items_bypass_failure:
+          training_data["failure_bypassed_by_items"] = True
+          info(f"Allowing {training_name.upper()}: fail {failure_rate}% > {max_allowed_failure}% (items expected to clear failure)")
+        else:
+          if risk_increase > 0:
+            debug(f"Skipping {training_name.upper()}: {failure_rate}% > {max_allowed_failure}% (base: {config.MAX_FAILURE}, bonus: +{risk_increase})")
+          continue
     else:
       # No risk taking - use base failure rate only
       failure_rate = int(training_data["failure"])
       if failure_rate > config.MAX_FAILURE:
-        debug(f"Skipping {training_name.upper()}: {failure_rate}% > {config.MAX_FAILURE}% (no risk tolerance)")
-        continue
+        if _tb_items_bypass_failure:
+          training_data["failure_bypassed_by_items"] = True
+          info(f"Allowing {training_name.upper()}: fail {failure_rate}% > {config.MAX_FAILURE}% (items expected to clear failure)")
+        else:
+          debug(f"Skipping {training_name.upper()}: {failure_rate}% > {config.MAX_FAILURE}% (no risk tolerance)")
+          continue
 
     training_data["is_capped"] = is_capped
     training_data["max_allowed_failure"] = max_allowed_failure

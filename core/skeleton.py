@@ -1464,6 +1464,7 @@ def _build_ranked_training_snapshot(state_obj, available_trainings, training_fun
       "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
       "filtered_out": False,
       "excluded_reason": None,
+      "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
     }
 
   return list(merged_trainings.values())
