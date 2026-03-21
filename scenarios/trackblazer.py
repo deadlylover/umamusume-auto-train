@@ -110,7 +110,7 @@ def _trackblazer_inventory_controls_region():
 
 
 def _shop_confirm_template_keys():
-    return ("shop_confirm", "shop_confirm_2")
+    return ("shop_confirm", "shop_confirm_2", "inventory_use_training_items")
 
 
 def _match_center_y(match):
@@ -975,6 +975,7 @@ def close_training_items_inventory(threshold=0.8):
     timing = {}
 
     attempts = [
+        ("shop_aftersale_close", constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close"), _INVERSE_GLOBAL_SCALE),
         ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
         ("close_btn", "assets/buttons/close_btn.png", 1.0),
         ("back_btn", "assets/buttons/back_btn.png", 1.0),
@@ -1357,6 +1358,20 @@ def scan_trackblazer_shop_inventory(
         for (x, y, w, h) in checkbox_matches
         if int(x) >= 560 and int(y) >= 450 and int(y) <= 1100
     ]
+    purchased_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_item_purchased")
+    purchased_matches = []
+    if purchased_template:
+        purchased_matches = device_action.match_template(
+            purchased_template,
+            screenshot,
+            checkbox_threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+    purchased_matches = [
+        (int(x), int(y), int(w), int(h))
+        for (x, y, w, h) in purchased_matches
+        if int(x) >= 500 and int(y) >= 400 and int(y) <= 1100
+    ]
     t_checkboxes = _time() - t0
 
     t0 = _time()
@@ -1390,6 +1405,7 @@ def scan_trackblazer_shop_inventory(
         row_center_y = int(_match_center_y(match))
         paired_checkbox = _pair_item_to_increment(match, checkbox_matches, y_tolerance=36)
         checkbox_target = _to_absolute_click_target(constants.GAME_WINDOW_REGION, paired_checkbox) if paired_checkbox else None
+        paired_purchased = _pair_item_to_increment(match, purchased_matches, y_tolerance=45)
         rows.append(
             {
                 "item_name": item_name,
@@ -1403,13 +1419,16 @@ def scan_trackblazer_shop_inventory(
                     int(checkbox_target[0]),
                     int(checkbox_target[1]),
                 ) if checkbox_target else None,
+                "purchased": bool(paired_purchased),
                 "detected": True,
             }
         )
 
     rows = sorted(rows, key=lambda entry: entry["row_center_y"])
     visible_items = [entry["item_name"] for entry in rows]
+    purchasable_items = [entry["item_name"] for entry in rows if not entry.get("purchased")]
 
+    purchased_items = [entry["item_name"] for entry in rows if entry.get("purchased")]
     timing = {
         "total": round(_time() - t_total, 4),
         "capture": round(t_capture, 4),
@@ -1421,13 +1440,16 @@ def scan_trackblazer_shop_inventory(
         "confirm": round(t_confirm, 4),
         "rows_detected": len(rows),
         "checkbox_count": len(checkbox_matches),
+        "purchased_count": len(purchased_matches),
     }
     info(
         f"[TB_SHOP] visible rows={len(rows)} items={visible_items} "
+        f"purchasable={purchasable_items}{' purchased=' + str(purchased_items) if purchased_items else ''} "
         f"checkboxes={len(checkbox_matches)} confirm={bool(confirm_entry and confirm_entry.get('passed_threshold'))}"
     )
     return {
         "visible_items": visible_items,
+        "purchasable_items": purchasable_items,
         "rows": rows,
         "checkbox_matches": [[int(v) for v in match] for match in checkbox_matches],
         "confirm": confirm_entry,
@@ -1472,13 +1494,19 @@ def scroll_trackblazer_shop(direction="down", duration=0.55, settle_seconds=1.0)
     }
 
 
-def _append_shop_scan_page(flow, page, page_index, seen_items, ordered_items, capture_mode, scrollbar=None, elapsed=None):
+def _append_shop_scan_page(flow, page, page_index, seen_items, ordered_items, capture_mode, scrollbar=None, elapsed=None, seen_purchasable=None, ordered_purchasable=None):
     visible_items = list(page.get("visible_items") or [])
+    purchasable_items = list(page.get("purchasable_items") or [])
     signature = tuple(visible_items)
     new_items = [item_name for item_name in visible_items if item_name not in seen_items]
     for item_name in new_items:
         seen_items.add(item_name)
         ordered_items.append(item_name)
+    if seen_purchasable is not None and ordered_purchasable is not None:
+        for item_name in purchasable_items:
+            if item_name not in seen_purchasable:
+                seen_purchasable.add(item_name)
+                ordered_purchasable.append(item_name)
 
     flow["pages"].append(
         {
@@ -1486,6 +1514,7 @@ def _append_shop_scan_page(flow, page, page_index, seen_items, ordered_items, ca
             "capture_mode": str(capture_mode),
             "elapsed": round(float(elapsed or 0.0), 4),
             "visible_items": visible_items,
+            "purchasable_items": purchasable_items,
             "new_items": new_items,
             "rows": page.get("rows"),
             "confirm": page.get("confirm"),
@@ -1524,6 +1553,8 @@ def _scan_all_trackblazer_shop_items_paged(
 
     seen_items = set()
     ordered_items = []
+    seen_purchasable = set()
+    ordered_purchasable = []
     seen_signatures = set()
     stale_pages = 0
     last_page = None
@@ -1541,6 +1572,8 @@ def _scan_all_trackblazer_shop_items_paged(
             seen_items,
             ordered_items,
             capture_mode="paged_swipe",
+            seen_purchasable=seen_purchasable,
+            ordered_purchasable=ordered_purchasable,
         )
 
         if signature in seen_signatures or (not new_items and last_page == signature):
@@ -1570,6 +1603,7 @@ def _scan_all_trackblazer_shop_items_paged(
     }
     return {
         "all_items": ordered_items,
+        "purchasable_items": ordered_purchasable,
         "pages": flow["pages"],
         "flow": flow,
     }
@@ -1758,6 +1792,8 @@ def scan_all_trackblazer_shop_items(
 
     seen_items = set()
     ordered_items = []
+    seen_purchasable = set()
+    ordered_purchasable = []
     seen_signatures = set()
     stale_pages = 0
     last_page = None
@@ -1787,6 +1823,8 @@ def scan_all_trackblazer_shop_items(
         capture_mode="initial",
         scrollbar=initial_scrollbar,
         elapsed=0.0,
+        seen_purchasable=seen_purchasable,
+        ordered_purchasable=ordered_purchasable,
     )
     seen_signatures.add(initial_signature)
     last_page = initial_signature
@@ -1819,6 +1857,8 @@ def scan_all_trackblazer_shop_items(
                 capture_mode="scrollbar_drag_frame",
                 scrollbar=frame.get("scrollbar"),
                 elapsed=frame.get("elapsed"),
+                seen_purchasable=seen_purchasable,
+                ordered_purchasable=ordered_purchasable,
             )
             if signature in seen_signatures or (not new_items and last_page == signature):
                 stale_pages += 1
@@ -1847,6 +1887,7 @@ def scan_all_trackblazer_shop_items(
             flow["stop_reason"] = fallback_flow.get("stop_reason") or "paged_fallback_after_drag_failure"
             flow["scrollbar_final"] = flow.get("scrollbar_final") or initial_scrollbar
             ordered_items = list(dict.fromkeys(list(ordered_items) + list(fallback_result.get("all_items") or [])))
+            ordered_purchasable = list(dict.fromkeys(list(ordered_purchasable) + list(fallback_result.get("purchasable_items") or [])))
         elif flow["scrollbar_final"] and flow["scrollbar_final"].get("is_at_bottom"):
             flow["stop_reason"] = "scrollbar_bottom_reached"
         elif stale_pages >= 2:
@@ -1867,6 +1908,7 @@ def scan_all_trackblazer_shop_items(
     }
     return {
         "all_items": ordered_items,
+        "purchasable_items": ordered_purchasable,
         "pages": flow["pages"],
         "flow": flow,
     }
@@ -2466,14 +2508,27 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         flow["reason"] = "failed_to_click_confirm_use"
 
                 if flow["confirm_use_clicked"] and handle_followup:
-                    # full mode: handle followup confirmation + verify close
-                    sleep(0.25)
+                    # full mode: poll for the followup confirmation popup.
+                    # On ADB the popup may take a moment to appear after
+                    # the first confirm-use click, so retry several times.
                     post_confirm_controls_t0 = _time()
-                    post_confirm_controls = detect_inventory_controls()
+                    followup_confirm = {}
+                    post_confirm_controls = {}
+                    for _followup_poll in range(6):
+                        sleep(0.3)
+                        post_confirm_controls = detect_inventory_controls()
+                        candidates = post_confirm_controls.get("confirm_candidates") or {}
+                        candidate = (
+                            candidates.get("inventory_use_training_items")
+                            or candidates.get("shop_confirm")
+                            or {}
+                        )
+                        if candidate.get("passed_threshold"):
+                            followup_confirm = candidate
+                            break
                     flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
                     flow["post_confirm_controls"] = post_confirm_controls
-
-                    followup_confirm = ((post_confirm_controls.get("confirm_candidates") or {}).get("shop_confirm")) or {}
+                    flow["followup_confirm_polls"] = _followup_poll + 1
                     flow["followup_confirm_visible"] = bool(followup_confirm.get("passed_threshold"))
                     if flow["followup_confirm_visible"] and followup_confirm.get("click_target"):
                         flow["followup_confirm_entry"] = followup_confirm
@@ -2485,7 +2540,27 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         flow["timing_followup_confirm"] = round(_time() - followup_t0, 3)
                         flow["followup_confirm_click_result"] = followup_click_result
                         flow["followup_confirm_clicked"] = bool(followup_click_result.get("clicked"))
-                        sleep(0.2)
+
+                        if flow["followup_confirm_clicked"]:
+                            # Item-use may play an animation (e.g. Reset Whistle shuffle).
+                            # Wait for animation, then poll for the close button.
+                            sleep(3.0)
+                            close_poll_t0 = _time()
+                            close_clicked = False
+                            for _poll in range(10):
+                                poll_controls = detect_inventory_controls()
+                                close_entry = poll_controls.get("close") or {}
+                                if close_entry.get("passed_threshold") and close_entry.get("click_target"):
+                                    device_action.click_with_metrics(
+                                        close_entry["click_target"],
+                                        text=f"{log_tag} Close inventory after item-use animation.",
+                                    )
+                                    close_clicked = True
+                                    break
+                                sleep(0.5)
+                            flow["timing_post_animation_close"] = round(_time() - close_poll_t0, 3)
+                            flow["post_animation_close_clicked"] = close_clicked
+                            sleep(0.2)
 
                     verify_t0 = _time()
                     still_open, _, verify_checks = detect_inventory_screen()
@@ -2546,11 +2621,16 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     and flow["confirm_use_clicked"]
                 )
             else:  # full
+                followup_ok = (
+                    not flow["followup_confirm_visible"]
+                    or flow.get("followup_confirm_clicked")
+                )
                 flow["success"] = (
                     items_actionable
                     and flow["increments_clicked"] == increments_requested
                     and flow["confirm_use_available"]
                     and flow["confirm_use_clicked"]
+                    and followup_ok
                     and flow["closed"]
                 )
         else:
@@ -3173,10 +3253,12 @@ def check_trackblazer_shop_inventory(
         flow["scan_timing"] = (scan_result.get("flow") or {}).get("timing") or {}
         flow["pages"] = [page.get("visible_items") for page in (scan_result.get("pages") or [])]
         flow["all_items"] = list(scan_result.get("all_items") or [])
+        flow["purchasable_items"] = list(scan_result.get("purchasable_items") or [])
         flow["stop_reason"] = (scan_result.get("flow") or {}).get("stop_reason") or ""
-        result["trackblazer_shop_items"] = list(flow["all_items"])
+        result["trackblazer_shop_items"] = list(flow["purchasable_items"])
         result["trackblazer_shop_summary"] = {
             "items_detected": list(flow["all_items"]),
+            "purchasable_items": list(flow["purchasable_items"]),
             "page_count": len(scan_result.get("pages") or []),
             "stop_reason": flow["stop_reason"],
             "shop_coins": flow["shop_coins"],

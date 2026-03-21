@@ -1029,8 +1029,6 @@ class OperatorConsole:
       parts = [f"  {marker} {idx}. {entry['name']}"]
       if entry["score"] is not None:
         parts.append(f"score {self._format_number(entry['score'], digits=3)}")
-      elif entry.get("filtered_out"):
-        parts.append("discarded")
       parts.extend(self._format_training_gain_parts(entry["name"], entry.get("stat_gains") or {}))
       if entry["total_gain"]:
         parts.append(f"total+{entry['total_gain']}")

@@ -291,6 +291,9 @@ TRACKBLAZER_SHOP_UI_TEMPLATES = {
   "inventory_confirm_use_available": "assets/trackblazer/inventory_confirm_use_available.png",
   "inventory_confirm_use_unavailable": "assets/trackblazer/inventory_confirm_use_unavailable.png",
   "shop_aftersale_confirm_use_increment_item": "assets/trackblazer/shop_aftersale_confirm_use_increment_item.png",
+  "shop_item_purchased": "assets/trackblazer/shop_item_purchased.png",
+  "shop_select_unchecked_grey": "assets/trackblazer/shop_select_unchecked_grey.png",
+  "inventory_use_training_items": "assets/trackblazer/inventory_use_training_items.png",
 }
 
 # Trackblazer item use flow UI templates.

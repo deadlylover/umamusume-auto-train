@@ -970,6 +970,10 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "reason": shop_flow.get("reason") or "",
       "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
       "items_detected": shop_summary.get("items_detected") or shop_items,
+      "not_purchasable": sorted(
+        set(shop_summary.get("items_detected") or shop_items or [])
+        - set(shop_summary.get("purchasable_items") or shop_items or [])
+      ),
     },
     "would_buy": would_buy,
   }
@@ -1340,10 +1344,61 @@ def _summarize_training_exclusion(training_name, training_data, state_obj, train
   return max_allowed_failure, risk_increase, reason
 
 
+def _score_training_for_display(training_name, training_data, state_obj, training_function, training_template):
+  """Compute a score for a filtered-out training so it can be compared in the
+  operator console.  Uses the same formula as the configured training function."""
+  from copy import deepcopy
+  from core.trainings import (
+    most_stat_score, max_out_friendships_score,
+    rainbow_training_score, add_scenario_gimmick_score,
+    most_support_score,
+  )
+  # Work on a copy so scoring side-effects don't leak into the original data.
+  td = deepcopy(training_data)
+  x = (training_name, td)
+  try:
+    if training_function == "meta_training":
+      stat_gain = most_stat_score(x, state_obj, training_template)
+      non_max = max_out_friendships_score(x)
+      rainbow = rainbow_training_score(x)
+      rainbow = add_scenario_gimmick_score(x, rainbow, state_obj)
+      return ((stat_gain[0] / 10) + non_max[0] + rainbow[0], stat_gain[1])
+    if training_function == "rainbow_training":
+      rainbow = rainbow_training_score(x)
+      rainbow = add_scenario_gimmick_score(x, rainbow, state_obj)
+      non_max = max_out_friendships_score(x)
+      return (rainbow[0] + non_max[0] * config.NON_MAX_SUPPORT_WEIGHT, rainbow[1])
+    if training_function == "most_support_cards":
+      support = most_support_score(x)
+      support = add_scenario_gimmick_score(x, support, state_obj)
+      non_max = max_out_friendships_score(x)
+      return (non_max[0] * config.NON_MAX_SUPPORT_WEIGHT + support[0], support[1])
+    if training_function == "most_stat_gain":
+      return most_stat_score(x, state_obj, training_template)
+    if training_function == "max_out_friendships":
+      max_f = max_out_friendships_score(x)
+      max_f = add_scenario_gimmick_score(x, max_f, state_obj)
+      rainbow = rainbow_training_score(x)
+      return (max_f[0] + rainbow[0] * 0.25 * config.RAINBOW_SUPPORT_WEIGHT_ADDITION, max_f[1])
+    # Fallback: stat-gain only
+    return most_stat_score(x, state_obj, training_template)
+  except Exception:
+    return None
+
+
 def _build_ranked_training_snapshot(state_obj, available_trainings, training_function):
   raw_training_results = state_obj.get("training_results", {}) or {}
   merged_trainings = CleanDefaultDict()
   risk_taking_set = _resolve_review_risk_taking_set(state_obj, training_function)
+
+  # Resolve training template once for scoring filtered trainings.
+  training_template = None
+  filtered_keys = set(raw_training_results.keys()) - set(available_trainings.keys())
+  if filtered_keys:
+    try:
+      training_template = Strategy().get_training_template(state_obj) or {}
+    except Exception:
+      training_template = {}
 
   for training_name, training_data in raw_training_results.items():
     max_allowed_failure, risk_increase, exclusion_reason = _summarize_training_exclusion(
@@ -1353,9 +1408,17 @@ def _build_ranked_training_snapshot(state_obj, available_trainings, training_fun
       training_function=training_function,
       risk_taking_set=risk_taking_set,
     )
+
+    # Compute a display score even for filtered-out trainings.
+    score_tuple = None
+    if training_name in filtered_keys and training_template is not None:
+      score_tuple = _score_training_for_display(
+        training_name, training_data, state_obj, training_function, training_template,
+      )
+
     merged_trainings[training_name] = {
       "name": training_name,
-      "score_tuple": None,
+      "score_tuple": score_tuple,
       "failure": training_data.get("failure"),
       "max_allowed_failure": max_allowed_failure,
       "risk_increase": risk_increase,

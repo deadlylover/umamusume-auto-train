@@ -40,6 +40,18 @@ _ENERGY_ITEM_KEYS = (
   "energy_drink_max",
   "energy_drink_max_ex",
 )
+# Absolute energy points restored by each item.  Fail rate starts climbing
+# around the 50 % energy mark; even a small top-up (Vita 20 → +20) can clear
+# fails when energy is near that threshold.  Items whose restoration would
+# push total energy above max_energy are skipped to avoid waste (overcapping).
+_ENERGY_RESTORE_VALUES = {
+  "vita_65": 65,
+  "vita_40": 40,
+  "vita_20": 20,
+  "royal_kale_juice": 100,
+  "energy_drink_max": 5,       # mainly raises max energy (+4), only +5 direct
+  "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
+}
 _FAILSAFE_ITEM_KEYS = _ENERGY_ITEM_KEYS + ("good_luck_charm",)
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -905,6 +917,41 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     ),
     reverse=True,
   )
+
+  # Prevent energy item stacking.  Prefer the smallest restore value that
+  # still helps; mild overcapping from a single item is acceptable, but once
+  # the deficit is covered don't pile on more items.
+  energy_level = _safe_int(context.get("energy_level"), 0)
+  max_energy = _safe_int(context.get("max_energy"), energy_level)
+  energy_candidates = [e for e in candidates if e.get("usage_group") == "energy"]
+  if energy_candidates:
+    non_energy = [e for e in candidates if e.get("usage_group") != "energy"]
+    # Smallest restore value first so we pick the cheapest sufficient item.
+    energy_candidates.sort(key=lambda e: _ENERGY_RESTORE_VALUES.get(e["key"], 0))
+    planned_energy_restored = 0
+    kept_energy = []
+    for entry in energy_candidates:
+      restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
+      remaining_deficit = max(0, max_energy - (energy_level + planned_energy_restored))
+      if planned_energy_restored > 0 and remaining_deficit <= 0:
+        entry.pop("candidate_score", None)
+        entry["reason"] = (
+          f"energy already sufficient ({energy_level}+{planned_energy_restored}"
+          f" >= max {max_energy})"
+        )
+        deferred.append(entry)
+        continue
+      if planned_energy_restored > 0 and restore > remaining_deficit:
+        entry.pop("candidate_score", None)
+        entry["reason"] = (
+          f"would overcap on top of earlier items ({energy_level}"
+          f"+{planned_energy_restored}+{restore} > max {max_energy})"
+        )
+        deferred.append(entry)
+        continue
+      planned_energy_restored += restore
+      kept_energy.append(entry)
+    candidates = non_energy + kept_energy
 
   return {
     "context": {
