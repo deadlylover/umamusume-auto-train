@@ -573,6 +573,7 @@ def _usage_context(state_obj, action):
   score_value = _safe_float(score_tuple[0], 0.0)
   rainbow_count = _safe_int(training_data.get("total_rainbow_friends"), 0)
   support_count = _safe_int(training_data.get("total_supports"), 0)
+  failure_rate = _safe_int(training_data.get("failure"), 0)
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
   strong_burst_training = bool(
@@ -615,6 +616,47 @@ def _usage_context(state_obj, action):
   )
   held_support_keys = {entry["key"] for entry in held_support_items}
   affordable_shop_support_keys = {entry["key"] for entry in affordable_shop_support_items}
+  high_value_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and (
+      score_value >= 20.0
+      or matching_stat_gain >= 10
+      or total_stat_gain >= 18
+      or rainbow_count > 0
+    )
+  )
+  very_high_value_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and (
+      score_value >= 30.0
+      or matching_stat_gain >= 14
+      or total_stat_gain >= 24
+      or rainbow_count >= 2
+    )
+  )
+  committed_value_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and (
+      score_value >= 35.0
+      or matching_stat_gain >= 25
+      or total_stat_gain >= 35
+    )
+  )
+  commit_training_after_items = bool(
+    strong_burst_training
+    or (
+      getattr(action, "func", None) == "do_training"
+      and failure_rate <= 0
+      and (
+        (
+          timeline_label in _SUMMER_WINDOWS
+          and very_high_value_training
+          and committed_value_training
+        )
+        or committed_value_training
+      )
+    )
+  )
   return {
     "timeline_label": timeline_label,
     "summer_window": timeline_label in _SUMMER_WINDOWS,
@@ -629,6 +671,7 @@ def _usage_context(state_obj, action):
     "stat_gains": stat_gains,
     "matching_stat_gain": matching_stat_gain,
     "total_stat_gain": total_stat_gain,
+    "failure_rate": failure_rate,
     "rainbow_count": rainbow_count,
     "support_count": support_count,
     "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
@@ -639,30 +682,14 @@ def _usage_context(state_obj, action):
     "affordable_shop_energy_available": any(item_key in _ENERGY_ITEM_KEYS for item_key in affordable_shop_support_keys),
     "affordable_shop_charm_available": "good_luck_charm" in affordable_shop_support_keys,
     "has_followup_failsafe": bool(held_support_keys or affordable_shop_support_keys),
-    "high_value_training": bool(
-      getattr(action, "func", None) == "do_training"
-      and (
-        score_value >= 4.0
-        or matching_stat_gain >= 10
-        or total_stat_gain >= 18
-        or rainbow_count > 0
-        or support_count >= 3
-      )
-    ),
-    "very_high_value_training": bool(
-      getattr(action, "func", None) == "do_training"
-      and (
-        score_value >= 6.0
-        or matching_stat_gain >= 14
-        or total_stat_gain >= 24
-        or rainbow_count >= 2
-      )
-    ),
+    "high_value_training": high_value_training,
+    "very_high_value_training": very_high_value_training,
+    "committed_value_training": committed_value_training,
     "strong_burst_training": strong_burst_training,
     "weak_summer_training": weak_summer_training or bool(reroll_signal.get("needs_reroll")),
     "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
     "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
-    "commit_training_after_items": strong_burst_training,
+    "commit_training_after_items": commit_training_after_items,
     "is_tsc": timeline_label == "Finale Underway",
   }
 
@@ -1013,6 +1040,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "training_score": context.get("training_score"),
       "matching_stat_gain": context.get("matching_stat_gain"),
       "total_stat_gain": context.get("total_stat_gain"),
+      "failure_rate": context.get("failure_rate"),
       "rainbow_count": context.get("rainbow_count"),
       "support_count": context.get("support_count"),
       "strong_burst_training": context.get("strong_burst_training"),

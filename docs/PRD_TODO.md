@@ -199,3 +199,48 @@ still allowing valid upgrades.
   and `utils/constants.py`.
 - The operator console should eventually expose the detected active megaphone
   state and the reason an increment button is considered blocked.
+
+## Trackblazer Post-Summer Burst Commitment Tuning
+
+### Problem
+
+The current Trackblazer "committed burst training" definitions are still tuned
+mostly around the two summer burst windows.
+
+That makes sense during Classic/Senior summer, but after both summer windows
+are over the policy can stay too conservative about spending burst items:
+
+- megaphones can keep waiting for an overly ideal burst board
+- stat-matching ankle weights can also be held too long
+- late-run value can be stranded because the gate still behaves like it is
+  preserving summer-only opportunities
+
+### Goal
+
+Loosen committed-burst thresholds after the two summer windows are finished so
+the bot becomes more willing to spend megaphones and stat-matching ankle
+weights on strong post-summer trainings.
+
+### Proposed Direction
+
+- Audit the current committed-burst gates in `core/trackblazer_item_use.py`,
+  especially the defer paths that currently wait for "a committed burst
+  training".
+- Keep the stricter burst definitions during the two summer windows, but add a
+  more liberal post-summer policy phase once Senior Late Aug has passed.
+- In that post-summer phase, allow strong high-value trainings to qualify more
+  easily for megaphone and ankle-weight usage even when the board is not a
+  peak summer-style setup.
+- Revisit whether rainbow/support-heavy turns, large matching-stat gains, or
+  strong late-run score spikes should be sufficient to count as "committed"
+  after summer.
+- Surface the active burst-policy phase/reason in review output so it is clear
+  why items were deferred or committed.
+
+### Notes
+
+- This is item-use policy tuning, not inventory scanning or execution
+  correctness work.
+- Relevant references:
+  `docs/TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md`,
+  `docs/MANT_ITEM_USE_STRATEGY.md`, and `core/trackblazer_item_use.py`.
