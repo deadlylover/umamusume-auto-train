@@ -188,6 +188,8 @@ For MANT / Trackblazer, the likely scenario-specific sub-phases are:
 
 Those should be treated as Trackblazer sub-flows under the existing top-level phases, not as a separate second main loop.
 
+For the canonical training-item behavior inside those sub-flows, including `Reset Whistle` reassess handling, see [`docs/TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md`](./TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md).
+
 Example mapping:
 
 - `collecting_main_state`
@@ -249,6 +251,7 @@ The following flow is a better scenario reference than simply mirroring URA/Unit
    scan race candidates for grade point value, coin value, rival value, aptitude risk, and fatigue impact.
 6. If training:
    check whether item use or a planned burst window changes the normal training value.
+   For the current Trackblazer pre-action item and `Reset Whistle` reassess behavior, see [`docs/TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md`](./TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md).
 7. Before committing:
    preview skill/shop/race clicks and preserve the reasoning in the operator console.
 8. Near endgame:

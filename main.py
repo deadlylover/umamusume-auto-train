@@ -303,11 +303,17 @@ def trigger_manual_inventory_selection_test():
     snapshot["scenario_name"] = "trackblazer"
     snapshot["sub_phase"] = "manual_inventory_selection_test"
     _clear_manual_trackblazer_result(snapshot, "inventory")
-    snapshot["selected_action"] = {"func": "prepare_training_items_for_use"}
+    commit_mode = "confirm_only" if use_items_enabled else "dry_run"
+    snapshot["selected_action"] = {"func": "execute_training_items", "commit_mode": commit_mode}
     snapshot["reasoning_notes"] = (
       "Manual Trackblazer item-selection test triggered from the operator console. "
-      "This flow increments vita_65 and reset_whistle once each, verifies confirm-use availability, "
-      f"and {'clicks the first confirm-use button as a scaffold' if use_items_enabled else 'closes the inventory without pressing confirm-use'}."
+      + (
+        "This flow increments vita_65 and reset_whistle once each, verifies confirm-use availability, "
+        "and clicks the first confirm-use button (commit_mode=confirm_only)."
+        if use_items_enabled else
+        "This flow opens the inventory, scans for vita_65 and reset_whistle, detects controls, "
+        "and closes without any destructive clicks (commit_mode=dry_run)."
+      )
     )
     snapshot["selected_action"]["use_items"] = use_items_enabled
     snapshot["planned_clicks"] = _planned_clicks_for_action(snapshot["selected_action"])
@@ -317,13 +323,12 @@ def trigger_manual_inventory_selection_test():
       focus_target_window()
       bot.set_manual_control_active(True)
 
-      from scenarios.trackblazer import prepare_training_items_for_use
+      from scenarios.trackblazer import execute_training_items
 
-      result = prepare_training_items_for_use(
+      result = execute_training_items(
         ["vita_65", "reset_whistle"],
-        verify_only=False,
-        close_after_test=not use_items_enabled,
-        apply_confirm_use=use_items_enabled,
+        trigger="manual_prepare_training_items",
+        commit_mode=commit_mode,
       )
       snapshot["trackblazer_inventory"] = result.get("trackblazer_inventory")
       snapshot["state_summary"]["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")

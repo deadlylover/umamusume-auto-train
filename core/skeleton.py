@@ -781,21 +781,20 @@ def _planned_clicks_for_action(action):
       _planned_click("Verify inventory controls", region_key="GAME_WINDOW_BBOX", note="Check use/close button visibility"),
       _planned_click("Close inventory", note="Dismiss the inventory overlay after scan"),
     ]
-  if action_func == "prepare_training_items_for_use":
-    use_items = bool(_action_value(action, "use_items"))
+  if action_func == "execute_training_items":
+    commit_mode = _action_value(action, "commit_mode") or "dry_run"
     clicks = [
       _planned_click("Open use-items inventory", region_key="SCREEN_BOTTOM_BBOX", note="Locate the Trackblazer use-items entry button"),
       _planned_click("Scan inventory item rows", region_key="MANT_INVENTORY_ITEMS_REGION", note="Pair items to increment controls"),
-      _planned_click("Increment Vita 65", note="Select one Vita 65 for confirm-use verification"),
-      _planned_click("Increment Reset Whistle", note="Select one Reset Whistle for confirm-use verification"),
-      _planned_click("Verify confirm-use controls", note="Ensure confirm/cancel controls are available"),
     ]
-    clicks.append(
-      _planned_click(
-        "Press confirm-use scaffold" if use_items else "Close inventory without confirm-use",
-        note="Manual operator-console selection test final step",
-      )
-    )
+    if commit_mode == "dry_run":
+      clicks.append(_planned_click("Detect controls (no increment clicks)", note="Simulated — no destructive clicks in dry_run"))
+      clicks.append(_planned_click("Close inventory", note=f"commit_mode={commit_mode}"))
+    else:
+      clicks.append(_planned_click("Increment Vita 65", note="Select one Vita 65"))
+      clicks.append(_planned_click("Increment Reset Whistle", note="Select one Reset Whistle"))
+      clicks.append(_planned_click("Verify confirm-use controls", note="Ensure confirm/cancel controls are available"))
+      clicks.append(_planned_click("Press confirm-use", note=f"commit_mode={commit_mode}"))
     return clicks
   if action_func == "check_shop":
     return pre_action_clicks + [
@@ -820,9 +819,17 @@ def _build_trackblazer_planned_actions(state_obj, action):
   shop_summary = state_obj.get("trackblazer_shop_summary") or {}
   shop_flow = state_obj.get("trackblazer_shop_flow") or {}
   held_quantities = pre_shop_inventory_summary.get("held_quantities") or {}
+  # Use pre-shop inventory data for item-use planning so it matches the
+  # inventory items shown in the planned-actions display.  The post-shop
+  # refresh may have overwritten state_obj with empty data if it failed to
+  # reopen the inventory screen.
+  pre_shop_inventory = state_obj.get("trackblazer_inventory_pre_shop") or inventory
+  plan_state = dict(state_obj)
+  plan_state["trackblazer_inventory"] = pre_shop_inventory
+  plan_state["trackblazer_inventory_summary"] = pre_shop_inventory_summary
   item_use_plan = plan_item_usage(
     policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=state_obj,
+    state_obj=plan_state,
     action=action,
     limit=8,
   )
@@ -926,23 +933,36 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   return action
 
 
-def _execute_trackblazer_pre_action_items(state_obj, action):
+def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
+  """Run Trackblazer pre-action item flow with the given commit_mode.
+
+  commit_mode="full" — production execute: increments + confirm + followup.
+  commit_mode="dry_run" — non-destructive simulation: opens, scans, detects
+    controls, then closes without increment clicks or confirm.
+  """
   planned_items = _trackblazer_pre_action_items(action)
   if not planned_items:
     return {"status": "skipped"}
 
-  from scenarios.trackblazer import apply_training_items_for_action
+  from scenarios.trackblazer import execute_training_items
 
   item_keys = [entry.get("key") for entry in planned_items if entry.get("key")]
   if not item_keys:
     return {"status": "skipped"}
 
-  result = apply_training_items_for_action(item_keys, trigger="automatic")
+  result = execute_training_items(item_keys, trigger="automatic", commit_mode=commit_mode)
   flow = result.get("trackblazer_inventory_flow") or {}
   state_obj["trackblazer_inventory"] = result.get("trackblazer_inventory")
   state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
   state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
   state_obj["trackblazer_inventory_flow"] = flow
+
+  if commit_mode == "dry_run":
+    return {
+      "status": "simulated",
+      "result": result,
+      "reason": flow.get("reason") or "trackblazer_pre_action_items_simulated",
+    }
 
   if not result.get("success"):
     return {
@@ -1334,10 +1354,13 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   if execution_intent == "failed":
     return "failed"
   if execution_intent != "execute":
+    # Run a non-destructive dry_run simulation so check_only exercises
+    # the same open→scan→control-detect→close flow as execute mode.
+    _run_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
     return "previewed"
   if pre_run_hook is not None:
     pre_run_hook()
-  pre_action_item_result = _execute_trackblazer_pre_action_items(state_obj, action)
+  pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
   if pre_action_item_result.get("status") == "failed":
     update_operator_snapshot(
       state_obj,

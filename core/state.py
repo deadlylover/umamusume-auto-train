@@ -548,27 +548,51 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
        f"(open={flow.get('timing_open', '-')} scan={flow.get('timing_scan', '-')} "
        f"controls={flow.get('timing_controls', '-')} close={flow.get('timing_close', '-')})")
 
-  state_object["trackblazer_inventory"] = inventory
-  state_object["trackblazer_inventory_controls"] = controls
-  state_object["trackblazer_inventory_summary"] = summary
+  # Always record the flow so callers can inspect skip/open/close state.
   state_object["trackblazer_inventory_flow"] = flow
 
-  detected = summary.get("items_detected", [])
-  summary["inventory_button_visible"] = flow.get("use_training_items_button_visible", False)
+  # Only overwrite inventory data when the scan was actually performed.
+  # If the scan was skipped (e.g. post-shop refresh couldn't find the
+  # inventory button), preserve the prior scan's data so downstream
+  # consumers like plan_item_usage still see the held items.
+  if flow["opened"]:
+    state_object["trackblazer_inventory"] = inventory
+    state_object["trackblazer_inventory_controls"] = controls
+    state_object["trackblazer_inventory_summary"] = summary
+  else:
+    prior_summary = state_object.get("trackblazer_inventory_summary")
+    if prior_summary and prior_summary.get("items_detected"):
+      warning(
+        f"[STATE] Trackblazer inventory scan skipped (trigger={trigger}, "
+        f"reason={flow.get('reason') or 'unknown'}); "
+        f"preserving prior scan with {len(prior_summary.get('items_detected', []))} items."
+      )
+    else:
+      # First scan on this turn — write the empty defaults so keys exist.
+      state_object["trackblazer_inventory"] = inventory
+      state_object["trackblazer_inventory_controls"] = controls
+      state_object["trackblazer_inventory_summary"] = summary
+
+  detected = summary.get("items_detected", []) if flow["opened"] else (
+    (state_object.get("trackblazer_inventory_summary") or {}).get("items_detected", [])
+  )
+  summary_to_update = state_object.get("trackblazer_inventory_summary") or summary
+  summary_to_update["inventory_button_visible"] = flow.get("use_training_items_button_visible", False)
   if detected:
     info(f"[STATE] Trackblazer items detected: {detected}")
   else:
     debug("[STATE] No Trackblazer items detected in inventory scan.")
 
+  active_summary = state_object.get("trackblazer_inventory_summary") or summary
   record_runtime_ocr_debug(
     "trackblazer_inventory",
     extra={
       "region_key": "MANT_INVENTORY_ITEMS_REGION",
       "region_xywh": list(constants.MANT_INVENTORY_ITEMS_REGION),
       "items_detected": detected,
-      "total_detected": summary.get("total_detected", 0),
-      "by_category": summary.get("by_category", {}),
-      "controls": controls,
+      "total_detected": active_summary.get("total_detected", 0),
+      "by_category": active_summary.get("by_category", {}),
+      "controls": state_object.get("trackblazer_inventory_controls") or controls,
       "flow": flow,
     },
   )

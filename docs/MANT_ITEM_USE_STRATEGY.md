@@ -2,6 +2,8 @@
 
 Working design doc for automated item use in the Trackblazer scenario.
 
+For the canonical current execute-mode behavior around pre-action item planning and `Reset Whistle` reassess, see [`docs/TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md`](./TRACKBLAZER_PRE_ACTION_ITEM_FLOW.md).
+
 ## 1. Cleat Hammer Strategy (First Implementation)
 
 ### Overview

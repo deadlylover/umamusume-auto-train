@@ -2067,49 +2067,36 @@ def prepare_trackblazer_shop_item_selection(
     return flow
 
 
-def prepare_training_items_for_use(
-    item_names,
-    verify_only=False,
-    close_after_test=True,
-    apply_confirm_use=False,
-):
-    """Non-destructive Trackblazer inventory test helper.
+def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
+    """Unified Trackblazer training-item flow for all modes.
 
-    This helper opens the Training Items inventory if needed, reuses the
-    standard scan/pairing flow, increments the requested items once each, then
-    verifies whether the confirm-use control reaches the available state.
+    Opens the inventory, scans items, verifies that the requested items are
+    detected and have actionable increment targets, detects inventory controls,
+    and then behaves according to ``commit_mode``:
 
-    When ``apply_confirm_use`` is false, this helper never presses confirm-use.
-    When ``close_after_test`` is true in that dry-run mode, it explicitly
-    closes the inventory after verification to avoid consuming items.
-
-    When ``apply_confirm_use`` is true, this helper only clicks the first
-    confirm-use button as a scaffold. Any downstream confirmation screen is
-    intentionally left unautomated until that flow is verified.
+    - ``"dry_run"``: No destructive clicks at all. Does NOT click increment
+      controls or confirm-use. Records each item as simulated. Closes the
+      inventory explicitly. Use for check_only / non-destructive scans.
+    - ``"confirm_only"``: Clicks increment controls and the first confirm-use
+      button but does NOT handle the follow-up confirmation prompt. Leaves
+      the screen as-is for caller inspection.
+    - ``"full"``: Production execute path. Clicks increments, confirm-use,
+      handles the follow-up confirmation prompt, verifies the inventory
+      auto-closes, and falls back to an explicit close if needed.
     """
     requested_items = [str(item_name) for item_name in (item_names or [])]
     clear_runtime_ocr_debug()
 
     flow = {
-        "trigger": "manual_prepare_training_items",
+        "trigger": str(trigger or "automatic"),
         "execution_intent": bot.get_execution_intent(),
-        "verify_only": bool(verify_only),
-        "close_after_test": bool(close_after_test),
-        "apply_confirm_use": bool(apply_confirm_use),
-        "safety_rule": (
-            "dry_run_never_presses_confirm_use"
-            if not apply_confirm_use else
-            "click_first_confirm_use_only_followup_confirmation_not_automated"
-        ),
-        "test_cleanup_reason": (
-            "close inventory after verification for this test only to avoid consuming items; "
-            "normal production behavior would eventually press confirm_use_available"
-        ),
+        "commit_mode": str(commit_mode),
         "requested_items": list(requested_items),
         "opened": False,
         "already_open": False,
         "closed": False,
         "skipped": False,
+        "success": False,
         "reason": "",
         "open_result": None,
         "close_result": None,
@@ -2122,12 +2109,16 @@ def prepare_training_items_for_use(
         "confirm_use_clicked": False,
         "confirm_use_click_result": None,
         "post_confirm_controls": None,
+        "control_detection_result": None,
+        "followup_confirm_visible": False,
+        "followup_confirm_entry": None,
+        "followup_confirm_clicked": False,
+        "followup_confirm_click_result": None,
+        "verification_checks": [],
     }
     result = {
         "requested_items": list(requested_items),
-        "verify_only": bool(verify_only),
-        "close_after_test": bool(close_after_test),
-        "apply_confirm_use": bool(apply_confirm_use),
+        "commit_mode": str(commit_mode),
         "trackblazer_inventory": CleanDefaultDict(),
         "trackblazer_inventory_summary": {
             "items_detected": [],
@@ -2142,6 +2133,10 @@ def prepare_training_items_for_use(
         "success": False,
     }
 
+    commit_clicks = commit_mode in ("confirm_only", "full")
+    handle_followup = commit_mode == "full"
+    log_tag = "[TB_INV]"
+
     t_total = _time()
     inventory = CleanDefaultDict()
     controls = {}
@@ -2153,7 +2148,7 @@ def prepare_training_items_for_use(
         flow["opened"] = True
         flow["already_open"] = True
     else:
-        info("[TB_INV_TEST] Opening Training Items inventory for non-destructive selection test.")
+        info(f"{log_tag} Opening Training Items inventory (commit_mode={commit_mode}).")
         t0 = _time()
         open_result = open_training_items_inventory(skip_precheck=True)
         flow["timing_open"] = round(_time() - t0, 3)
@@ -2162,10 +2157,11 @@ def prepare_training_items_for_use(
         flow["already_open"] = bool(open_result.get("already_open"))
         if not flow["opened"]:
             flow["reason"] = "failed_to_open_inventory"
-            warning("[TB_INV_TEST] Failed to open Training Items inventory.")
+            warning(f"{log_tag} Failed to open Training Items inventory.")
 
     try:
         if flow["opened"]:
+            # -- Scan --
             t0 = _time()
             inventory = scan_training_items_inventory()
             flow["timing_scan"] = round(_time() - t0, 3)
@@ -2173,6 +2169,7 @@ def prepare_training_items_for_use(
             result["trackblazer_inventory"] = inventory
             result["trackblazer_inventory_summary"] = build_inventory_summary(inventory)
 
+            # -- Check requested items --
             for item_name in requested_items:
                 item_data = inventory.get(item_name) or {}
                 if not item_data.get("detected"):
@@ -2187,11 +2184,12 @@ def prepare_training_items_for_use(
                 if flow["missing_increment_targets"]:
                     missing_parts.append(f"missing_increment_targets={flow['missing_increment_targets']}")
                 flow["reason"] = "required_items_not_actionable"
-                warning(f"[TB_INV_TEST] Cannot continue item selection test: {' '.join(missing_parts)}")
-            elif verify_only:
-                flow["reason"] = "verify_only_requested"
-                info("[TB_INV_TEST] verify_only=True; skipping increment clicks and checking controls only.")
+                warning(f"{log_tag} Cannot continue item flow: {' '.join(missing_parts)}")
             else:
+                # -- Increment each requested item once --
+                # In dry_run mode, record each item as planned but do NOT
+                # click the increment controls — clicking them stages item
+                # use, which is a destructive action.
                 increment_t0 = _time()
                 for item_name in requested_items:
                     item_data = inventory.get(item_name) or {}
@@ -2205,20 +2203,25 @@ def prepare_training_items_for_use(
                         "held_quantity": item_data.get("held_quantity"),
                         "click_metrics": None,
                         "clicked": False,
+                        "simulated": commit_mode == "dry_run",
                     }
-                    info(
-                        f"[TB_INV_TEST] Incrementing '{item_name}' once at {attempt['increment_target']} "
-                        "(test only, confirm-use will not be pressed)."
-                    )
-                    click_metrics = device_action.click_with_metrics(
-                        target,
-                        text=f"[TB_INV_TEST] Increment '{item_name}' once.",
-                    )
-                    attempt["click_metrics"] = click_metrics
-                    attempt["clicked"] = bool(click_metrics.get("clicked"))
+                    if commit_mode == "dry_run":
+                        info(
+                            f"{log_tag} Would increment '{item_name}' at {attempt['increment_target']} "
+                            f"(simulated, commit_mode={commit_mode})."
+                        )
+                    else:
+                        info(f"{log_tag} Incrementing '{item_name}' once at {attempt['increment_target']}.")
+                        click_metrics = device_action.click_with_metrics(
+                            target,
+                            text=f"{log_tag} Increment '{item_name}' once.",
+                        )
+                        attempt["click_metrics"] = click_metrics
+                        attempt["clicked"] = bool(click_metrics.get("clicked"))
                     flow["increment_attempts"].append(attempt)
                 flow["timing_increments"] = round(_time() - increment_t0, 3)
 
+            # -- Detect controls (all modes) --
             controls_t0 = _time()
             controls = detect_inventory_controls()
             flow["timing_controls"] = round(_time() - controls_t0, 3)
@@ -2237,71 +2240,124 @@ def prepare_training_items_for_use(
                 "confirm_use_score": confirm_use.get("score"),
                 "confirm_use_click_target": flow["confirm_use_click_target"],
             }
-            if flow["confirm_use_available"]:
-                info("[TB_INV_TEST] Confirm-use resolved to available/enabled after increments.")
-            else:
-                if not flow["reason"]:
-                    flow["reason"] = "confirm_use_not_available"
-                warning(
-                    "[TB_INV_TEST] Confirm-use did not resolve to available after increments; "
-                    "the helper will still avoid pressing it."
-                )
 
-            if apply_confirm_use and flow["confirm_use_available"]:
-                confirm_target = confirm_use.get("click_target")
-                info(
-                    "[TB_INV_TEST] Clicking confirm-use because 'use items' is enabled. "
-                    "Follow-up confirmation handling is not automated yet."
-                )
+            if flow["confirm_use_available"]:
+                info(f"{log_tag} Confirm-use resolved to available/enabled after increments.")
+            else:
+                if commit_mode == "dry_run":
+                    info(
+                        f"{log_tag} Confirm-use remains unavailable in dry_run mode, as expected "
+                        "because increment clicks were skipped."
+                    )
+                else:
+                    if not flow["reason"]:
+                        flow["reason"] = "confirm_use_not_available"
+                    warning(f"{log_tag} Confirm-use did not resolve to available after increments.")
+
+            # -- Commit phase: mode-dependent --
+            if commit_clicks and flow["confirm_use_available"]:
+                # confirm_only and full: click confirm-use
+                info(f"{log_tag} Clicking confirm-use (commit_mode={commit_mode}).")
                 confirm_t0 = _time()
                 confirm_click_result = device_action.click_with_metrics(
-                    confirm_target,
-                    text="[TB_INV_TEST] Click confirm-use scaffold.",
+                    confirm_use.get("click_target"),
+                    text=f"{log_tag} Confirm planned item use.",
                 )
                 flow["timing_confirm_use"] = round(_time() - confirm_t0, 3)
                 flow["confirm_use_click_result"] = confirm_click_result
                 flow["confirm_use_clicked"] = bool(confirm_click_result.get("clicked"))
-                post_confirm_controls_t0 = _time()
-                flow["post_confirm_controls"] = detect_inventory_controls()
-                flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
-                if not flow["reason"] and not flow["confirm_use_clicked"]:
-                    flow["reason"] = "failed_to_click_confirm_use"
-            elif close_after_test:
-                close_t0 = _time()
+                if not flow["confirm_use_clicked"]:
+                    if not flow["reason"]:
+                        flow["reason"] = "failed_to_click_confirm_use"
+
+                if flow["confirm_use_clicked"] and handle_followup:
+                    # full mode: handle followup confirmation + verify close
+                    sleep(0.25)
+                    post_confirm_controls_t0 = _time()
+                    post_confirm_controls = detect_inventory_controls()
+                    flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
+                    flow["post_confirm_controls"] = post_confirm_controls
+
+                    followup_confirm = ((post_confirm_controls.get("confirm_candidates") or {}).get("shop_confirm")) or {}
+                    flow["followup_confirm_visible"] = bool(followup_confirm.get("passed_threshold"))
+                    if flow["followup_confirm_visible"] and followup_confirm.get("click_target"):
+                        flow["followup_confirm_entry"] = followup_confirm
+                        followup_t0 = _time()
+                        followup_click_result = device_action.click_with_metrics(
+                            followup_confirm.get("click_target"),
+                            text=f"{log_tag} Confirm item use follow-up prompt.",
+                        )
+                        flow["timing_followup_confirm"] = round(_time() - followup_t0, 3)
+                        flow["followup_confirm_click_result"] = followup_click_result
+                        flow["followup_confirm_clicked"] = bool(followup_click_result.get("clicked"))
+                        sleep(0.2)
+
+                    verify_t0 = _time()
+                    still_open, _, verify_checks = detect_inventory_screen()
+                    flow["timing_verify_closed"] = round(_time() - verify_t0, 3)
+                    flow["verification_checks"] = verify_checks
+                    flow["closed"] = not still_open
+                    if not flow["closed"]:
+                        close_t0 = _time()
+                        close_result = close_training_items_inventory()
+                        flow["timing_close"] = round(_time() - close_t0, 3)
+                        flow["close_result"] = close_result
+                        flow["closed"] = bool(close_result.get("closed"))
+                    if not flow["closed"] and not flow["reason"]:
+                        flow["reason"] = "inventory_did_not_close_after_confirm"
+
+                elif flow["confirm_use_clicked"] and not handle_followup:
+                    # confirm_only mode: detect post-confirm controls but no followup
+                    post_confirm_controls_t0 = _time()
+                    flow["post_confirm_controls"] = detect_inventory_controls()
+                    flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
+
+            elif not commit_clicks:
+                # dry_run mode: close inventory to avoid consuming items
                 info(
-                    "[TB_INV_TEST] Closing inventory after verification for this test only to avoid consuming items. "
-                    "Production item-use flow would eventually press confirm_use_available instead."
+                    f"{log_tag} Closing inventory without confirm-use (commit_mode={commit_mode}). "
+                    "Destructive clicks are skipped in this mode."
                 )
+                close_t0 = _time()
                 close_result = close_training_items_inventory()
                 flow["timing_close"] = round(_time() - close_t0, 3)
                 flow["close_result"] = close_result
                 flow["closed"] = bool(close_result.get("closed"))
                 if not flow["closed"] and not flow["reason"]:
                     flow["reason"] = "failed_to_close_inventory"
-            elif not flow["reason"]:
-                flow["reason"] = "left_inventory_open_by_request"
 
-            increments_requested = 0 if verify_only else len(requested_items)
+            # -- Tally increments --
+            increments_requested = len(requested_items)
             flow["increments_requested"] = increments_requested
             flow["increments_clicked"] = sum(1 for attempt in flow["increment_attempts"] if attempt.get("clicked"))
-            flow["success"] = (
+            flow["increments_simulated"] = sum(1 for attempt in flow["increment_attempts"] if attempt.get("simulated"))
+
+            # -- Success criteria per mode --
+            items_actionable = (
                 not flow["missing_items"]
                 and not flow["missing_increment_targets"]
-                and (
-                    verify_only
-                    or flow["increments_clicked"] == increments_requested
-                )
-                and flow["confirm_use_available"]
-                and (
-                    not apply_confirm_use
-                    or flow["confirm_use_clicked"]
-                )
-                and (
-                    apply_confirm_use
-                    or not close_after_test
-                    or flow["closed"]
-                )
             )
+            if commit_mode == "dry_run":
+                # dry_run: items were found and actionable, inventory closed.
+                # No clicks were performed, so we do not check increments_clicked
+                # or confirm_use_available (confirm-use stays disabled without
+                # increment clicks, which is expected).
+                flow["success"] = items_actionable and flow["closed"]
+            elif commit_mode == "confirm_only":
+                flow["success"] = (
+                    items_actionable
+                    and flow["increments_clicked"] == increments_requested
+                    and flow["confirm_use_available"]
+                    and flow["confirm_use_clicked"]
+                )
+            else:  # full
+                flow["success"] = (
+                    items_actionable
+                    and flow["increments_clicked"] == increments_requested
+                    and flow["confirm_use_available"]
+                    and flow["confirm_use_clicked"]
+                    and flow["closed"]
+                )
         else:
             result["trackblazer_inventory_controls"] = controls
     finally:
@@ -2309,10 +2365,11 @@ def prepare_training_items_for_use(
         result["trackblazer_inventory_flow"] = flow
         result["success"] = bool(flow.get("success"))
         record_runtime_ocr_debug(
-            "trackblazer_inventory_prepare_test",
+            "trackblazer_inventory_execute_items",
             extra={
                 "region_key": "MANT_INVENTORY_ITEMS_REGION",
                 "region_xywh": list(constants.MANT_INVENTORY_ITEMS_REGION),
+                "commit_mode": commit_mode,
                 "items_detected": result["trackblazer_inventory_summary"].get("items_detected", []),
                 "controls": result["trackblazer_inventory_controls"],
                 "flow": flow,
@@ -2326,221 +2383,14 @@ def prepare_training_items_for_use(
         )
 
     info(
-        f"[TB_INV_TEST] prepare_training_items_for_use timing: total={flow.get('timing_total', '?')}s "
+        f"{log_tag} execute_training_items timing (commit_mode={commit_mode}): "
+        f"total={flow.get('timing_total', '?')}s "
         f"open={flow.get('timing_open', '-')} scan={flow.get('timing_scan', '-')} "
         f"increments={flow.get('timing_increments', '-')} controls={flow.get('timing_controls', '-')} "
         f"close={flow.get('timing_close', '-')}"
     )
     return result
 
-
-def apply_training_items_for_action(item_names, trigger="automatic"):
-    """Apply planned Trackblazer training items for the live bot flow.
-
-    This is the production counterpart to ``prepare_training_items_for_use``.
-    It opens the inventory, increments each requested item once, confirms the
-    use flow, optionally handles one follow-up confirmation prompt, then
-    verifies that the inventory closes.
-    """
-    requested_items = [str(item_name) for item_name in (item_names or [])]
-    clear_runtime_ocr_debug()
-
-    flow = {
-        "trigger": str(trigger or "automatic"),
-        "execution_intent": bot.get_execution_intent(),
-        "requested_items": list(requested_items),
-        "opened": False,
-        "already_open": False,
-        "closed": False,
-        "success": False,
-        "reason": "",
-        "open_result": None,
-        "close_result": None,
-        "increment_attempts": [],
-        "missing_items": [],
-        "missing_increment_targets": [],
-        "confirm_use_available": False,
-        "confirm_use_state": None,
-        "confirm_use_click_target": None,
-        "confirm_use_clicked": False,
-        "confirm_use_click_result": None,
-        "post_confirm_controls": None,
-        "followup_confirm_visible": False,
-        "followup_confirm_entry": None,
-        "followup_confirm_clicked": False,
-        "followup_confirm_click_result": None,
-        "verification_checks": [],
-    }
-    result = {
-        "requested_items": list(requested_items),
-        "trackblazer_inventory": CleanDefaultDict(),
-        "trackblazer_inventory_summary": {
-            "items_detected": [],
-            "by_category": {},
-            "total_detected": 0,
-            "actionable_items": [],
-        },
-        "trackblazer_inventory_controls": {},
-        "trackblazer_inventory_flow": flow,
-        "inventory_ocr_debug_entries": [],
-        "ocr_runtime_debug": {},
-        "success": False,
-    }
-
-    t_total = _time()
-    inventory = CleanDefaultDict()
-    controls = {}
-
-    inventory_screen_open, _, precheck_entries = detect_inventory_screen()
-    flow["precheck"] = precheck_entries
-
-    if inventory_screen_open:
-        flow["opened"] = True
-        flow["already_open"] = True
-    else:
-        t0 = _time()
-        open_result = open_training_items_inventory(skip_precheck=True)
-        flow["timing_open"] = round(_time() - t0, 3)
-        flow["open_result"] = open_result
-        flow["opened"] = bool(open_result.get("opened"))
-        flow["already_open"] = bool(open_result.get("already_open"))
-        if not flow["opened"]:
-            flow["reason"] = "failed_to_open_inventory"
-
-    try:
-        if flow["opened"]:
-            t0 = _time()
-            inventory = scan_training_items_inventory()
-            flow["timing_scan"] = round(_time() - t0, 3)
-            flow["scan_timing"] = inventory.pop("_timing", None)
-            result["trackblazer_inventory"] = inventory
-            result["trackblazer_inventory_summary"] = build_inventory_summary(inventory)
-
-            for item_name in requested_items:
-                item_data = inventory.get(item_name) or {}
-                if not item_data.get("detected"):
-                    flow["missing_items"].append(item_name)
-                elif not item_data.get("increment_target"):
-                    flow["missing_increment_targets"].append(item_name)
-
-            if flow["missing_items"] or flow["missing_increment_targets"]:
-                flow["reason"] = "required_items_not_actionable"
-            else:
-                increment_t0 = _time()
-                for item_name in requested_items:
-                    item_data = inventory.get(item_name) or {}
-                    target = item_data.get("increment_target")
-                    attempt = {
-                        "item_name": item_name,
-                        "detected": bool(item_data.get("detected")),
-                        "increment_target": list(target) if target else None,
-                        "increment_match": item_data.get("increment_match"),
-                        "row_center_y": item_data.get("row_center_y"),
-                        "held_quantity": item_data.get("held_quantity"),
-                        "click_metrics": None,
-                        "clicked": False,
-                    }
-                    click_metrics = device_action.click_with_metrics(
-                        target,
-                        text=f"[TB_INV] Increment '{item_name}' once.",
-                    )
-                    attempt["click_metrics"] = click_metrics
-                    attempt["clicked"] = bool(click_metrics.get("clicked"))
-                    flow["increment_attempts"].append(attempt)
-                flow["timing_increments"] = round(_time() - increment_t0, 3)
-
-                controls_t0 = _time()
-                controls = detect_inventory_controls()
-                flow["timing_controls"] = round(_time() - controls_t0, 3)
-                result["trackblazer_inventory_controls"] = controls
-
-                confirm_use = controls.get("confirm_use") or {}
-                flow["confirm_use_state"] = confirm_use.get("button_state")
-                flow["confirm_use_available"] = confirm_use.get("button_state") == "available"
-                flow["confirm_use_click_target"] = list(confirm_use.get("click_target")) if confirm_use.get("click_target") else None
-                if not flow["confirm_use_available"]:
-                    flow["reason"] = "confirm_use_not_available"
-                else:
-                    confirm_t0 = _time()
-                    confirm_click_result = device_action.click_with_metrics(
-                        confirm_use.get("click_target"),
-                        text="[TB_INV] Confirm planned item use.",
-                    )
-                    flow["timing_confirm_use"] = round(_time() - confirm_t0, 3)
-                    flow["confirm_use_click_result"] = confirm_click_result
-                    flow["confirm_use_clicked"] = bool(confirm_click_result.get("clicked"))
-                    if not flow["confirm_use_clicked"]:
-                        flow["reason"] = "failed_to_click_confirm_use"
-                    else:
-                        sleep(0.25)
-                        post_confirm_controls_t0 = _time()
-                        post_confirm_controls = detect_inventory_controls()
-                        flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
-                        flow["post_confirm_controls"] = post_confirm_controls
-
-                        followup_confirm = ((post_confirm_controls.get("confirm_candidates") or {}).get("shop_confirm")) or {}
-                        flow["followup_confirm_visible"] = bool(followup_confirm.get("passed_threshold"))
-                        if flow["followup_confirm_visible"] and followup_confirm.get("click_target"):
-                            flow["followup_confirm_entry"] = followup_confirm
-                            followup_t0 = _time()
-                            followup_click_result = device_action.click_with_metrics(
-                                followup_confirm.get("click_target"),
-                                text="[TB_INV] Confirm item use follow-up prompt.",
-                            )
-                            flow["timing_followup_confirm"] = round(_time() - followup_t0, 3)
-                            flow["followup_confirm_click_result"] = followup_click_result
-                            flow["followup_confirm_clicked"] = bool(followup_click_result.get("clicked"))
-                            sleep(0.2)
-
-                        verify_t0 = _time()
-                        still_open, _, verify_checks = detect_inventory_screen()
-                        flow["timing_verify_closed"] = round(_time() - verify_t0, 3)
-                        flow["verification_checks"] = verify_checks
-                        flow["closed"] = not still_open
-                        if not flow["closed"]:
-                            close_t0 = _time()
-                            close_result = close_training_items_inventory()
-                            flow["timing_close"] = round(_time() - close_t0, 3)
-                            flow["close_result"] = close_result
-                            flow["closed"] = bool(close_result.get("closed"))
-                        if not flow["closed"] and not flow["reason"]:
-                            flow["reason"] = "inventory_did_not_close_after_confirm"
-
-                increments_requested = len(requested_items)
-                flow["increments_requested"] = increments_requested
-                flow["increments_clicked"] = sum(1 for attempt in flow["increment_attempts"] if attempt.get("clicked"))
-                flow["success"] = (
-                    not flow["missing_items"]
-                    and not flow["missing_increment_targets"]
-                    and flow["increments_clicked"] == increments_requested
-                    and flow["confirm_use_available"]
-                    and flow["confirm_use_clicked"]
-                    and flow["closed"]
-                )
-        else:
-            result["trackblazer_inventory_controls"] = controls
-    finally:
-        flow["timing_total"] = round(_time() - t_total, 3)
-        result["trackblazer_inventory_flow"] = flow
-        result["success"] = bool(flow.get("success"))
-        record_runtime_ocr_debug(
-            "trackblazer_inventory_apply_items",
-            extra={
-                "region_key": "MANT_INVENTORY_ITEMS_REGION",
-                "region_xywh": list(constants.MANT_INVENTORY_ITEMS_REGION),
-                "items_detected": result["trackblazer_inventory_summary"].get("items_detected", []),
-                "controls": result["trackblazer_inventory_controls"],
-                "flow": flow,
-            },
-        )
-        result["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
-        result["inventory_ocr_debug_entries"] = _build_trackblazer_inventory_debug_entries(
-            flow,
-            result["trackblazer_inventory_controls"],
-            result["trackblazer_inventory"],
-        )
-
-    return result
 
 
 def detect_use_training_items_button(threshold=0.8):
