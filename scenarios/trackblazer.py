@@ -1050,6 +1050,90 @@ def close_training_items_inventory(threshold=0.8):
     }
 
 
+def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4, threshold=0.75):
+    """Wait for the post-item-use close button and click it from lower UI regions."""
+    t_total = _time()
+    attempts = []
+    polls = 0
+    clicked = False
+    closed = False
+    click_result = None
+    clicked_entry = None
+    verification_checks = []
+
+    search_regions = (
+        ("inventory_controls", _trackblazer_inventory_controls_region()),
+        ("screen_bottom", constants.SCREEN_BOTTOM_BBOX),
+    )
+    template_attempts = (
+        ("shop_aftersale_close", constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close"), _INVERSE_GLOBAL_SCALE),
+        ("close_btn", "assets/buttons/close_btn.png", 1.0),
+        ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
+        ("back_btn", "assets/buttons/back_btn.png", 1.0),
+    )
+
+    deadline = _time() + max(0.0, float(max_wait_seconds))
+    while _time() <= deadline:
+        polls += 1
+        controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.1))
+        close_entry = controls.get("close") or {}
+        if close_entry.get("passed_threshold") and close_entry.get("click_target"):
+            clicked_entry = {**close_entry, "region_name": "inventory_controls_detect"}
+            click_result = device_action.click_with_metrics(
+                close_entry["click_target"],
+                text="[TB_INV] Close inventory after item-use animation.",
+            )
+            clicked = bool(click_result.get("clicked"))
+        else:
+            for region_name, region_ltrb in search_regions:
+                screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+                for key, template_path, template_scaling in template_attempts:
+                    if not template_path:
+                        continue
+                    entry = _best_match_entry(
+                        template_path,
+                        region_ltrb=region_ltrb,
+                        threshold=threshold,
+                        template_scaling=template_scaling,
+                        screenshot=screenshot,
+                    )
+                    entry["key"] = key
+                    entry["region_name"] = region_name
+                    attempts.append(entry)
+                    if not entry.get("passed_threshold") or not entry.get("click_target"):
+                        continue
+                    clicked_entry = entry
+                    click_result = device_action.click_with_metrics(
+                        entry["click_target"],
+                        text=f"[TB_INV] Close inventory via {key} in {region_name}.",
+                    )
+                    clicked = bool(click_result.get("clicked"))
+                    break
+                if clicked:
+                    break
+
+        if clicked:
+            sleep(0.2)
+            still_open, _, verification_checks = detect_inventory_screen(threshold=threshold)
+            closed = not still_open
+            if closed:
+                break
+            clicked = False
+
+        sleep(max(0.1, float(poll_seconds)))
+
+    return {
+        "clicked": bool(click_result and click_result.get("clicked")),
+        "closed": bool(closed),
+        "clicked_entry": clicked_entry,
+        "click_result": click_result,
+        "attempts": attempts,
+        "polls": polls,
+        "verification_checks": verification_checks,
+        "timing_total": round(_time() - t_total, 3),
+    }
+
+
 def scan_training_items_inventory(threshold=0.8):
     """Scan the current screen for owned training item icons.
 
@@ -2542,24 +2626,13 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         flow["followup_confirm_clicked"] = bool(followup_click_result.get("clicked"))
 
                         if flow["followup_confirm_clicked"]:
-                            # Item-use may play an animation (e.g. Reset Whistle shuffle).
-                            # Wait for animation, then poll for the close button.
-                            sleep(3.0)
+                            # Item-use animations can outlast the original fixed
+                            # delay, so keep polling the lower close controls.
                             close_poll_t0 = _time()
-                            close_clicked = False
-                            for _poll in range(10):
-                                poll_controls = detect_inventory_controls()
-                                close_entry = poll_controls.get("close") or {}
-                                if close_entry.get("passed_threshold") and close_entry.get("click_target"):
-                                    device_action.click_with_metrics(
-                                        close_entry["click_target"],
-                                        text=f"{log_tag} Close inventory after item-use animation.",
-                                    )
-                                    close_clicked = True
-                                    break
-                                sleep(0.5)
+                            post_use_close = _wait_for_post_item_use_close_button()
                             flow["timing_post_animation_close"] = round(_time() - close_poll_t0, 3)
-                            flow["post_animation_close_clicked"] = close_clicked
+                            flow["post_animation_close_clicked"] = bool(post_use_close.get("clicked"))
+                            flow["post_animation_close_result"] = post_use_close
                             sleep(0.2)
 
                     verify_t0 = _time()
