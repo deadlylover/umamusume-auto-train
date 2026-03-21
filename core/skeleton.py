@@ -861,42 +861,13 @@ def _build_trackblazer_planned_actions(state_obj, action):
     would_use = list(planned_pre_action_items)
   actionable_items = list(pre_shop_inventory_summary.get("actionable_items") or [])
 
-  detected_shop_keys = set(shop_items or shop_summary.get("items_detected") or [])
-  would_buy = []
-  for item in effective_shop_items:
-    item_key = item.get("key")
-    if item_key not in detected_shop_keys:
-      continue
-    if item.get("effective_priority") == "NEVER":
-      continue
-    held_quantity = int(held_quantities.get(item_key) or 0)
-    max_quantity = int(item.get("max_quantity") or 0)
-    remaining_capacity = max(0, max_quantity - held_quantity)
-    if max_quantity > 0 and remaining_capacity <= 0:
-      continue
-    reason_parts = [f"policy={item.get('effective_priority')}"]
-    timing_rules = item.get("active_timing_rules") or []
-    if timing_rules:
-      rule = timing_rules[0]
-      reason_parts.append(rule.get("label") or "timing override")
-      if rule.get("note"):
-        reason_parts.append(rule["note"])
-    elif item.get("policy_notes"):
-      reason_parts.append(item["policy_notes"])
-    if max_quantity > 0:
-      reason_parts.append(f"hold {held_quantity}/{max_quantity}")
-    would_buy.append(
-      {
-        "key": item_key,
-        "name": item.get("display_name") or str(item_key or "").replace("_", " ").title(),
-        "priority": item.get("effective_priority"),
-        "cost": item.get("cost"),
-        "held_quantity": held_quantity,
-        "max_quantity": max_quantity,
-        "reason": "; ".join(part for part in reason_parts if part),
-      }
-    )
-  would_buy = would_buy[:8]
+  would_buy = _trackblazer_shop_buy_candidates(
+    effective_shop_items,
+    shop_items=shop_items,
+    shop_summary=shop_summary,
+    held_quantities=held_quantities,
+    limit=8,
+  )
 
   inventory_status = "unknown"
   if pre_shop_inventory_flow.get("opened") or pre_shop_inventory_flow.get("already_open"):
@@ -931,6 +902,46 @@ def _build_trackblazer_planned_actions(state_obj, action):
   }
 
 
+def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
+  detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
+  held_quantities = held_quantities or {}
+  would_buy = []
+  for item in effective_shop_items:
+    item_key = item.get("key")
+    if item_key not in detected_shop_keys:
+      continue
+    if item.get("effective_priority") == "NEVER":
+      continue
+    held_quantity = int(held_quantities.get(item_key) or 0)
+    max_quantity = int(item.get("max_quantity") or 0)
+    remaining_capacity = max(0, max_quantity - held_quantity)
+    if max_quantity > 0 and remaining_capacity <= 0:
+      continue
+    reason_parts = [f"policy={item.get('effective_priority')}"]
+    timing_rules = item.get("active_timing_rules") or []
+    if timing_rules:
+      rule = timing_rules[0]
+      reason_parts.append(rule.get("label") or "timing override")
+      if rule.get("note"):
+        reason_parts.append(rule["note"])
+    elif item.get("policy_notes"):
+      reason_parts.append(item["policy_notes"])
+    if max_quantity > 0:
+      reason_parts.append(f"hold {held_quantity}/{max_quantity}")
+    would_buy.append(
+      {
+        "key": item_key,
+        "name": item.get("display_name") or str(item_key or "").replace("_", " ").title(),
+        "priority": item.get("effective_priority"),
+        "cost": item.get("cost"),
+        "held_quantity": held_quantity,
+        "max_quantity": max_quantity,
+        "reason": "; ".join(part for part in reason_parts if part),
+      }
+    )
+  return would_buy[: max(0, int(limit))]
+
+
 def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return action
@@ -953,6 +964,19 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   action["trackblazer_pre_action_items"] = candidates
   action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
   action["trackblazer_reassess_after_item_use"] = has_whistle
+  effective_shop_items = get_effective_shop_items(
+    policy=config.TRACKBLAZER_SHOP_POLICY,
+    year=state_obj.get("year"),
+    turn=state_obj.get("turn"),
+  )
+  held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
+  action["trackblazer_shop_buy_plan"] = _trackblazer_shop_buy_candidates(
+    effective_shop_items,
+    shop_items=state_obj.get("trackblazer_shop_items"),
+    shop_summary=state_obj.get("trackblazer_shop_summary"),
+    held_quantities=held_quantities,
+    limit=8,
+  )
   return action
 
 
@@ -1005,6 +1029,43 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
     "status": "executed",
     "result": result,
     "reason": flow.get("reason") or "trackblazer_pre_action_items_applied",
+  }
+
+
+def _run_trackblazer_shop_purchases(state_obj, action):
+  planned_buys = list(action.get("trackblazer_shop_buy_plan") or [])
+  if not planned_buys:
+    return {"status": "skipped"}
+
+  from scenarios.trackblazer import execute_trackblazer_shop_purchases
+
+  item_keys = [entry.get("key") for entry in planned_buys if entry.get("key")]
+  if not item_keys:
+    return {"status": "skipped"}
+
+  result = execute_trackblazer_shop_purchases(item_keys, trigger="automatic")
+  state_obj["trackblazer_shop_items"] = result.get("trackblazer_shop_items")
+  state_obj["trackblazer_shop_summary"] = result.get("trackblazer_shop_summary")
+  state_obj["trackblazer_shop_flow"] = result.get("trackblazer_shop_flow")
+
+  if not result.get("success"):
+    return {
+      "status": "failed",
+      "result": result,
+      "reason": (result.get("trackblazer_shop_flow") or {}).get("reason") or "trackblazer_shop_purchase_failed",
+    }
+
+  refreshed_state = collect_trackblazer_inventory(
+    state_obj,
+    allow_open_non_execute=True,
+    trigger="post_shop_purchase_refresh",
+  )
+  state_obj.update(refreshed_state)
+  _attach_trackblazer_pre_action_item_plan(state_obj, action)
+  return {
+    "status": "executed",
+    "result": result,
+    "reason": (result.get("trackblazer_shop_flow") or {}).get("reason") or "trackblazer_shop_purchase_applied",
   }
 
 
@@ -1383,6 +1444,19 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     return "previewed"
   if pre_run_hook is not None:
     pre_run_hook()
+  shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
+  if shop_purchase_result.get("status") == "failed":
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Trackblazer shop purchase failed: {shop_purchase_result.get('reason')}",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "failed"
   pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
   if pre_action_item_result.get("status") == "failed":
     update_operator_snapshot(
@@ -1506,16 +1580,26 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
     if execution_intent == "execute":
       return execution_intent
 
+    if execution_intent == "check_only":
+      message = "check_only mode active; press Continue to execute this turn."
+      notes = (
+        f"{reasoning_notes or ''} "
+        "Press Continue to execute this action once without switching mode."
+      ).strip()
+    else:
+      message = f"{execution_intent} mode active; no action committed."
+      notes = (
+        f"{reasoning_notes or ''} "
+        "Switch to execute and press Continue to commit this action."
+      ).strip()
+
     update_operator_snapshot(
       state_obj,
       action,
       phase="waiting_for_confirmation",
       status="idle",
-      message=f"{execution_intent} mode active; no action committed.",
-      reasoning_notes=(
-        f"{reasoning_notes or ''} "
-        "Switch to execute and press Continue to commit this action."
-      ).strip(),
+      message=message,
+      reasoning_notes=notes,
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
@@ -1540,6 +1624,10 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
         planned_clicks=planned_clicks,
       )
       return "failed"
+
+    if execution_intent == "check_only":
+      info("[REVIEW] Continue pressed in check_only mode; executing this turn as one-shot execute.")
+      return "execute"
 
 def career_lobby(dry_run_turn=False):
   global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn

@@ -6,6 +6,7 @@ import utils.constants as constants
 import utils.device_action_wrapper as device_action
 import core.config as config
 import core.bot as bot
+from core.trackblazer_shop import get_shop_catalog
 from core.state import (
     _save_training_scan_debug_image,
     _build_trackblazer_inventory_debug_entries,
@@ -2065,6 +2066,174 @@ def prepare_trackblazer_shop_item_selection(
         flow["reason"] = "item_already_selected"
     flow["timing_total"] = round(_time() - t_total, 4)
     return flow
+
+
+def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
+    """Buy the requested Trackblazer shop items once each, then close the shop."""
+    requested_keys = [str(item_key) for item_key in (item_keys or []) if item_key]
+    clear_runtime_ocr_debug()
+
+    catalog = {entry["key"]: entry for entry in get_shop_catalog()}
+    flow = {
+        "trigger": str(trigger or "automatic"),
+        "execution_intent": bot.get_execution_intent(),
+        "requested_items": list(requested_keys),
+        "entered": False,
+        "closed": False,
+        "success": False,
+        "reason": "",
+        "entry_result": None,
+        "selection_attempts": [],
+        "missing_items": [],
+        "control_detection_result": None,
+        "confirm_click_target": None,
+        "confirm_clicked": False,
+        "confirm_click_result": None,
+        "post_confirm_controls": None,
+        "dismiss_after_sale_clicked": False,
+        "dismiss_after_sale_result": None,
+        "close_result": None,
+    }
+    result = {
+        "trackblazer_shop_items": list(requested_keys),
+        "trackblazer_shop_summary": {
+            "items_detected": list(requested_keys),
+            "page_count": 0,
+            "stop_reason": "",
+            "shop_coins": -1,
+        },
+        "trackblazer_shop_flow": flow,
+        "ocr_runtime_debug": {},
+        "inventory_ocr_debug_entries": [],
+        "success": False,
+    }
+
+    if not requested_keys:
+        flow["closed"] = True
+        flow["success"] = True
+        flow["reason"] = "no_requested_items"
+        result["success"] = True
+        return result
+
+    t_total = _time()
+
+    try:
+        t0 = _time()
+        entry_result = enter_shop(threshold=0.8, read_shop_coins=False)
+        flow["timing_open"] = round(_time() - t0, 3)
+        flow["entry_result"] = entry_result
+        flow["entered"] = bool(entry_result.get("entered"))
+        result["trackblazer_shop_summary"]["shop_coins"] = entry_result.get("shop_coins", -1)
+        if not flow["entered"]:
+            flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
+            return result
+
+        select_t0 = _time()
+        for item_key in requested_keys:
+            catalog_entry = catalog.get(item_key) or {}
+            item_name = catalog_entry.get("display_name") or str(item_key).replace("_", " ").title()
+            selection_result = prepare_trackblazer_shop_item_selection(item_name)
+            attempt = {
+                "item_key": item_key,
+                "item_name": item_name,
+                "selection_result": selection_result,
+                "selected": bool(selection_result.get("selected")),
+            }
+            flow["selection_attempts"].append(attempt)
+            if not attempt["selected"]:
+                flow["missing_items"].append(item_key)
+        flow["timing_select_items"] = round(_time() - select_t0, 3)
+
+        if flow["missing_items"]:
+            flow["reason"] = "shop_items_not_selectable"
+            return result
+
+        controls_t0 = _time()
+        controls = detect_inventory_controls()
+        flow["timing_controls"] = round(_time() - controls_t0, 3)
+        confirm_entry = (controls.get("confirm_candidates") or {}).get("shop_confirm") or controls.get("confirm_use") or {}
+        flow["control_detection_result"] = {
+            "confirm_key": confirm_entry.get("key"),
+            "confirm_visible": bool(confirm_entry.get("passed_threshold")),
+            "confirm_click_target": list(confirm_entry.get("click_target")) if confirm_entry.get("click_target") else None,
+            "confirm_score": confirm_entry.get("score"),
+        }
+        flow["confirm_click_target"] = flow["control_detection_result"]["confirm_click_target"]
+        if not confirm_entry.get("passed_threshold") or not confirm_entry.get("click_target"):
+            flow["reason"] = "shop_confirm_not_available"
+            return result
+
+        confirm_t0 = _time()
+        confirm_click_result = device_action.click_with_metrics(
+            confirm_entry.get("click_target"),
+            text="[TB_SHOP] Confirm planned shop purchase.",
+        )
+        flow["timing_confirm"] = round(_time() - confirm_t0, 3)
+        flow["confirm_click_result"] = confirm_click_result
+        flow["confirm_clicked"] = bool(confirm_click_result.get("clicked"))
+        if not flow["confirm_clicked"]:
+            flow["reason"] = "failed_to_click_shop_confirm"
+            return result
+
+        sleep(0.25)
+        post_confirm_controls_t0 = _time()
+        post_confirm_controls = detect_inventory_controls()
+        flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
+        flow["post_confirm_controls"] = post_confirm_controls
+
+        aftersale_close = post_confirm_controls.get("close") or {}
+        if aftersale_close.get("passed_threshold") and aftersale_close.get("click_target"):
+            dismiss_t0 = _time()
+            dismiss_result = device_action.click_with_metrics(
+                aftersale_close.get("click_target"),
+                text="[TB_SHOP] Dismiss after-sale prompt.",
+            )
+            flow["timing_dismiss_after_sale"] = round(_time() - dismiss_t0, 3)
+            flow["dismiss_after_sale_result"] = dismiss_result
+            flow["dismiss_after_sale_clicked"] = bool(dismiss_result.get("clicked"))
+            sleep(0.2)
+
+        verify_open_t0 = _time()
+        shop_open, _, verify_checks = detect_shop_screen(threshold=0.75)
+        flow["timing_verify_shop_open"] = round(_time() - verify_open_t0, 3)
+        flow["verification_checks"] = verify_checks
+        if shop_open:
+            close_t0 = _time()
+            close_result = close_trackblazer_shop()
+            flow["timing_close"] = round(_time() - close_t0, 3)
+            flow["close_result"] = close_result
+            flow["closed"] = bool(close_result.get("closed"))
+        else:
+            flow["closed"] = True
+
+        if not flow["closed"] and not flow["reason"]:
+            flow["reason"] = "failed_to_close_shop"
+
+        flow["success"] = bool(
+            flow["entered"]
+            and not flow["missing_items"]
+            and flow["confirm_clicked"]
+            and flow["closed"]
+        )
+        result["success"] = bool(flow["success"])
+    finally:
+        flow["timing_total"] = round(_time() - t_total, 3)
+        result["trackblazer_shop_flow"] = flow
+        result["success"] = bool(flow.get("success"))
+        record_runtime_ocr_debug(
+            "trackblazer_shop_execute_purchase",
+            extra={
+                "requested_items": list(requested_keys),
+                "flow": flow,
+            },
+        )
+        result["ocr_runtime_debug"] = snapshot_runtime_ocr_debug()
+        result["inventory_ocr_debug_entries"] = _build_trackblazer_shop_debug_entries(
+            flow,
+            result["ocr_runtime_debug"],
+        )
+
+    return result
 
 
 def execute_training_items(item_names, trigger="automatic", commit_mode="full"):

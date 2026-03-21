@@ -98,9 +98,9 @@ For planning and scenario design, these labels are more useful than only the UI 
 - `action_selection`
   The strategy layer ranks actions and picks one.
 - `action_preview`
-  The operator console exposes OCR evidence and intended clicks.
+  The operator console exposes OCR evidence and intended clicks. In `check_only` mode the bot pauses here.
 - `action_execution`
-  The selected action is committed.
+  The selected action is committed. Pressing Continue (F2) during `action_preview` in `check_only` mode triggers a one-shot execute — the full sequence (shop purchases → inventory refresh → item use → reassess → action) runs once, then the bot returns to `check_only` for the next turn. This supports a step-through walkthrough workflow.
 - `recovery`
   The bot retries, skips, or returns to lobby after a failed or invalid step.
 

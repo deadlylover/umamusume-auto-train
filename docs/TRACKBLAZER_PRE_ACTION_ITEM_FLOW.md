@@ -34,17 +34,30 @@ That plan is attached to the action as:
 
 This means the item plan is based on the currently selected action, not on a generic inventory-only rule.
 
-### 2. Pre-action items are executed before the main action
+### 2. Pre-action execution sequence (including shop purchases)
 
-In execute mode, planned Trackblazer items are applied before the final action click.
+When the bot commits to executing a turn, the full Trackblazer pre-action sequence is:
 
-For a training action, the normal order is:
+1. **Buy planned shop items** — enter shop, select each item from the buy plan, confirm purchase, dismiss after-sale prompt, close shop
+2. **Refresh inventory** — re-scan inventory so item-use planning sees newly bought items
+3. **Re-plan item usage** — rebuild the pre-action item plan against the updated inventory
+4. **Use pre-action items** — open inventory, increment selected items, confirm use
+5. **Reassess if needed** — if `Reset Whistle` was used, return to main loop for fresh state collection and strategy re-evaluation
+6. **Execute the main action** — perform the training click, race entry, etc.
 
-1. select pre-action items
-2. confirm item use
-3. if no reassess is required, perform the final training click
+This sequence runs in both **execute mode** and **one-shot execute via Continue** (see section 2a below).
 
-In `check_only` and `preview_clicks`, these remain preview steps only.
+In pure `check_only` without pressing Continue, these remain preview steps only — the shop buy plan and item plan are computed and displayed but not committed.
+
+### 2a. One-shot execute via Continue (F2)
+
+When the bot is in `check_only` mode and paused at the confirmation screen, pressing **Continue (F2)** executes the current turn as if in execute mode without changing the intent toggle.
+
+The one-shot execute runs the full sequence from section 2: shop purchases → inventory refresh → item use → reassess → action.
+
+After the turn completes, the bot returns to `check_only` mode for the next turn. This makes it possible to step through turns one at a time as a walkthrough — review the plan, press Continue to commit, review the next turn.
+
+The shop buy plan shown as `Would Buy:` in the review snapshot is the same list that gets executed. The item plan shown as `Would Use:` is re-evaluated after shop purchases complete (since newly bought items may change what's available).
 
 ### 3. `Reset Whistle` is a hard reassess boundary
 
