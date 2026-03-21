@@ -186,6 +186,8 @@ MANT_SHOP_SCROLLSWIPE_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (640, 420, -50
 MANT_SHOP_SCROLLSWIPE_REGION = convert_xyxy_to_xywh(MANT_SHOP_SCROLLSWIPE_BBOX)
 MANT_SHOP_SCROLLBAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (705, 280, -18, -250))
 MANT_SHOP_SCROLLBAR_REGION = convert_xyxy_to_xywh(MANT_SHOP_SCROLLBAR_BBOX)
+MANT_SHOP_CONTROLS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 860, 0, 0))
+MANT_SHOP_CONTROLS_REGION = convert_xyxy_to_xywh(MANT_SHOP_CONTROLS_BBOX)
 
 # Trackblazer inventory/item region — covers the item list area on the training items screen.
 # Placeholder offsets; tune with the region adjuster once the screen is accessible.
@@ -282,6 +284,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
 
 TRACKBLAZER_SHOP_UI_TEMPLATES = {
   "shop_confirm": "assets/trackblazer/shop_confirm.png",
+  "shop_confirm_2": "assets/trackblazer/shop_confirm_2.png",
   "shop_aftersale_close": "assets/trackblazer/shop_aftersale_close.png",
   "shop_aftersale_confirm_use_available": "assets/trackblazer/shop_aftersale_confirm_use_available.png",
   "shop_aftersale_confirm_use_unavailable": "assets/trackblazer/shop_aftersale_confirm_use_unavailable.png",
@@ -565,6 +568,7 @@ LAYOUT_REGION_OFFSETS = {
   "SCREEN_MIDDLE_BBOX": (0, 300, 0, -280),
   "SCREEN_BOTTOM_BBOX": (0, 800, 0, 0),
   "SCROLLING_SKILL_SCREEN_BBOX": (0, 390, 0, -200),
+  "MANT_SHOP_CONTROLS_BBOX": (0, 860, 0, 0),
 }
 
 
@@ -676,6 +680,8 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_SHOP_SCROLLSWIPE_REGION",
   "MANT_SHOP_SCROLLBAR_BBOX",
   "MANT_SHOP_SCROLLBAR_REGION",
+  "MANT_SHOP_CONTROLS_BBOX",
+  "MANT_SHOP_CONTROLS_REGION",
   "MANT_INVENTORY_ITEMS_BBOX",
   "MANT_INVENTORY_ITEMS_REGION",
   "SKILL_SCROLLBAR_BBOX",
@@ -735,6 +741,15 @@ ADJUSTER_TEMPLATE_MAP = {
   "SCREEN_MIDDLE_BBOX": [
     "assets/buttons/change_btn.png",
     "assets/buttons/confirm_btn.png",
+  ],
+  "MANT_SHOP_CONTROLS_BBOX": [
+    "assets/trackblazer/shop_confirm.png",
+    "assets/trackblazer/shop_confirm_2.png",
+    "assets/trackblazer/shop_aftersale_close.png",
+    "assets/trackblazer/shop_aftersale_confirm_use_available.png",
+    "assets/trackblazer/shop_aftersale_confirm_use_unavailable.png",
+    "assets/trackblazer/inventory_confirm_use_available.png",
+    "assets/trackblazer/inventory_confirm_use_unavailable.png",
   ],
 }
 

@@ -106,8 +106,11 @@ def _trackblazer_ui_region():
 
 
 def _trackblazer_inventory_controls_region():
-    left, top, right, bottom = constants.GAME_WINDOW_BBOX
-    return (left, max(top, bottom - 220), right, bottom)
+    return constants.MANT_SHOP_CONTROLS_BBOX
+
+
+def _shop_confirm_template_keys():
+    return ("shop_confirm", "shop_confirm_2")
 
 
 def _match_center_y(match):
@@ -743,7 +746,7 @@ def detect_inventory_controls(threshold=0.6):
         inventory_state_entries[key] = entry
 
     confirm_candidates = {}
-    for key in ("shop_confirm", "shop_aftersale_confirm_use_available", "shop_aftersale_confirm_use_unavailable"):
+    for key in (*_shop_confirm_template_keys(), "shop_aftersale_confirm_use_available", "shop_aftersale_confirm_use_unavailable"):
         template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
         if not template_path:
             continue
@@ -799,9 +802,14 @@ def detect_inventory_controls(threshold=0.6):
                 unavailable_entry["button_state_reason"] = state_reason
 
     if best_confirm is None:
-        generic_confirm = confirm_candidates.get("shop_confirm")
-        if generic_confirm and generic_confirm.get("passed_threshold"):
-            best_confirm = generic_confirm
+        generic_candidates = [
+            confirm_candidates.get(key)
+            for key in _shop_confirm_template_keys()
+            if confirm_candidates.get(key)
+        ]
+        passed_generic_candidates = [entry for entry in generic_candidates if entry.get("passed_threshold")]
+        if passed_generic_candidates:
+            best_confirm = max(passed_generic_candidates, key=lambda entry: entry.get("score") or 0.0)
 
     if best_confirm:
         controls["confirm_use"] = best_confirm
@@ -1352,17 +1360,26 @@ def scan_trackblazer_shop_inventory(
     t_checkboxes = _time() - t0
 
     t0 = _time()
-    confirm_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_confirm")
     confirm_entry = None
-    if confirm_template:
-        confirm_entry = _best_match_entry(
+    confirm_candidates = []
+    for confirm_key in _shop_confirm_template_keys():
+        confirm_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(confirm_key)
+        if not confirm_template:
+            continue
+        entry = _best_match_entry(
             confirm_template,
             region_ltrb=region_ltrb,
             threshold=confirm_threshold,
             template_scaling=_INVERSE_GLOBAL_SCALE,
             screenshot=screenshot,
         )
-        confirm_entry["key"] = "shop_confirm"
+        entry["key"] = confirm_key
+        confirm_candidates.append(entry)
+    passed_confirm_candidates = [entry for entry in confirm_candidates if entry.get("passed_threshold")]
+    if passed_confirm_candidates:
+        confirm_entry = max(passed_confirm_candidates, key=lambda entry: entry.get("score") or 0.0)
+    elif confirm_candidates:
+        confirm_entry = max(confirm_candidates, key=lambda entry: entry.get("score") or 0.0)
     t_confirm = _time() - t0
 
     rows = []
@@ -1910,6 +1927,7 @@ def prepare_trackblazer_shop_item_selection(
     threshold=0.7,
     checkbox_threshold=0.8,
     confirm_threshold=0.7,
+    scan_result=None,
 ):
     """Find a shop item, select its row checkbox once, and stop before confirm."""
     requested_item = str(item_name or "").strip()
@@ -1933,11 +1951,12 @@ def prepare_trackblazer_shop_item_selection(
         flow["timing_total"] = round(_time() - t_total, 4)
         return flow
 
-    scan_result = scan_all_trackblazer_shop_items(
-        threshold=threshold,
-        checkbox_threshold=checkbox_threshold,
-        confirm_threshold=confirm_threshold,
-    )
+    if scan_result is None:
+        scan_result = scan_all_trackblazer_shop_items(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+        )
     flow["scan_result"] = scan_result
     flow["scan_timing"] = (scan_result.get("flow") or {}).get("timing") or {}
 
@@ -2129,10 +2148,16 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
             return result
 
         select_t0 = _time()
+        shared_scan = scan_all_trackblazer_shop_items(
+            threshold=0.7,
+            checkbox_threshold=0.8,
+            confirm_threshold=0.7,
+        )
+        flow["scan_timing"] = (shared_scan.get("flow") or {}).get("timing") or {}
         for item_key in requested_keys:
             catalog_entry = catalog.get(item_key) or {}
             item_name = catalog_entry.get("display_name") or str(item_key).replace("_", " ").title()
-            selection_result = prepare_trackblazer_shop_item_selection(item_name)
+            selection_result = prepare_trackblazer_shop_item_selection(item_key, scan_result=shared_scan)
             attempt = {
                 "item_key": item_key,
                 "item_name": item_name,
@@ -2148,6 +2173,7 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
             flow["reason"] = "shop_items_not_selectable"
             return result
 
+        sleep(0.3)
         controls_t0 = _time()
         controls = detect_inventory_controls()
         flow["timing_controls"] = round(_time() - controls_t0, 3)
@@ -2593,7 +2619,7 @@ def detect_shop_screen(threshold=0.7):
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     checks = []
 
-    for key in ("shop_confirm", "shop_aftersale_close"):
+    for key in (*_shop_confirm_template_keys(), "shop_aftersale_close"):
         template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
         if not template_path:
             continue

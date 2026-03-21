@@ -575,6 +575,18 @@
     38,
     521
   ],
+  "MANT_SHOP_CONTROLS_BBOX": [
+    1,
+    985,
+    763,
+    1505
+  ],
+  "MANT_SHOP_CONTROLS_REGION": [
+    1,
+    985,
+    762,
+    520
+  ],
   "MANT_INVENTORY_ITEMS_BBOX": [
     28,
     234,
