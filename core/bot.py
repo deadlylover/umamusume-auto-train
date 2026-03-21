@@ -141,7 +141,10 @@ def is_pause_requested():
 
 def set_execution_intent(intent):
   global execution_intent, runtime_updated_at
-  normalized = intent if intent in ("check_only", "preview_clicks", "execute") else "execute"
+  # Normalize legacy "preview_clicks" to "check_only" (two-mode model).
+  if intent == "preview_clicks":
+    intent = "check_only"
+  normalized = intent if intent in ("check_only", "execute") else "execute"
   with runtime_lock:
     execution_intent = normalized
     runtime_updated_at = time.time()

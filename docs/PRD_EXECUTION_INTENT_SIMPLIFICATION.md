@@ -2,9 +2,14 @@
 
 ## Status
 
-Proposed.
+Implemented.
 
-The current branch has a usable walkthrough workflow in `check_only`, and `Continue (F2)` can now execute the current turn as a one-shot commit without changing the toggle. The remaining problem is product clarity: `preview_clicks` is still present in the model, but it no longer serves a distinct, high-value workflow.
+The current branch now uses the simplified two-mode model in practice:
+
+- `check_only`
+- `execute`
+
+Legacy `preview_clicks` input is normalized to `check_only` for migration compatibility, but it is no longer exposed as a user-facing mode.
 
 ## Summary
 

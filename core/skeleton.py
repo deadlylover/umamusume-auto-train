@@ -1580,18 +1580,11 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
     if execution_intent == "execute":
       return execution_intent
 
-    if execution_intent == "check_only":
-      message = "check_only mode active; press Continue to execute this turn."
-      notes = (
-        f"{reasoning_notes or ''} "
-        "Press Continue to execute this action once without switching mode."
-      ).strip()
-    else:
-      message = f"{execution_intent} mode active; no action committed."
-      notes = (
-        f"{reasoning_notes or ''} "
-        "Switch to execute and press Continue to commit this action."
-      ).strip()
+    message = "check_only mode active; press Continue to execute this turn."
+    notes = (
+      f"{reasoning_notes or ''} "
+      "Press Continue to execute this action once without switching mode."
+    ).strip()
 
     update_operator_snapshot(
       state_obj,
@@ -1835,7 +1828,7 @@ def career_lobby(dry_run_turn=False):
         update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
         state_obj = collect_trackblazer_inventory(
           state_obj,
-          allow_open_non_execute=execution_intent in ("check_only", "preview_clicks"),
+          allow_open_non_execute=execution_intent != "execute",
         )
         _copy_trackblazer_inventory_snapshot(state_obj)
         if execution_intent == "check_only":

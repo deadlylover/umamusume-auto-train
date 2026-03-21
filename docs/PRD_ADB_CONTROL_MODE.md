@@ -397,7 +397,7 @@ Reason:
 6. Keep host screenshots unchanged; map host click targets into ADB device space using the active BlueStacks viewport and live ADB display geometry.
 6. Audit for direct host-input calls that bypass the wrapper.
 7. Add explicit fallback policy for ADB init failure.
-8. Verify `check_only`, `preview_clicks`, and `execute` all show the resolved backend.
+8. Verify `check_only` and `execute` all show the resolved backend.
 9. Add manual validation steps for macOS / BlueStacks Air with and without screen sharing.
 
 ## Validation Plan

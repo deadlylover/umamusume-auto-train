@@ -229,7 +229,7 @@ class OperatorConsole:
     tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
-    for intent in ("check_only", "preview_clicks", "execute"):
+    for intent in ("check_only", "execute"):
       tk.Radiobutton(
         secondary_controls,
         text=intent.replace("_", " "),

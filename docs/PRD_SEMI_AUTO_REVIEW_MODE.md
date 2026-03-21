@@ -18,7 +18,6 @@ Implemented in the current branch:
   - open OCR region adjuster
 - Console now exposes execution intent controls:
   - `check_only`
-  - `preview_clicks`
   - `execute`
 - Bot runtime phase/state is exposed to the console.
 - A decision snapshot is shown in the console with:
@@ -46,7 +45,7 @@ Implemented in the current branch:
   - `planned_clicks`
 - Review gating is wired before action execution in `core/skeleton.py`.
 - Manual pause requests work even in `auto` mode; execution waits at the same review boundary.
-- `check_only` and `preview_clicks` now prevent action clicks from committing and keep the bot on the same turn for inspection.
+- `check_only` now prevents action clicks from committing and keeps the bot on the same turn for inspection.
 - Skill purchasing now has its own review path with dedicated sub-phases and planned-click/OCR-debug payloads.
 - The console now has a dedicated OCR Debug pane.
 - The console now has copy-to-clipboard buttons for:
@@ -295,16 +294,15 @@ The console should support explicit intent for the current phase, not just a bin
 
 Required execution intents:
 
-- `check_only`: inspect the screen, OCR it, compute the recommendation, but do not click.
-- `preview_clicks`: compute the same action path and show each intended click target/region/template before committing.
-- `execute`: perform the action normally after review approval.
+- `check_only`: inspect the screen, OCR it, compute the recommendation, show planned clicks and debug data, but do not commit. Press Continue (F2) to execute one turn without switching mode.
+- `execute`: perform the action normally.
 
 Practical examples:
 
 - skill buying:
-  the bot can open the skill menu in `execute`, then switch to `check_only` or `preview_clicks` while scanning and matching skills so OCR can be reviewed before pressing `Learn`.
+  the bot can open the skill menu, scan and match skills in `check_only` so OCR can be reviewed, then press Continue to commit.
 - Trackblazer shop:
-  the bot can read shop coins, visible items, and current inventory in `check_only`, then show the exact item slot and confirm button it would press in `preview_clicks`.
+  the bot can read shop coins, visible items, and current inventory in `check_only`, showing the exact item slot and confirm button it would press, then press Continue to commit.
 - race menu:
   the bot can open the race list, score candidate races, and show which race card/button it would select before actually entering.
 
@@ -483,7 +481,7 @@ Acceptance:
 - [x] Add a console button to launch the OCR region adjuster.
 - [x] Add a dedicated OCR/debug text pane with region provenance and parse details.
 - [x] Add copy-to-clipboard buttons for each text pane.
-- [x] Add visible execution-intent controls or indicators for `check_only`, `preview_clicks`, and `execute`.
+- [x] Add visible execution-intent controls or indicators for `check_only` and `execute`.
 
 Acceptance:
 
@@ -540,7 +538,7 @@ Acceptance:
 - [x] Add pause/continue helper in `core/skeleton.py`.
 - [x] Reassign hotkeys in `main.py`.
 - [x] Add sub-phase tracking separate from coarse bot phase.
-- [x] Add execution-intent state: `check_only`, `preview_clicks`, `execute`.
+- [x] Add execution-intent state: `check_only`, `execute`.
 - [x] Add OCR provenance/debug payloads to snapshots.
 - [x] Add planned-click preview payloads to snapshots.
 - [x] Add copy-to-clipboard actions in the Tk console.

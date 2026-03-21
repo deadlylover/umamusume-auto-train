@@ -14,7 +14,6 @@ Implemented in support of Trackblazer bring-up:
 - [x] `core/skeleton.py` now treats banner filenames as scenario keys and uses `trackblazer` as the canonical internal name, with `mant` retained only as a legacy alias in some branches/comments.
 - [x] Operator console/runtime state now supports execution intents:
   - `check_only`
-  - `preview_clicks`
   - `execute`
 - [x] Operator console now includes:
   - sub-phase display
@@ -250,7 +249,7 @@ Operator console must show:
 - proposed next action
 - Trackblazer-specific fields used in scoring
 - current error / recovery state if blocked
-- current execution intent: `check_only`, `preview_clicks`, or `execute`
+- current execution intent: `check_only` or `execute`
 - the current Trackblazer sub-phase, especially for shop, inventory, skill, and race handling
 - the OCR region/constants used for the current Trackblazer read
 - the intended click target(s) before any skill/shop/race commit happens
@@ -422,8 +421,8 @@ Acceptance:
 - [ ] Add routing from `core/skeleton.py`.
 - [ ] Handle mandatory confirmation / route-selection / checkpoint screens.
 - [ ] Add retry/escape behavior when the handler cannot confirm state.
-- [x] Add `check_only` and `preview_clicks` paths for skill buying and generic action/race selection review.
-- [ ] Add `check_only` and `preview_clicks` paths for Trackblazer shop interaction and inventory checks.
+- [x] Add `check_only` review paths for skill buying and generic action/race selection review.
+- [ ] Add `check_only` review paths for Trackblazer shop interaction and inventory checks.
 
 Acceptance:
 
