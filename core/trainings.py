@@ -4,6 +4,7 @@ from core.actions import Action
 import core.config as config
 from utils.shared import CleanDefaultDict
 import utils.constants as constants
+import core.bot as bot
 
 # Training function names:
 # max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
@@ -261,13 +262,31 @@ def stat_weight_training(state, training_template, action):
       weight = stat_weights.get(stat, 1)
       total_value += gain * weight
 
+    # Bond boost: +10 per blue/green friend on this training (+15 on wit)
+    bond_boost = 0
+    if bot.get_trackblazer_bond_boost_enabled():
+      cutoff = bot.get_trackblazer_bond_boost_cutoff()
+      current_year = state.get("year", "")
+      try:
+        active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
+      except ValueError:
+        active = False
+      if active:
+        friendship_levels = training_data.get('total_friendship_levels', {})
+        raiseable_friends = friendship_levels.get('blue', 0) + friendship_levels.get('green', 0)
+        if raiseable_friends > 0:
+          per_friend = 15 if training_name == "wit" else 10
+          bond_boost = raiseable_friends * per_friend
+          total_value += bond_boost
+
     priority_index = get_priority_index((training_name, training_data))
     tiebreaker = -priority_index
 
     training_scores[training_name] = create_training_score_entry(
       training_name, training_data, (total_value, tiebreaker)
     )
-    debug(f"stat_weight_training: {training_name} -> score={total_value:.1f} gains={stat_gains}")
+    bond_str = f" bond_boost=+{bond_boost}" if bond_boost else ""
+    debug(f"stat_weight_training: {training_name} -> score={total_value:.1f} gains={stat_gains}{bond_str}")
 
   info(f"stat_weight_training scores: {training_scores}")
   action = fill_trainings_for_action(action, training_scores)

@@ -1389,6 +1389,19 @@ def _score_training_for_display(training_name, training_data, state_obj, trainin
           continue
         weight = stat_weights.get(stat, 1)
         total_value += gain * weight
+      if bot.get_trackblazer_bond_boost_enabled():
+        cutoff = bot.get_trackblazer_bond_boost_cutoff()
+        current_year = state_obj.get("year", "")
+        try:
+          active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
+        except ValueError:
+          active = False
+        if active:
+          friendship_levels = td.get('total_friendship_levels', {})
+          raiseable = friendship_levels.get('blue', 0) + friendship_levels.get('green', 0)
+          if raiseable > 0:
+            per_friend = 15 if training_name == "wit" else 10
+            total_value += raiseable * per_friend
       from core.trainings import get_priority_index
       priority_index = get_priority_index(x)
       return (total_value, -priority_index)

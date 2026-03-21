@@ -60,6 +60,8 @@ control_callbacks = {}
 manual_control_active = False
 trackblazer_use_items_enabled = False
 trackblazer_scoring_mode = "stat_focused"  # "legacy" = use timeline template, "stat_focused" = stat_weight_training
+trackblazer_bond_boost_enabled = True  # +10 score per blue/green friend on training (+15 on wit)
+trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive after this turn
 skill_dry_run_enabled = False
 
 
@@ -197,6 +199,30 @@ def set_trackblazer_scoring_mode(mode):
 def get_trackblazer_scoring_mode():
   with runtime_lock:
     return trackblazer_scoring_mode
+
+
+def set_trackblazer_bond_boost_enabled(enabled):
+  global trackblazer_bond_boost_enabled, runtime_updated_at
+  with runtime_lock:
+    trackblazer_bond_boost_enabled = bool(enabled)
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_bond_boost_enabled():
+  with runtime_lock:
+    return trackblazer_bond_boost_enabled
+
+
+def set_trackblazer_bond_boost_cutoff(cutoff):
+  global trackblazer_bond_boost_cutoff, runtime_updated_at
+  with runtime_lock:
+    trackblazer_bond_boost_cutoff = cutoff
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_bond_boost_cutoff():
+  with runtime_lock:
+    return trackblazer_bond_boost_cutoff
 
 
 def set_skill_dry_run_enabled(enabled):

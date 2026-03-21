@@ -810,7 +810,7 @@ def get_support_card_data(threshold=0.8):
 
       # get friend level
       x, y, w, h = match
-      icon_to_friend_bar_distance = 66
+      icon_to_friend_bar_distance = 77 if constants.SCENARIO_NAME in ("mant", "trackblazer") else 66
       bbox_left = region_xywh[0] + x + w // 2
       bbox_top = region_xywh[1] + y + h // 2 + icon_to_friend_bar_distance
       wanted_pixel = (bbox_left, bbox_top, bbox_left + 1, bbox_top + 1)

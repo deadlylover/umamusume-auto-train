@@ -122,6 +122,7 @@ class OperatorConsole:
     self._item_policy_body = None
     self._stat_weights_window = None
     self._stat_weights_entries = {}
+    self._bond_boost_var = None
     self._start_bot_button = None
     self._stop_bot_button = None
     self._pause_button = None
@@ -2304,7 +2305,7 @@ class OperatorConsole:
     window = tk.Toplevel(self._root)
     window.title("Trackblazer Stat Weights")
     window.configure(bg="#101418")
-    window.geometry("340x260")
+    window.geometry("380x340")
     window.resizable(False, False)
     window.bind(
       "<Destroy>",
@@ -2335,12 +2336,55 @@ class OperatorConsole:
       entry.grid(row=row_idx, column=1, sticky="w", padx=(8, 0), pady=2)
       self._stat_weights_entries[stat] = var
 
+    bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    bond_frame.pack(fill=tk.X)
+    self._bond_boost_var = tk.BooleanVar(value=bot.get_trackblazer_bond_boost_enabled())
+    tk.Checkbutton(
+      bond_frame,
+      text="Bond boost (+10/friend, +15 on wit)",
+      variable=self._bond_boost_var,
+      command=self._toggle_bond_boost,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT)
+
+    cutoff_frame = tk.Frame(window, bg="#101418", padx=16, pady=0)
+    cutoff_frame.pack(fill=tk.X)
+    tk.Label(
+      cutoff_frame, text="Active until:", fg="#9aa4ad", bg="#101418",
+    ).pack(side=tk.LEFT)
+    self._bond_boost_cutoff_var = tk.StringVar(value=bot.get_trackblazer_bond_boost_cutoff())
+    cutoff_menu = tk.OptionMenu(
+      cutoff_frame,
+      self._bond_boost_cutoff_var,
+      *constants.TIMELINE[:-1],
+      command=self._set_bond_boost_cutoff,
+    )
+    cutoff_menu.configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white", highlightthickness=0, width=24)
+    cutoff_menu["menu"].configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white")
+    cutoff_menu.pack(side=tk.LEFT, padx=(4, 0))
+
     buttons = tk.Frame(window, bg="#101418", padx=8, pady=8)
     buttons.pack(fill=tk.X)
     tk.Button(buttons, text="Save", command=self._save_stat_weights).pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(buttons, text="Reset Defaults", command=self._reset_stat_weights_defaults).pack(side=tk.LEFT, padx=(0, 8))
 
     self._stat_weights_window = window
+
+  def _toggle_bond_boost(self):
+    enabled = self._bond_boost_var.get()
+    bot.set_trackblazer_bond_boost_enabled(enabled)
+    label = "on" if enabled else "off"
+    self._message_value.set(f"Bond boost: {label}.")
+    self.publish()
+
+  def _set_bond_boost_cutoff(self, value):
+    bot.set_trackblazer_bond_boost_cutoff(value)
+    self._message_value.set(f"Bond boost cutoff: {value}.")
+    self.publish()
 
   def _clear_stat_weights_window(self):
     self._stat_weights_window = None

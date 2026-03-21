@@ -89,16 +89,42 @@ These are the values that can be adjusted to refine behavior:
 |--------|----------|---------|---------|
 | `stat_weight_set` | `config.json` templates | spd:1 sta:1 pwr:1 guts:1 wit:1 | Per-stat multiplier for gains |
 | `_WEAK_TRAINING_THRESHOLD` | `trackblazer_race_logic.py` | 35 | Total raw stats below which racing is preferred |
+| `bond_boost_enabled` | `bot.py` runtime toggle | True | +10/+15 per blue/green friend on training |
+
+### Bond Boost
+
+Toggle: **Bond boost** checkbox in Stat Weights window (default: on).
+Runtime state: `bot.trackblazer_bond_boost_enabled`.
+
+Adds a flat score bonus for each blue or green friendship-level support card
+present on a training. The goal is to prioritise raising bonds to orange
+(yellow) in early game, since orange friends unlock rainbow training bonuses.
+
+| Training | Per-friend bonus |
+|----------|-----------------|
+| wit      | +15             |
+| all others | +10           |
+
+Wit gets a higher bonus because it costs no energy to train, making it a
+low-cost way to raise friendship when the stat gains are otherwise weak.
+
+The boost only applies to blue and green friends (not gray, yellow, or max).
+Once a friend reaches orange/max, they no longer contribute a bond boost —
+they already provide rainbow stat bonuses which are reflected in the visible
+gains.
+
+**Cutoff:** The bond boost is only active up to and including a configurable
+timeline turn (default: `Classic Year Early Jun` — just before first summer).
+After the cutoff, pure stat-weight scoring takes over. The cutoff is
+adjustable via the "Active until" dropdown in the Stat Weights window.
 
 ### Future tuning ideas
 
-- **Early-game friendship bias**: For early timeline templates, keep using
-  `default` scoring mode (friendship/rainbow functions). Switch to `stat_focused`
-  at the timeline point where bonds are established and stat accumulation matters.
-- **Wit threshold**: Wit training gives fewer raw stats (~22 vs ~34 for others).
-  Could add a wit-specific bonus or lower the race gate threshold for wit.
 - **Per-phase weight sets**: Different `stat_weight_set` configs per timeline
   phase (e.g. weight guts lower in senior year when guts cap is already close).
+- **Bond boost scaling**: The current flat +10/+15 is a simple starting point.
+  Could scale by friendship level (blue > green since blue has more to gain)
+  or reduce the bonus as game progresses.
 
 ## Code References
 
