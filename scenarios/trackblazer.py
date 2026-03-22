@@ -1045,6 +1045,7 @@ def close_training_items_inventory(threshold=0.8):
         # matched a decorative element instead of the real button.  Take a
         # fresh screenshot and try the next template.
         info(f"[TB_INV] close: {key} matched (score={entry.get('score')}) but screen still open after click; trying next template.")
+        device_action.flush_screenshot_cache()
         close_screenshot = device_action.screenshot(region_ltrb=region_ltrb)
 
     timing["match_attempts"] = round(_time() - t0, 4)
@@ -1068,10 +1069,12 @@ def _wait_for_inventory_screen_to_close(max_wait_seconds=1.2, poll_seconds=0.2, 
     checks = []
     deadline = _time() + max(0.0, float(max_wait_seconds))
     while _time() <= deadline:
+        device_action.flush_screenshot_cache()
         still_open, _, checks = detect_inventory_screen(threshold=threshold)
         if not still_open:
             return True, checks
         sleep(max(0.05, float(poll_seconds)))
+    device_action.flush_screenshot_cache()
     still_open, _, checks = detect_inventory_screen(threshold=threshold)
     return (not still_open), checks
 
@@ -1110,6 +1113,7 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=10.0, poll_seconds=0.4
     deadline = _time() + max(0.0, float(max_wait_seconds))
     while _time() <= deadline:
         polls += 1
+        device_action.flush_screenshot_cache()
 
         inventory_open, _, screen_checks = detect_inventory_screen(threshold=max(0.7, threshold - 0.05))
         if screen_checks:
@@ -1237,6 +1241,7 @@ def _wait_for_post_shop_close_button(max_wait_seconds=4.0, poll_seconds=0.3, thr
     deadline = _time() + max(0.0, float(max_wait_seconds))
     while _time() <= deadline:
         polls += 1
+        device_action.flush_screenshot_cache()
         controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.1))
         close_entry = controls.get("close") or {}
         close_target = close_entry.get("click_target")
@@ -2760,6 +2765,9 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                 flow["timing_increments"] = round(_time() - increment_t0, 3)
 
             # -- Detect controls (all modes) --
+            # Flush cache after increment clicks so we see the updated
+            # confirm-use button state (available/unavailable).
+            device_action.flush_screenshot_cache()
             controls_t0 = _time()
             controls = detect_inventory_controls()
             flow["timing_controls"] = round(_time() - controls_t0, 3)
@@ -2831,6 +2839,7 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     post_confirm_controls = {}
                     for _followup_poll in range(6):
                         sleep(0.3)
+                        device_action.flush_screenshot_cache()
                         post_confirm_controls = detect_inventory_controls()
                         candidates = post_confirm_controls.get("confirm_candidates") or {}
                         candidate = (
@@ -2868,6 +2877,7 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                             sleep(0.2)
 
                     verify_t0 = _time()
+                    device_action.flush_screenshot_cache()
                     still_open, _, verify_checks = detect_inventory_screen()
                     flow["timing_verify_closed"] = round(_time() - verify_t0, 3)
                     flow["verification_checks"] = verify_checks

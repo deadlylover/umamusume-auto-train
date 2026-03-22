@@ -1279,37 +1279,77 @@ _LOBBY_ANCHOR_TEMPLATES = (
 )
 
 
-def _wait_for_lobby_after_item_use(state_obj, action, max_wait=5.0, sub_phase=None, ocr_debug=None, planned_clicks=None):
+def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=None, ocr_debug=None, planned_clicks=None):
   """Brief poll for a lobby bottom-bar button after pre-action item use.
 
   If the inventory close was slow or the game lingered on an overlay, the
-  lobby buttons won't be visible yet.  Poll up to *max_wait* seconds,
-  trying a back/close click once if nothing appears quickly.
+  lobby buttons won't be visible yet.  Poll up to *max_wait* seconds.
+
+  Each iteration checks lobby anchors first (instant success), then
+  whether the inventory screen is visible (close it and keep polling),
+  then falls back to a generic back/close click once.
+
+  Returns True if a lobby anchor was confirmed, False if timed out.
   """
   import time as _time_mod
+  from scenarios.trackblazer import detect_inventory_screen, close_training_items_inventory
 
   deadline = _time_mod.time() + max_wait
-  recovery_attempted = False
+  generic_recovery_attempted = False
+  inventory_close_count = 0
+  max_inventory_close_attempts = 3
+  polls = 0
+
   while _time_mod.time() < deadline:
     if bot.stop_event.is_set():
-      return
+      return False
+    polls += 1
     device_action.flush_screenshot_cache()
-    screenshot = device_action.screenshot()
+
+    # 1. Check lobby anchors — if any match, we're done.
+    screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    lobby_found = False
     for tpl in _LOBBY_ANCHOR_TEMPLATES:
-      if device_action.match_template(tpl, screenshot, threshold=0.8, region_ltrb=constants.SCREEN_BOTTOM_BBOX):
-        info("[ITEM_USE] Lobby anchor confirmed after item use.")
-        return
-    if not recovery_attempted:
-      # One recovery attempt: try closing any leftover overlay.
-      info("[ITEM_USE] Lobby not yet visible after item use; attempting recovery close.")
+      if device_action.match_template(tpl, screenshot, threshold=0.8):
+        lobby_found = True
+        break
+    if lobby_found:
+      info(f"[ITEM_USE] Lobby anchor confirmed after item use (poll {polls}).")
+      return True
+
+    # 2. Check if inventory screen is visible.  This can appear after an
+    #    animation gap, so it must be checked every iteration, not once.
+    if inventory_close_count < max_inventory_close_attempts:
+      device_action.flush_screenshot_cache()
+      inv_open, _, _ = detect_inventory_screen(threshold=0.75)
+      if inv_open:
+        inventory_close_count += 1
+        info(
+          f"[ITEM_USE] Inventory screen visible (poll {polls}, "
+          f"close attempt {inventory_close_count}/{max_inventory_close_attempts}); closing."
+        )
+        close_result = close_training_items_inventory()
+        if close_result.get("closed"):
+          info("[ITEM_USE] Inventory closed via explicit close in lobby wait.")
+        else:
+          warning("[ITEM_USE] Explicit inventory close attempt did not succeed.")
+        sleep(0.3)
+        continue
+
+    # 3. Generic back/close fallback — one attempt only.
+    if not generic_recovery_attempted:
+      info(f"[ITEM_USE] Lobby not visible (poll {polls}); attempting generic recovery close.")
       for close_tpl in ("assets/buttons/close_btn.png", "assets/buttons/back_btn.png"):
         if device_action.locate_and_click(close_tpl, min_search_time=get_secs(0.4), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
           info(f"[ITEM_USE] Clicked {close_tpl} to dismiss leftover overlay.")
           sleep(0.6)
           break
-      recovery_attempted = True
+      generic_recovery_attempted = True
+
     sleep(0.4)
-  warning("[ITEM_USE] Timed out waiting for lobby after item use; proceeding anyway.")
+
+  warning(f"[ITEM_USE] Timed out waiting for lobby after item use ({polls} polls).")
+  return False
 
 
 def _run_trackblazer_shop_purchases(state_obj, action):
@@ -1879,7 +1919,19 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     # on the career lobby.  If the close was slow or the game lingered on
     # an overlay, the next action.run() would fail to find lobby buttons.
     # Poll briefly for a lobby anchor before proceeding.
-    _wait_for_lobby_after_item_use(state_obj, action, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks)
+    lobby_confirmed = _wait_for_lobby_after_item_use(state_obj, action, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks)
+    if not lobby_confirmed:
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text="Lobby not visible after item use; inventory overlay may still be up.",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return "failed"
   result = action.run()
   if not result:
     update_operator_snapshot(
