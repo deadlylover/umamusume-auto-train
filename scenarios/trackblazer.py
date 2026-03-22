@@ -1022,17 +1022,15 @@ def close_training_items_inventory(threshold=0.8):
 
         # Lightweight verification: just check if the header is still visible
         t0 = _time()
-        header_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_training_items")
-        if header_template:
-            header_entry = _best_match_entry(header_template, threshold=threshold)
-            still_open = header_entry["passed_threshold"]
-            checks = [header_entry]
-        else:
-            still_open, _, checks = detect_inventory_screen(threshold=threshold)
+        closed, checks = _wait_for_inventory_screen_to_close(
+            max_wait_seconds=1.0,
+            poll_seconds=0.15,
+            threshold=threshold,
+        )
         timing["verify"] = round(_time() - t0, 4)
         last_checks = checks
 
-        if not still_open:
+        if closed:
             timing["total"] = round(_time() - t_total, 4)
             info(f"[TB_INV] close timing: {timing}")
             return {
@@ -1065,7 +1063,20 @@ def close_training_items_inventory(threshold=0.8):
     }
 
 
-def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4, threshold=0.75):
+def _wait_for_inventory_screen_to_close(max_wait_seconds=1.2, poll_seconds=0.2, threshold=0.75):
+    """Poll briefly for the inventory screen to disappear after a close click."""
+    checks = []
+    deadline = _time() + max(0.0, float(max_wait_seconds))
+    while _time() <= deadline:
+        still_open, _, checks = detect_inventory_screen(threshold=threshold)
+        if not still_open:
+            return True, checks
+        sleep(max(0.05, float(poll_seconds)))
+    still_open, _, checks = detect_inventory_screen(threshold=threshold)
+    return (not still_open), checks
+
+
+def _wait_for_post_item_use_close_button(max_wait_seconds=10.0, poll_seconds=0.4, threshold=0.75):
     """Wait for the post-item-use close button and click it from lower UI regions."""
     t_total = _time()
     attempts = []
@@ -1075,10 +1086,13 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
     click_result = None
     clicked_entry = None
     verification_checks = []
+    saw_inventory_screen = False
+    inventory_screen_reappeared_poll = None
 
     search_regions = (
         ("inventory_controls", _trackblazer_inventory_controls_region()),
         ("screen_bottom", constants.SCREEN_BOTTOM_BBOX),
+        ("trackblazer_ui", _trackblazer_ui_region()),
     )
     template_attempts = (
         ("shop_aftersale_close", constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close"), _INVERSE_GLOBAL_SCALE),
@@ -1089,12 +1103,25 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
 
     # Track positions that were clicked but didn't close the screen, so we
     # don't keep clicking the same decorative element on every poll.
-    failed_click_positions = set()
+    failed_click_counts = {}
+    max_clicks_per_target = 2
     detect_controls_exhausted = False
 
     deadline = _time() + max(0.0, float(max_wait_seconds))
     while _time() <= deadline:
         polls += 1
+
+        inventory_open, _, screen_checks = detect_inventory_screen(threshold=max(0.7, threshold - 0.05))
+        if screen_checks:
+            verification_checks = screen_checks
+        if inventory_open and not saw_inventory_screen:
+            saw_inventory_screen = True
+            inventory_screen_reappeared_poll = polls
+            info("[TB_INV] Inventory screen reappeared after item-use confirm; waiting for close control.")
+
+        if not saw_inventory_screen:
+            sleep(max(0.1, float(poll_seconds)))
+            continue
 
         # Try detect_inventory_controls first, but skip if a previous attempt
         # from this path already failed to close the screen.
@@ -1105,7 +1132,7 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
             if (
                 close_entry.get("passed_threshold")
                 and close_target
-                and close_target not in failed_click_positions
+                and failed_click_counts.get(close_target, 0) < max_clicks_per_target
             ):
                 clicked_entry = {**close_entry, "region_name": "inventory_controls_detect"}
                 click_result = device_action.click_with_metrics(
@@ -1137,7 +1164,7 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
                     click_target = entry.get("click_target")
                     if not entry.get("passed_threshold") or not click_target:
                         continue
-                    if click_target in failed_click_positions:
+                    if failed_click_counts.get(click_target, 0) >= max_clicks_per_target:
                         continue
                     clicked_entry = entry
                     click_result = device_action.click_with_metrics(
@@ -1150,15 +1177,18 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
                     break
 
         if clicked:
-            sleep(0.2)
-            still_open, _, verification_checks = detect_inventory_screen(threshold=threshold)
-            closed = not still_open
+            closed, verification_checks = _wait_for_inventory_screen_to_close(
+                max_wait_seconds=1.2,
+                poll_seconds=0.2,
+                threshold=threshold,
+            )
             if closed:
                 break
             # This click position didn't close the screen — record it so we
-            # try a different location on the next poll.
+            # can retry later without getting stuck on one target forever.
             if clicked_entry and clicked_entry.get("click_target"):
-                failed_click_positions.add(clicked_entry["click_target"])
+                target = clicked_entry["click_target"]
+                failed_click_counts[target] = failed_click_counts.get(target, 0) + 1
             if not detect_controls_exhausted:
                 detect_controls_exhausted = True
                 info("[TB_INV] detect_inventory_controls close click did not close screen; falling back to template loop.")
@@ -1174,6 +1204,8 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
         "attempts": attempts,
         "polls": polls,
         "verification_checks": verification_checks,
+        "saw_inventory_screen": bool(saw_inventory_screen),
+        "inventory_screen_reappeared_poll": inventory_screen_reappeared_poll,
         "timing_total": round(_time() - t_total, 3),
     }
 
@@ -2513,14 +2545,19 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
         shop_open, _, verify_checks = detect_shop_screen(threshold=0.75)
         flow["timing_verify_shop_open"] = round(_time() - verify_open_t0, 3)
         flow["verification_checks"] = verify_checks
-        if shop_open:
+        if flow["dismiss_after_sale_closed"]:
+            flow["closed"] = True
+        else:
+            # Always make one explicit close attempt after purchase if the
+            # exchange-complete dialog did not verify closed. The caller must
+            # not proceed into the main action with the shop overlay still up.
             close_t0 = _time()
             close_result = close_trackblazer_shop()
             flow["timing_close"] = round(_time() - close_t0, 3)
             flow["close_result"] = close_result
             flow["closed"] = bool(close_result.get("closed"))
-        else:
-            flow["closed"] = True
+            if not flow["closed"] and not shop_open:
+                flow["closed"] = True
 
         if not flow["closed"] and not flow["reason"]:
             flow["reason"] = "failed_to_close_shop"
@@ -2615,6 +2652,7 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
         "followup_confirm_clicked": False,
         "followup_confirm_click_result": None,
         "verification_checks": [],
+        "graceful_noop": False,
     }
     result = {
         "requested_items": list(requested_items),
@@ -2753,6 +2791,20 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     if not flow["reason"]:
                         flow["reason"] = "confirm_use_not_available"
                     warning(f"{log_tag} Confirm-use did not resolve to available after increments.")
+                    close_t0 = _time()
+                    close_result = close_training_items_inventory()
+                    flow["timing_close"] = round(_time() - close_t0, 3)
+                    flow["close_result"] = close_result
+                    flow["closed"] = bool(close_result.get("closed"))
+                    flow["graceful_noop"] = bool(flow["closed"])
+                    if flow["graceful_noop"]:
+                        flow["reason"] = "confirm_use_not_available_closed_inventory"
+                        info(
+                            f"{log_tag} Confirm-use unavailable after increments; "
+                            "closed inventory and continuing without item use."
+                        )
+                    elif not flow["reason"]:
+                        flow["reason"] = "failed_to_close_inventory"
 
             # -- Commit phase: mode-dependent --
             if commit_clicks and flow["confirm_use_available"]:
@@ -2812,19 +2864,26 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                             flow["timing_post_animation_close"] = round(_time() - close_poll_t0, 3)
                             flow["post_animation_close_clicked"] = bool(post_use_close.get("clicked"))
                             flow["post_animation_close_result"] = post_use_close
+                            flow["post_animation_close_saw_inventory"] = bool(post_use_close.get("saw_inventory_screen"))
                             sleep(0.2)
 
                     verify_t0 = _time()
                     still_open, _, verify_checks = detect_inventory_screen()
                     flow["timing_verify_closed"] = round(_time() - verify_t0, 3)
                     flow["verification_checks"] = verify_checks
-                    flow["closed"] = not still_open
-                    if not flow["closed"]:
+                    flow["closed"] = bool((flow.get("post_animation_close_result") or {}).get("closed"))
+                    if not flow["closed"] and still_open:
                         close_t0 = _time()
                         close_result = close_training_items_inventory()
                         flow["timing_close"] = round(_time() - close_t0, 3)
                         flow["close_result"] = close_result
                         flow["closed"] = bool(close_result.get("closed"))
+                    elif (
+                        not flow["closed"]
+                        and flow.get("post_animation_close_saw_inventory")
+                        and not still_open
+                    ):
+                        flow["closed"] = True
                     if not flow["closed"] and not flow["reason"]:
                         flow["reason"] = "inventory_did_not_close_after_confirm"
 
@@ -2878,12 +2937,17 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     or flow.get("followup_confirm_clicked")
                 )
                 flow["success"] = (
-                    items_actionable
-                    and flow["increments_clicked"] == increments_requested
-                    and flow["confirm_use_available"]
-                    and flow["confirm_use_clicked"]
-                    and followup_ok
-                    and flow["closed"]
+                    (
+                        flow.get("graceful_noop")
+                        or (
+                            items_actionable
+                            and flow["increments_clicked"] == increments_requested
+                            and flow["confirm_use_available"]
+                            and flow["confirm_use_clicked"]
+                            and followup_ok
+                            and flow["closed"]
+                        )
+                    )
                 )
         else:
             result["trackblazer_inventory_controls"] = controls

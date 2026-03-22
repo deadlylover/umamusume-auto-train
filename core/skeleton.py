@@ -1,4 +1,5 @@
 import copy
+from collections import Counter
 import pyautogui
 import os
 import cv2
@@ -125,6 +126,63 @@ def _restore_cached_trackblazer_inventory(state_obj):
 def _invalidate_trackblazer_inventory_cache():
   global _cached_trackblazer_inventory
   _cached_trackblazer_inventory = None
+
+
+def _apply_trackblazer_used_items_to_state(state_obj, used_item_keys):
+  if not isinstance(state_obj, dict):
+    return
+  item_counts = Counter(str(item_key) for item_key in (used_item_keys or []) if item_key)
+  if not item_counts:
+    return
+
+  inventory = copy.deepcopy(state_obj.get("trackblazer_inventory") or {})
+  summary = copy.deepcopy(state_obj.get("trackblazer_inventory_summary") or {})
+  held_quantities = dict(summary.get("held_quantities") or {})
+  items_detected = list(summary.get("items_detected") or [])
+  actionable_items = list(summary.get("actionable_items") or [])
+  by_category = copy.deepcopy(summary.get("by_category") or {})
+
+  for item_key, used_count in item_counts.items():
+    entry = dict(inventory.get(item_key) or {})
+    prior_quantity = entry.get("held_quantity")
+    if prior_quantity is None:
+      prior_quantity = held_quantities.get(item_key)
+    try:
+      prior_quantity = int(prior_quantity)
+    except (TypeError, ValueError):
+      prior_quantity = None
+
+    remaining_quantity = max(0, prior_quantity - used_count) if prior_quantity is not None else 0
+    if entry:
+      if remaining_quantity > 0:
+        entry["held_quantity"] = remaining_quantity
+      else:
+        entry["held_quantity"] = 0
+        entry["detected"] = False
+        entry["increment_target"] = None
+        entry["increment_match"] = None
+      inventory[item_key] = entry
+
+    if remaining_quantity > 0:
+      held_quantities[item_key] = remaining_quantity
+    else:
+      held_quantities.pop(item_key, None)
+      items_detected = [name for name in items_detected if name != item_key]
+      actionable_items = [name for name in actionable_items if name != item_key]
+      for category_name, category_items in list(by_category.items()):
+        filtered_items = [name for name in category_items if name != item_key]
+        if filtered_items:
+          by_category[category_name] = filtered_items
+        else:
+          by_category.pop(category_name, None)
+
+  summary["held_quantities"] = held_quantities
+  summary["items_detected"] = items_detected
+  summary["actionable_items"] = actionable_items
+  summary["by_category"] = by_category
+  summary["total_detected"] = len(items_detected)
+  state_obj["trackblazer_inventory"] = inventory
+  state_obj["trackblazer_inventory_summary"] = summary
 
 
 def _copy_trackblazer_inventory_snapshot(state_obj, prefix="trackblazer_inventory_pre_shop"):
@@ -1194,6 +1252,10 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
       "reason": flow.get("reason") or "trackblazer_pre_action_items_failed",
     }
 
+  if not flow.get("graceful_noop"):
+    _apply_trackblazer_used_items_to_state(state_obj, item_keys)
+    _cache_trackblazer_inventory(state_obj)
+
   if action.get("trackblazer_reassess_after_item_use"):
     return {
       "status": "reassess",
@@ -1758,6 +1820,20 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     pre_run_hook()
   shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
   if shop_purchase_result.get("status") == "failed":
+    shop_result = shop_purchase_result.get("result") or {}
+    shop_flow = (shop_result.get("trackblazer_shop_flow") or {})
+    if shop_flow.get("entered") and not shop_flow.get("closed"):
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text=f"Shop purchase left shop open: {shop_purchase_result.get('reason')}",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return "failed"
     # Shop purchase failure is non-fatal — log it and continue with the
     # main action.  The shop close is handled by the finally block in
     # execute_trackblazer_shop_purchases so we should be back at the lobby.

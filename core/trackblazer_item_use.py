@@ -778,6 +778,7 @@ def _evaluate_item_candidates(effective_items, context, inventory, held_quantiti
       "key": item_key,
       "name": item.get("display_name") or _humanize_item_key(item_key),
       "priority": item.get("effective_priority"),
+      "effective_sort_score": item.get("effective_sort_score", 0),
       "usage_group": item.get("usage_group"),
       "target_training": item.get("target_training"),
       "held_quantity": held_quantity,
@@ -793,6 +794,7 @@ def _evaluate_item_candidates(effective_items, context, inventory, held_quantiti
   candidates.sort(
     key=lambda entry: (
       _safe_int(entry.get("candidate_score"), 0),
+      _safe_int(entry.get("effective_sort_score"), 0),
       _PRIORITY_INDEX.get(str(entry.get("priority") or "MED"), 1),
       _safe_int(entry.get("held_quantity"), 0),
       entry.get("name", ""),

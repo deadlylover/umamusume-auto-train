@@ -366,6 +366,35 @@ def collect_main_state():
   #??? minimum_mood_junior_year = constants.MOOD_LIST.index(config.MINIMUM_MOOD_JUNIOR_YEAR)
 
   state_object = CleanDefaultDict()
+  if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    try:
+      from scenarios.trackblazer import detect_inventory_screen, close_training_items_inventory
+
+      inventory_open, inventory_entry, inventory_checks = detect_inventory_screen()
+      if inventory_open:
+        info("[TB_INV] Inventory screen detected during main-state collection; attempting recovery close.")
+        close_result = close_training_items_inventory()
+        state_object["trackblazer_inventory_recovery"] = {
+          "trigger": "collect_main_state",
+          "inventory_open": True,
+          "detected_by": inventory_entry,
+          "detection_checks": inventory_checks,
+          "close_result": close_result,
+          "closed": bool(close_result.get("closed")),
+        }
+        if not close_result.get("closed"):
+          warning("[TB_INV] Recovery close did not dismiss the inventory before lobby state collection.")
+      else:
+        state_object["trackblazer_inventory_recovery"] = {
+          "trigger": "collect_main_state",
+          "inventory_open": False,
+          "detected_by": inventory_entry,
+          "detection_checks": inventory_checks,
+          "closed": False,
+        }
+    except Exception as exc:
+      warning(f"[TB_INV] Inventory recovery check failed during main-state collection: {exc}")
+
   state_object["current_mood"] = get_mood()
   debug("Mood collection done.")
   mood_index = constants.MOOD_LIST.index(state_object["current_mood"])
