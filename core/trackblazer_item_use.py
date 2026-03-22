@@ -53,6 +53,17 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
 _FAILSAFE_ITEM_KEYS = _ENERGY_ITEM_KEYS + ("good_luck_charm",)
+ITEM_USE_BEHAVIOR_MODES = (
+  "blast_now",
+  "conserve_for_summer",
+  "custom",
+)
+_DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
+  "burst_commit_mode": "blast_now",
+  "promote_charm_training_to_burst": True,
+  "enforce_future_summer_good_luck_charm_reserve": False,
+  "future_summer_good_luck_charm_min_reserve": 0,
+}
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
     "usage_group": "training_burst",
@@ -217,6 +228,52 @@ def _safe_float(value, default=0.0):
     return default
 
 
+def _safe_bool(value, default=False):
+  if isinstance(value, bool):
+    return value
+  if isinstance(value, str):
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+      return True
+    if normalized in ("0", "false", "no", "off"):
+      return False
+  return bool(default)
+
+
+def _normalize_training_behavior_settings(raw_settings=None):
+  raw_settings = raw_settings if isinstance(raw_settings, dict) else {}
+  mode = str(raw_settings.get("burst_commit_mode", _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["burst_commit_mode"]) or "").strip()
+  if mode not in ITEM_USE_BEHAVIOR_MODES:
+    mode = _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["burst_commit_mode"]
+  return {
+    "burst_commit_mode": mode,
+    "promote_charm_training_to_burst": _safe_bool(
+      raw_settings.get("promote_charm_training_to_burst"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["promote_charm_training_to_burst"],
+    ),
+    "enforce_future_summer_good_luck_charm_reserve": _safe_bool(
+      raw_settings.get("enforce_future_summer_good_luck_charm_reserve"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["enforce_future_summer_good_luck_charm_reserve"],
+    ),
+    "future_summer_good_luck_charm_min_reserve": _normalize_quantity(
+      raw_settings.get("future_summer_good_luck_charm_min_reserve"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["future_summer_good_luck_charm_min_reserve"],
+    ),
+  }
+
+
+def get_default_training_behavior_settings():
+  return deepcopy(_DEFAULT_TRAINING_BEHAVIOR_SETTINGS)
+
+
+def get_training_behavior_settings(policy=None):
+  policy = normalize_item_use_policy(policy)
+  return deepcopy(
+    (policy.get("settings") or {}).get("training_behavior")
+    or _DEFAULT_TRAINING_BEHAVIOR_SETTINGS
+  )
+
+
 def _infer_target_training(item_key):
   if item_key.startswith("speed_"):
     return "spd"
@@ -341,6 +398,9 @@ def get_default_item_use_policy():
     }
   return {
     "version": 1,
+    "settings": {
+      "training_behavior": get_default_training_behavior_settings(),
+    },
     "items": items,
   }
 
@@ -349,6 +409,7 @@ def normalize_item_use_policy(raw_policy=None):
   base_policy = get_default_item_use_policy()
   raw_policy = raw_policy if isinstance(raw_policy, dict) else {}
   raw_items = raw_policy.get("items") if isinstance(raw_policy.get("items"), dict) else {}
+  raw_settings = raw_policy.get("settings") if isinstance(raw_policy.get("settings"), dict) else {}
 
   normalized_items = {}
   for entry in get_item_use_catalog():
@@ -369,6 +430,9 @@ def normalize_item_use_policy(raw_policy=None):
 
   return {
     "version": int(raw_policy.get("version", base_policy["version"])),
+    "settings": {
+      "training_behavior": _normalize_training_behavior_settings(raw_settings.get("training_behavior")),
+    },
     "items": normalized_items,
   }
 
@@ -642,11 +706,13 @@ def _usage_context(state_obj, action):
       or total_stat_gain >= 35
     )
   )
+  failure_bypassed_by_items = bool(training_data.get("failure_bypassed_by_items"))
+  info(f"[ITEM_USE_CTX] failure_bypassed={failure_bypassed_by_items} failure_rate={failure_rate} committed_value={committed_value_training} score={score_value} matching={matching_stat_gain} total={total_stat_gain} training_data_keys={list(training_data.keys())[:10]}")
   commit_training_after_items = bool(
     strong_burst_training
     or (
       getattr(action, "func", None) == "do_training"
-      and failure_rate <= 0
+      and (failure_rate <= 0 or failure_bypassed_by_items)
       and (
         (
           timeline_label in _SUMMER_WINDOWS
@@ -742,11 +808,26 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   # Prevent energy item stacking. Prefer the smallest restore value that still
   # helps; mild overcapping from a single item is acceptable, but once the
   # deficit is covered don't pile on more items.
+  #
+  # Good Luck Charm sets failure to 0% for the turn, making energy items
+  # redundant — the only reason to use energy at low HP is to reduce fail
+  # chance, and charm already handles that.
+  charm_planned = any(
+    entry.get("key") == "good_luck_charm" and entry.get("use_now")
+    for entry in candidates
+  )
   energy_level = _safe_int(context.get("energy_level"), 0)
   max_energy = _safe_int(context.get("max_energy"), energy_level)
   energy_candidates = [entry for entry in candidates if entry.get("usage_group") == "energy"]
   kept_energy = []
-  if energy_candidates:
+  if energy_candidates and charm_planned:
+    non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
+    for entry in energy_candidates:
+      entry.pop("candidate_score", None)
+      entry["reason"] = "charm zeroes failure; energy item not needed this turn"
+      deferred.append(entry)
+    candidates = non_energy
+  elif energy_candidates:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
     energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
     planned_energy_restored = 0
@@ -790,6 +871,19 @@ def _should_commit_after_energy(context, kept_energy):
   if context.get("failure_bypassed_by_items"):
     return True
   return False
+
+
+def _should_commit_after_charm(policy, context, candidates):
+  if context.get("commit_training_after_items"):
+    return False
+  if context.get("action_func") != "do_training":
+    return False
+  training_behavior = get_training_behavior_settings(policy)
+  if training_behavior.get("burst_commit_mode") != "blast_now":
+    return False
+  if not training_behavior.get("promote_charm_training_to_burst"):
+    return False
+  return any(entry.get("key") == "good_luck_charm" for entry in (candidates or []))
 
 
 def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
@@ -1010,9 +1104,10 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   held_quantities = dict(inventory_summary.get("held_quantities") or {})
+  normalized_policy = normalize_item_use_policy(policy)
   context = _usage_context(state_obj, action)
   effective_items = get_effective_item_use_items(
-    policy=policy,
+    policy=normalized_policy,
     year=state_obj.get("year"),
     turn=state_obj.get("turn"),
   )
@@ -1030,7 +1125,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
   )
   candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
 
-  if _should_commit_after_energy(context, kept_energy):
+  if _should_commit_after_energy(context, kept_energy) or _should_commit_after_charm(normalized_policy, context, candidates):
     context = {
       **context,
       "commit_training_after_items": True,

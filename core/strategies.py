@@ -159,7 +159,15 @@ class Strategy:
     if not action.func:
       debug("No action selected, using priority fallback")
       current_energy = state["energy_level"]
-      if current_energy > config.NEVER_REST_ENERGY:
+      # Trackblazer: item planner handles energy/fail management, so skip
+      # energy-based rest gating and just pick the best available action.
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        if len(action.available_actions) == 0:
+          action.func = "no_action"
+        else:
+          action.func = action.available_actions[0]
+        debug(f"Trackblazer priority fallback: {action.func}")
+      elif current_energy > config.NEVER_REST_ENERGY:
         remove_if_exists(action.available_actions, ["do_recreation", "do_infirmary", "do_rest"])
         if len(action.available_actions) == 0:
           action.func = "no_action"
@@ -173,8 +181,7 @@ class Strategy:
         else:
           action.func = "do_rest"
           action.available_actions.append("do_rest")
-        
-        debug("Low energy: forcing rest")
+          debug("Low energy: forcing rest")
       elif current_energy < 50:
         action.available_actions.append("do_rest")
         if len(action.available_actions) == 0:
@@ -306,6 +313,22 @@ class Strategy:
 
     return action
 
+  @staticmethod
+  def _get_min_score(action):
+    min_scores = action.get("min_scores") or {}
+    training_function = action.get("training_function")
+    min_score_entry = None
+    if training_function and training_function in min_scores:
+      min_score_entry = min_scores.get(training_function)
+    elif hasattr(min_scores, "values"):
+      min_score_entry = next(iter(min_scores.values()), None)
+    if isinstance(min_score_entry, (tuple, list)) and min_score_entry:
+      try:
+        return float(min_score_entry[0])
+      except (TypeError, ValueError):
+        pass
+    return 0.0
+
   def evaluate_training_alternatives(self, state, action):
     """
     Evaluate alternative actions when training score is poor.
@@ -313,16 +336,39 @@ class Strategy:
     TODO: Add friend recreations to this evaluation
     """
     if (
-      action.get("scheduled_race", False) or 
+      action.get("scheduled_race", False) or
       action.get("race_mission_available", False) and config.DO_MISSION_RACES_IF_POSSIBLE
       ):
       action.func = "do_race"
       info(f"[ENERGY_MGMT] → SCHEDULED RACE: {action['race_name']} found, skipping training alternatives")
       return action
-    debug(f"Evaluating training alternatives: {action}")
+
     training_score = action["training_data"]["score_tuple"][0]
-    current_mood = state["current_mood"]
     available_trainings = action["available_trainings"]
+
+    # Trackblazer: the item planner handles energy/fail management via
+    # charm, vita, ankle weights etc.  Skip the legacy energy-based rest
+    # gating entirely — just keep training.  Only the rival-race fallback
+    # (mediocre training → try a race instead) is relevant here.
+    if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+      min_score = self._get_min_score(action)
+      if (
+        training_score <= min_score
+        and state["turn"] != "Race Day"
+      ):
+        action["_rival_fallback_func"] = "do_training"
+        action["_rival_fallback_training_name"] = action.get("training_name")
+        action["_rival_fallback_training_data"] = action.get("training_data")
+        action.func = "do_race"
+        action["race_name"] = "any"
+        action["prefer_rival_race"] = True
+        info(f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) at or below minimum ({min_score}), attempting rival race for bonus stats")
+      else:
+        debug(f"[ENERGY_MGMT] → TRACKBLAZER: Keeping training (score {training_score}), item planner handles energy/fail")
+      return action
+
+    debug(f"Evaluating training alternatives: {action}")
+    current_mood = state["current_mood"]
     current_energy = state["energy_level"]
     max_energy = state["max_energy"]
 
@@ -335,12 +381,10 @@ class Strategy:
 
     # Check if we should evaluate alternatives based on wit training score ratio
     wit_score_ratio = 0.0
+    min_score = self._get_min_score(action)
 
     if "wit" in available_trainings:
       wit_score = available_trainings["wit"]["score_tuple"][0]
-      min_score = 1
-      if action.get("min_scores"):
-        min_score = action["min_scores"][0][0]
       # Ensure training_score is at least 1 to prevent division by very small numbers
       effective_training_score = max(training_score, 1)
       effective_wit_score = max(wit_score, 1)
@@ -354,7 +398,7 @@ class Strategy:
 
       # Effective energy value is limited by how much we can actually hold
       wit_energy_value = min(wit_raw_energy, energy_headroom)
-      
+
       dates_near_energy_gain = [
         "Junior Year Early Dec",
         "Junior Year Late Dec",
@@ -401,7 +445,7 @@ class Strategy:
           action.func = "do_recreation"
         else:
           action.func = "do_rest"
-        info(f"[ENERGY_MGMT] → RESTING: Low energy ({current_energy} < {config.WIT_TRAINING_MIN_ENERGY}) and score ({training_score}) is below minimum ({min_score})")
+          info(f"[ENERGY_MGMT] → RESTING: Low energy ({current_energy} < {config.WIT_TRAINING_MIN_ENERGY}) and score ({training_score}) is below minimum ({min_score})")
       else:
         if action["training_name"] == "wit":
           info(f"[ENERGY_MGMT] → WIT TRAINING (strategy kept): energy={current_energy} (min={config.WIT_TRAINING_MIN_ENERGY}), wit_energy_value={wit_energy_value} (need>=9 for auto-switch), score_ratio={wit_score_ratio:.2f} (threshold={config.WIT_TRAINING_SCORE_RATIO_THRESHOLD}), training_score={training_score} (min={min_score}), rainbows={rainbow_count}. REASON: no guard triggered.")
@@ -412,32 +456,14 @@ class Strategy:
         action.func = "do_recreation"
       else:
         action.func = "do_rest"
-      info(f"[ENERGY_MGMT] → Failsafe for failure chance not being read correctly. Resting because energy is too low. Please report this if it happens to you.")
+        info(f"[ENERGY_MGMT] → Failsafe for failure chance not being read correctly. Resting because energy is too low. Please report this if it happens to you.")
     elif len(available_trainings) == 0:
       if state["date_event_available"]:
         action.func = "do_recreation"
       else:
         action.func = "do_rest"
     else:
-      # Trackblazer rival-race fallback: when training is mediocre, prefer
-      # racing for the bonus stats that rival races provide.
-      if (
-        constants.SCENARIO_NAME in ("mant", "trackblazer")
-        and action.func == "do_training"
-        and training_score <= min_score
-        and state["turn"] != "Race Day"
-      ):
-        # Save the original training decision so we can revert if no rival
-        # race is found during scouting.
-        action["_rival_fallback_func"] = "do_training"
-        action["_rival_fallback_training_name"] = action.get("training_name")
-        action["_rival_fallback_training_data"] = action.get("training_data")
-        action.func = "do_race"
-        action["race_name"] = "any"
-        action["prefer_rival_race"] = True
-        info(f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) at or below minimum ({min_score}), attempting rival race for bonus stats")
-      else:
-        debug(f"[ENERGY_MGMT] → ACTION ACCEPTED: No alternatives needed")
+      debug(f"[ENERGY_MGMT] → ACTION ACCEPTED: No alternatives needed")
     return action
 
   # helper functions

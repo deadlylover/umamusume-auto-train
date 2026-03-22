@@ -65,19 +65,30 @@ Draft config shape (in `config.json` under a `trackblazer` or `item_strategy` ke
 ```json
 {
   "trackblazer": {
-    "item_use": {
-      "enabled": false,
-      "cleat_hammer": {
-        "tsc_reserve_count": 3,
-        "spend_on_g1": true,
-        "tier_priority": ["master_cleat_hammer", "artisan_cleat_hammer"]
+    "item_use_policy": {
+      "version": 1,
+      "settings": {
+        "training_behavior": {
+          "burst_commit_mode": "blast_now",
+          "promote_charm_training_to_burst": true,
+          "enforce_future_summer_good_luck_charm_reserve": false,
+          "future_summer_good_luck_charm_min_reserve": 0
+        }
+      },
+      "items": {
+        "good_luck_charm": {
+          "priority": "MED",
+          "reserve_quantity": 0
+        }
       }
     }
   }
 }
 ```
 
-`enabled: false` by default until tested. Tier priority list is ordered best → worst; new tiers slot in when assets are collected.
+Current live behavior uses `promote_charm_training_to_burst=true` with `burst_commit_mode="blast_now"`.
+
+The future-summer reserve fields are scaffolding for later policy work. They are intentionally surfaced in config/operator console now so conservation rules can be added without another schema change.
 
 ---
 

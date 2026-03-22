@@ -2094,6 +2094,47 @@ def career_lobby(dry_run_turn=False):
           non_match_count = 0
           continue
 
+      # Trackblazer: scheduled race popup (appears after turn tick-over).
+      # The in-game agenda fires this overlay before we reach the normal lobby.
+      # Flow: detect banner → click Race on popup → race list opens with the
+      # scheduled race pre-selected → click Race confirm button directly
+      # (skip rival scouting / aptitude checks).
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+        sched_race_banner = device_action.match_template(
+          "assets/trackblazer/lobby_scheduled_race_available.png",
+          screenshot,
+          threshold=0.8,
+          template_scaling=_inv_scale,
+        )
+        if sched_race_banner:
+          info("[TB_LOBBY] Scheduled race popup detected — clicking Race button.")
+          race_btn = device_action.match_template(
+            "assets/trackblazer/lobby_scheduled_race_race.png",
+            screenshot,
+            threshold=0.7,
+            template_scaling=_inv_scale,
+          )
+          if race_btn:
+            x, y, w, h = race_btn[0]
+            device_action.click(target=(x + w // 2, y + h // 2), text="Clicked scheduled race Race button on popup.")
+            info("[TB_LOBBY] Clicked Race on popup — waiting for race list.")
+            sleep(1.5)
+            # Race list is now open with the scheduled race pre-selected.
+            # Click the Race confirm button directly (no rival/aptitude scouting).
+            if device_action.locate_and_click("assets/buttons/race_btn.png", min_search_time=get_secs(3)):
+              info("[TB_LOBBY] Confirmed scheduled race from race list.")
+            else:
+              # Fallback: try BlueStacks variant.
+              if device_action.locate_and_click("assets/buttons/bluestacks/race_btn.png", min_search_time=get_secs(2)):
+                info("[TB_LOBBY] Confirmed scheduled race (BlueStacks button).")
+              else:
+                warning("[TB_LOBBY] Could not find Race confirm button on race list.")
+          else:
+            warning("[TB_LOBBY] Scheduled race banner found but Race button not matched.")
+          non_match_count = 0
+          continue
+
       if not _has_stable_career_screen(stable_anchor_counts):
         update_startup_scan_snapshot(
           message="Stable career screen not confirmed yet.",

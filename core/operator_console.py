@@ -10,8 +10,11 @@ from PIL import Image, ImageTk
 import core.bot as bot
 import core.config as config
 from core.trackblazer_item_use import (
+  ITEM_USE_BEHAVIOR_MODES,
   get_default_item_use_policy,
+  get_default_training_behavior_settings,
   get_effective_item_use_items,
+  get_training_behavior_settings,
   normalize_item_use_policy,
 )
 from core.trackblazer_shop import (
@@ -117,6 +120,7 @@ class OperatorConsole:
     self._shop_policy_body = None
     self._item_policy_window = None
     self._item_policy_rows = []
+    self._item_policy_setting_vars = {}
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
@@ -1987,6 +1991,7 @@ class OperatorConsole:
   def _clear_trackblazer_item_policy_window(self):
     self._item_policy_window = None
     self._item_policy_rows = []
+    self._item_policy_setting_vars = {}
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
@@ -2130,6 +2135,85 @@ class OperatorConsole:
     for child in self._item_policy_body.winfo_children():
       child.destroy()
     self._item_policy_rows = []
+    self._item_policy_setting_vars = {}
+
+    normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    training_behavior = get_training_behavior_settings(normalized_policy)
+
+    settings_frame = tk.Frame(self._item_policy_body, bg="#101418")
+    settings_frame.grid(row=0, column=0, columnspan=8, sticky="ew", padx=1, pady=(0, 8))
+    for column in range(8):
+      settings_frame.columnconfigure(column, weight=1 if column in (1, 3, 5, 7) else 0)
+
+    burst_mode_var = tk.StringVar(value=training_behavior.get("burst_commit_mode", "blast_now"))
+    promote_charm_var = tk.BooleanVar(value=bool(training_behavior.get("promote_charm_training_to_burst", True)))
+    future_reserve_enabled_var = tk.BooleanVar(value=bool(training_behavior.get("enforce_future_summer_good_luck_charm_reserve", False)))
+    future_reserve_var = tk.StringVar(value=str(training_behavior.get("future_summer_good_luck_charm_min_reserve", 0)))
+    self._item_policy_setting_vars = {
+      "burst_commit_mode_var": burst_mode_var,
+      "promote_charm_var": promote_charm_var,
+      "future_reserve_enabled_var": future_reserve_enabled_var,
+      "future_reserve_var": future_reserve_var,
+    }
+
+    tk.Label(
+      settings_frame,
+      text="Training behavior",
+      fg="white",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+    mode_menu = tk.OptionMenu(settings_frame, burst_mode_var, *ITEM_USE_BEHAVIOR_MODES)
+    mode_menu.configure(width=18, bg="#192028", fg="white", highlightthickness=0, activebackground="#1f6feb")
+    mode_menu["menu"].configure(bg="#192028", fg="white")
+    mode_menu.grid(row=0, column=1, sticky="w")
+    tk.Checkbutton(
+      settings_frame,
+      text="Charm promotes burst turn",
+      variable=promote_charm_var,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).grid(row=0, column=2, columnspan=2, sticky="w", padx=(12, 0))
+    tk.Checkbutton(
+      settings_frame,
+      text="Enforce future summer charm reserve",
+      variable=future_reserve_enabled_var,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
+    tk.Label(
+      settings_frame,
+      text="Min charm reserve",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=0, column=6, sticky="e", padx=(12, 4))
+    tk.Spinbox(
+      settings_frame,
+      from_=0,
+      to=9,
+      width=4,
+      textvariable=future_reserve_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=0, column=7, sticky="w")
+    tk.Label(
+      settings_frame,
+      text="`blast_now` is live now. Future-summer reserve controls are scaffolded in config/operator console for later policy work.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=860,
+    ).grid(row=1, column=0, columnspan=8, sticky="ew", pady=(6, 0))
 
     headers = [
       ("#", 0),
@@ -2141,6 +2225,7 @@ class OperatorConsole:
       ("Asset", 6),
       ("Notes", 7),
     ]
+    header_row = 2
     for text, column in headers:
       tk.Label(
         self._item_policy_body,
@@ -2151,9 +2236,8 @@ class OperatorConsole:
         pady=4,
         anchor="w",
         font=("Helvetica", 10, "bold"),
-      ).grid(row=0, column=column, sticky="ew", padx=1, pady=(0, 4))
+      ).grid(row=header_row, column=column, sticky="ew", padx=1, pady=(0, 4))
 
-    normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
     items = get_effective_item_use_items(
       policy=normalized_policy,
       year=context.get("year"),
@@ -2161,6 +2245,7 @@ class OperatorConsole:
     )
 
     for row_index, item in enumerate(items, start=1):
+      grid_row = row_index + header_row
       row_bg = "#192028" if row_index % 2 else "#151b22"
       key = item["key"]
       item_policy = normalized_policy["items"].get(key, {})
@@ -2174,7 +2259,7 @@ class OperatorConsole:
         }
       )
 
-      tk.Label(self._item_policy_body, text=str(row_index), fg="#d6dde5", bg=row_bg, padx=6, pady=3).grid(row=row_index, column=0, sticky="nsew", padx=1, pady=1)
+      tk.Label(self._item_policy_body, text=str(row_index), fg="#d6dde5", bg=row_bg, padx=6, pady=3).grid(row=grid_row, column=0, sticky="nsew", padx=1, pady=1)
       tk.Label(
         self._item_policy_body,
         text=f"{item['display_name']}\n{item['category']}",
@@ -2184,7 +2269,7 @@ class OperatorConsole:
         anchor="w",
         padx=6,
         pady=3,
-      ).grid(row=row_index, column=1, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=1, sticky="nsew", padx=1, pady=1)
       rule_parts = [item.get("usage_group") or "utility"]
       if item.get("target_training"):
         rule_parts.append(item["target_training"])
@@ -2197,11 +2282,11 @@ class OperatorConsole:
         anchor="w",
         padx=6,
         pady=3,
-      ).grid(row=row_index, column=2, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=2, sticky="nsew", padx=1, pady=1)
       priority_menu = tk.OptionMenu(self._item_policy_body, priority_var, *PRIORITY_LEVELS)
       priority_menu.configure(width=7, bg=row_bg, fg="white", highlightthickness=0, activebackground="#1f6feb")
       priority_menu["menu"].configure(bg="#192028", fg="white")
-      priority_menu.grid(row=row_index, column=3, sticky="nsew", padx=1, pady=1)
+      priority_menu.grid(row=grid_row, column=3, sticky="nsew", padx=1, pady=1)
       tk.Spinbox(
         self._item_policy_body,
         from_=0,
@@ -2211,7 +2296,7 @@ class OperatorConsole:
         bg=row_bg,
         fg="white",
         buttonbackground="#2d333b",
-      ).grid(row=row_index, column=4, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=4, sticky="nsew", padx=1, pady=1)
       effective_label = item["effective_priority"]
       if item.get("active_timing_rules"):
         effective_label = f"{effective_label} *"
@@ -2222,7 +2307,7 @@ class OperatorConsole:
         bg=row_bg,
         padx=6,
         pady=3,
-      ).grid(row=row_index, column=5, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=5, sticky="nsew", padx=1, pady=1)
       tk.Label(
         self._item_policy_body,
         text="collected" if item.get("asset_collected") else "missing",
@@ -2230,7 +2315,7 @@ class OperatorConsole:
         bg=row_bg,
         padx=6,
         pady=3,
-      ).grid(row=row_index, column=6, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=6, sticky="nsew", padx=1, pady=1)
       notes_parts = [item.get("effect", ""), item.get("policy_notes", "")]
       notes_parts.extend(
         rule.get("note") for rule in (item.get("active_timing_rules") or []) if rule.get("note")
@@ -2245,7 +2330,7 @@ class OperatorConsole:
         wraplength=520,
         padx=6,
         pady=3,
-      ).grid(row=row_index, column=7, sticky="nsew", padx=1, pady=1)
+      ).grid(row=grid_row, column=7, sticky="nsew", padx=1, pady=1)
 
     for column in range(8):
       weight = 1 if column in (1, 7) else 0
@@ -2314,8 +2399,34 @@ class OperatorConsole:
       item_policy["reserve_quantity"] = reserve_quantity
       items[key] = item_policy
 
+    setting_vars = self._item_policy_setting_vars or {}
+    training_behavior = get_default_training_behavior_settings()
+    if setting_vars:
+      training_behavior["burst_commit_mode"] = str(
+        setting_vars.get("burst_commit_mode_var").get() or training_behavior["burst_commit_mode"]
+      ).strip() or training_behavior["burst_commit_mode"]
+      if training_behavior["burst_commit_mode"] not in ITEM_USE_BEHAVIOR_MODES:
+        training_behavior["burst_commit_mode"] = get_default_training_behavior_settings()["burst_commit_mode"]
+      training_behavior["promote_charm_training_to_burst"] = bool(
+        setting_vars.get("promote_charm_var").get()
+      )
+      training_behavior["enforce_future_summer_good_luck_charm_reserve"] = bool(
+        setting_vars.get("future_reserve_enabled_var").get()
+      )
+      reserve_text = str(setting_vars.get("future_reserve_var").get() or "").strip()
+      try:
+        training_behavior["future_summer_good_luck_charm_min_reserve"] = max(0, int(reserve_text))
+      except ValueError:
+        training_behavior["future_summer_good_luck_charm_min_reserve"] = current_policy.get("settings", {}).get("training_behavior", {}).get(
+          "future_summer_good_luck_charm_min_reserve",
+          training_behavior["future_summer_good_luck_charm_min_reserve"],
+        )
+
     policy = {
       "version": int(current_policy.get("version", 1)),
+      "settings": {
+        "training_behavior": training_behavior,
+      },
       "items": items,
     }
     if not self._persist_config_value("trackblazer.item_use_policy", policy):

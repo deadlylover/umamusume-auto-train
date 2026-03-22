@@ -133,6 +133,11 @@ def main():
     publish_runtime_state()
     error(f"Error in main thread: {error_message}")
   finally:
+    with bot.bot_lock:
+      current_thread = threading.current_thread()
+      if bot.bot_thread is current_thread:
+        bot.bot_thread = None
+      bot.is_bot_running = False
     bot.cancel_review_wait()
     bot.set_phase("idle", status="idle", message="Bot stopped.")
     publish_runtime_state()

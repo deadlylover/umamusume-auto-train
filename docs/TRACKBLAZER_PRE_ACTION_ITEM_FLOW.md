@@ -134,6 +134,13 @@ The second pass can propose burst items, but only if the rerolled training quali
 
 At the moment, that gate is stricter than "a rainbow exists".
 
+Current live policy also allows `Good-Luck Charm` to promote a risky but valuable training into a committed burst turn. In practice that means:
+
+- if the selected training is valuable enough to spend `Good-Luck Charm`
+- and charm-to-burst promotion is enabled in item-use training behavior
+
+then the follow-up item pass is allowed to add matching ankle weights and other burst items for that same committed training.
+
 ### Current multi-whistle gate
 
 The current whistle gate does not require burst-enabling items such as:
