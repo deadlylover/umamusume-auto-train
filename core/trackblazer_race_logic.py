@@ -22,6 +22,7 @@ _SUMMER_WINDOWS = (
 )
 
 _WEAK_TRAINING_THRESHOLD = 35
+_MIN_RACE_ENERGY_PCT = 0.05
 _GRADE_ORDER = ("G1", "G2", "G3", "OP", "Pre-OP")
 
 
@@ -153,15 +154,30 @@ def _decision(**kwargs):
   return decision
 
 
+def _has_race_energy(state_obj):
+  """Check if energy is above the minimum threshold to race."""
+  energy_level = state_obj.get("energy_level", 0) or 0
+  max_energy = state_obj.get("max_energy", 1) or 1
+  energy_pct = energy_level / max_energy if max_energy > 0 else 0
+  return energy_pct >= _MIN_RACE_ENERGY_PCT, energy_pct
+
+
 def evaluate_trackblazer_race(state_obj, action):
-  """Return a structured Trackblazer race-vs-training decision payload."""
+  """Return a structured Trackblazer race-vs-training decision payload.
+
+  The race schedule (``constants.RACES``) is only used for mandatory checks:
+  Race Day and G1 dates.  For all other race decisions the rival indicator
+  on the race button (visible on the lobby screen) is the source of truth.
+  If the rival button is present, the scout will open the race list and
+  verify aptitude inside.
+  """
   year = state_obj.get("year", "")
   turn = state_obj.get("turn", "")
   summer = _is_summer(year)
   training_stats = _total_stat_gain(action)
   race_info = _detect_race_options(state_obj)
-  rival_indicator = _detect_rival_available()
-  race_available = bool(race_info.get("race_count"))
+
+  # --- Mandatory races (schedule-driven, no rival check needed) -----------
 
   if turn == "Race Day":
     return _decision(
@@ -174,7 +190,7 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_target="any",
       race_name=None,
       race_available=True,
-      rival_indicator=rival_indicator,
+      rival_indicator=False,
       race_tier_info=race_info,
     )
 
@@ -189,14 +205,18 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_target="G1",
       race_name=race_info.get("best_g1_race_name"),
       race_available=True,
-      rival_indicator=rival_indicator,
+      rival_indicator=False,
       race_tier_info=race_info,
     )
 
-  if not race_available:
+  # --- Optional races (rival indicator on screen is the source of truth) --
+
+  rival_indicator = _detect_rival_available()
+
+  if not rival_indicator:
     return _decision(
       should_race=False,
-      reason="No optional race is available on this date after aptitude filtering",
+      reason="No rival race indicator on screen",
       training_total_stats=training_stats,
       is_summer=summer,
       g1_forced=False,
@@ -204,31 +224,52 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_target=None,
       race_name=None,
       race_available=False,
-      rival_indicator=rival_indicator,
+      rival_indicator=False,
       race_tier_info=race_info,
     )
 
+  # Rival indicator is present.  Gate on minimum energy.
+  has_energy, energy_pct = _has_race_energy(state_obj)
+  if not has_energy:
+    return _decision(
+      should_race=False,
+      reason=(
+        f"Rival indicator on screen but energy too low to race "
+        f"({energy_pct:.0%} < {_MIN_RACE_ENERGY_PCT:.0%})"
+      ),
+      training_total_stats=training_stats,
+      is_summer=summer,
+      g1_forced=False,
+      prefer_rival_race=False,
+      race_tier_target=None,
+      race_name=None,
+      race_available=False,
+      rival_indicator=True,
+      race_tier_info=race_info,
+    )
+
+  # Summer: only race the rival if training is weak.
   if summer:
-    if rival_indicator and training_stats is not None and training_stats < _WEAK_TRAINING_THRESHOLD:
+    if training_stats is not None and training_stats < _WEAK_TRAINING_THRESHOLD:
       return _decision(
         should_race=True,
         reason=(
-          f"Summer usually prefers training, but rival is present and training is weak "
-          f"({training_stats} < {_WEAK_TRAINING_THRESHOLD})"
+          f"Summer, but rival present and training is weak "
+          f"({training_stats} < {_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
         ),
         training_total_stats=training_stats,
         is_summer=True,
         g1_forced=False,
         prefer_rival_race=True,
-        race_tier_target="G2_G3",
-        race_name=race_info.get("best_g2_g3_race_name") or race_info.get("best_any_race_name"),
+        race_tier_target="any",
+        race_name=None,
         race_available=True,
         rival_indicator=True,
         race_tier_info=race_info,
       )
     return _decision(
       should_race=False,
-      reason="Summer window: prefer training over optional races",
+      reason="Summer window: prefer training over rival race",
       training_total_stats=training_stats,
       is_summer=True,
       g1_forced=False,
@@ -236,52 +277,40 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_target=None,
       race_name=None,
       race_available=True,
-      rival_indicator=rival_indicator,
+      rival_indicator=True,
       race_tier_info=race_info,
     )
 
+  # Non-summer: weak training → rival race is better than a bad turn.
   if training_stats is not None and training_stats < _WEAK_TRAINING_THRESHOLD:
-    target_name = race_info.get("best_g2_g3_race_name") or race_info.get("best_any_race_name")
-    target_tier = "G2_G3" if race_info.get("best_g2_g3_race_name") else "any"
-    return _decision(
-      should_race=bool(target_name),
-      reason=f"Weak training ({training_stats} < {_WEAK_TRAINING_THRESHOLD}); prefer racing",
-      training_total_stats=training_stats,
-      is_summer=False,
-      g1_forced=False,
-      prefer_rival_race=bool(rival_indicator),
-      race_tier_target=target_tier,
-      race_name=target_name,
-      race_available=True,
-      rival_indicator=rival_indicator,
-      race_tier_info=race_info,
-    )
-
-  if rival_indicator:
     return _decision(
       should_race=True,
-      reason="Rival race indicator present; bias toward racing for bonus stats",
+      reason=(
+        f"Rival present with weak training ({training_stats} < "
+        f"{_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
+      ),
       training_total_stats=training_stats,
       is_summer=False,
       g1_forced=False,
       prefer_rival_race=True,
       race_tier_target="any",
-      race_name=race_info.get("best_any_race_name"),
+      race_name=None,
       race_available=True,
       rival_indicator=True,
       race_tier_info=race_info,
     )
 
+  # Non-summer, adequate training, rival present — still worth racing.
   return _decision(
-    should_race=False,
-    reason="Training is adequate and there is no forcing race signal",
+    should_race=True,
+    reason="Rival race indicator present; bias toward racing for bonus stats",
     training_total_stats=training_stats,
     is_summer=False,
     g1_forced=False,
-    prefer_rival_race=False,
-    race_tier_target=None,
+    prefer_rival_race=True,
+    race_tier_target="any",
     race_name=None,
     race_available=True,
-    rival_indicator=rival_indicator,
+    rival_indicator=True,
     race_tier_info=race_info,
   )

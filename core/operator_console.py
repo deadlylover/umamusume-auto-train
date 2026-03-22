@@ -866,6 +866,10 @@ class OperatorConsole:
       f" | backend {state_summary.get('control_backend') or '-'}"
     )
 
+    stats_line = self._format_current_stats_line(state_summary)
+    if stats_line:
+      lines.append(stats_line)
+
     criteria = state_summary.get("criteria")
     if criteria:
       lines.append(f"Criteria: {criteria}")
@@ -914,6 +918,20 @@ class OperatorConsole:
       lines.append(f"Notes: {notes}")
 
     return "\n".join(lines).strip()
+
+  def _format_current_stats_line(self, state_summary):
+    current_stats = state_summary.get("current_stats")
+    if not current_stats or not isinstance(current_stats, dict):
+      return None
+    stat_order = ["spd", "sta", "pwr", "guts", "wit", "sp"]
+    parts = []
+    for key in stat_order:
+      val = current_stats.get(key)
+      if val is None or val == -1:
+        parts.append(f"{key}:?")
+      else:
+        parts.append(f"{key}:{val}")
+    return "Stats: " + " | ".join(parts)
 
   def _format_selected_action_line(self, selected_action):
     action_name = selected_action.get("func") or "-"

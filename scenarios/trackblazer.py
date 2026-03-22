@@ -3424,8 +3424,8 @@ _RIVAL_BUTTON_INDICATOR_THRESHOLD = 0.75
 # Summer and normal lobby have different assets.
 _RIVAL_BUTTON_INDICATORS = [
     constants.TRACKBLAZER_RACE_TEMPLATES["summer_rival_race_button"],
-    # TODO: add normal lobby variant once captured
-    # constants.TRACKBLAZER_RACE_TEMPLATES["rival_race_button"],
+    constants.TRACKBLAZER_RACE_TEMPLATES["rival_race_button"],
+    constants.TRACKBLAZER_RACE_TEMPLATES["rival_race_button_vs"],
 ]
 
 

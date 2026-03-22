@@ -94,12 +94,37 @@ TRACKBLAZER_INVENTORY_STATE_KEYS = (
   "trackblazer_inventory_flow",
 )
 last_trackblazer_shop_refresh_turn = None
+_cached_trackblazer_inventory = None
 
 
 def _canonicalize_scenario_name(name):
   if not name:
     return ""
   return SCENARIO_NAME_ALIASES.get(name, name)
+
+
+def _cache_trackblazer_inventory(state_obj):
+  """Store the current inventory state keys so we can skip re-scanning next turn."""
+  global _cached_trackblazer_inventory
+  if not isinstance(state_obj, dict):
+    return
+  _cached_trackblazer_inventory = {
+    key: copy.deepcopy(state_obj.get(key)) for key in TRACKBLAZER_INVENTORY_STATE_KEYS
+  }
+
+
+def _restore_cached_trackblazer_inventory(state_obj):
+  """Apply cached inventory data to state_obj. Returns True if cache was available."""
+  if not _cached_trackblazer_inventory or not isinstance(state_obj, dict):
+    return False
+  for key, value in _cached_trackblazer_inventory.items():
+    state_obj[key] = copy.deepcopy(value)
+  return True
+
+
+def _invalidate_trackblazer_inventory_cache():
+  global _cached_trackblazer_inventory
+  _cached_trackblazer_inventory = None
 
 
 def _copy_trackblazer_inventory_snapshot(state_obj, prefix="trackblazer_inventory_pre_shop"):
@@ -1088,6 +1113,7 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
   state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
   state_obj["trackblazer_inventory_flow"] = flow
+  _cache_trackblazer_inventory(state_obj)
 
   if commit_mode == "dry_run":
     return {
@@ -1146,6 +1172,7 @@ def _run_trackblazer_shop_purchases(state_obj, action):
     trigger="post_shop_purchase_refresh",
   )
   state_obj.update(refreshed_state)
+  _cache_trackblazer_inventory(state_obj)
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
   return {
     "status": "executed",
@@ -1224,6 +1251,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "energy_level": state_obj.get("energy_level"),
     "max_energy": state_obj.get("max_energy"),
     "current_mood": state_obj.get("current_mood"),
+    "current_stats": state_obj.get("current_stats"),
     "date_event_available": state_obj.get("date_event_available"),
     "race_mission_available": state_obj.get("race_mission_available"),
     "aptitudes": state_obj.get("aptitudes"),
@@ -1799,11 +1827,12 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       return "execute"
 
 def career_lobby(dry_run_turn=False):
-  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn
+  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory
   non_match_count = 0
   action_count=0
   scenario_detection_attempts = 0
   last_trackblazer_shop_refresh_turn = None
+  _cached_trackblazer_inventory = None
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
   constants.SCENARIO_NAME = ""
@@ -2001,11 +2030,21 @@ def career_lobby(dry_run_turn=False):
 
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
         execution_intent = bot.get_execution_intent()
-        update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
-        state_obj = collect_trackblazer_inventory(
-          state_obj,
-          allow_open_non_execute=execution_intent != "execute",
-        )
+        if _restore_cached_trackblazer_inventory(state_obj):
+          info("[TB_INV] Using cached inventory (no changes since last scan).")
+          state_obj["trackblazer_inventory_flow"] = {
+            "trigger": "cached",
+            "cached": True,
+            "skipped": True,
+            "reason": "using_cached_inventory",
+          }
+        else:
+          update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
+          state_obj = collect_trackblazer_inventory(
+            state_obj,
+            allow_open_non_execute=execution_intent != "execute",
+          )
+          _cache_trackblazer_inventory(state_obj)
         _copy_trackblazer_inventory_snapshot(state_obj)
         if execution_intent == "check_only":
           current_trackblazer_turn = _trackblazer_turn_key(state_obj)
@@ -2026,6 +2065,7 @@ def career_lobby(dry_run_turn=False):
                 allow_open_non_execute=True,
                 trigger="post_shop_refresh",
               )
+              _cache_trackblazer_inventory(state_obj)
               last_trackblazer_shop_refresh_turn = current_trackblazer_turn
           else:
             info(

@@ -277,6 +277,8 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "rival_racer": "assets/trackblazer/rival_racer.png",
   "race_recommend_2_aptitudes": "assets/trackblazer/race_recommend_2_aptitudes.png",
   "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
+  "rival_race_button": "assets/trackblazer/rival_race_button.png",
+  "rival_race_button_vs": "assets/trackblazer/rival_race_button_VS.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",
   "race_g3": "assets/trackblazer/race_g3.png",

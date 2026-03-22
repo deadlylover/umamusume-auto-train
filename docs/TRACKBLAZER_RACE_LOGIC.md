@@ -20,22 +20,28 @@ The implementation is intentionally heuristic. It is meant to be easy to iterate
 
 ## Current Policy
 
+The race schedule (`constants.RACES`) is only used for **mandatory** checks (Race Day, G1). For all optional race decisions, the **rival indicator on the race button** (visible on the lobby screen via `SCREEN_BOTTOM_BBOX`) is the source of truth. The pre-filtered schedule is not consulted for optional races because it can produce false negatives — the rival button on screen is ground truth for whether a race is actually available this turn.
+
 Current rule order:
 
-1. `Race Day` is mandatory.
-2. If a `G1` is available on the current date, race it.
-3. If no optional race is available after aptitude filtering, train.
-4. In summer, prefer training over optional races.
-5. Summer exception: if a rival indicator is present and the chosen training is weak, race.
-6. Outside summer, if the chosen training has less than `35` total projected stat gain, prefer racing.
-7. Outside summer, if a rival indicator is present, bias toward racing.
-8. Otherwise, keep training.
+1. `Race Day` is mandatory (schedule-driven).
+2. If a `G1` is available on the current date, race it (schedule-driven).
+3. Check for the rival race indicator on the lobby race button (`SCREEN_BOTTOM_BBOX`).
+4. If no rival indicator is visible, do not race.
+5. If rival is visible but energy < 5%, do not race.
+6. In summer with rival visible: only race if training is weak (< `35` total stats).
+7. Outside summer with rival visible and weak training: race.
+8. Outside summer with rival visible and adequate training: still race (rival bonus stats).
+
+The rival indicator check is deferred until after mandatory checks, so Race Day / G1 dates skip the screenshot cost.
+
+When the gate says race, `scout_rival_race()` opens the actual race list and verifies 2-aptitude match inside. If no suitable rival is found, the existing fallback in skeleton.py reverts to the training action — so backing out is safe.
 
 Working policy notes from live testing:
 
 - rival racers appear to be graded races only (`G1` / `G2` / `G3`)
 - if a rival race is present and aptitudes are acceptable, it is usually safe to prioritize clicking the rival entry
-- on a dead turn with bad trainings, fall back to any aptitude-valid race even if there is no rival race
+- the `summer_rival_race_button` asset works for both summer and normal lobby (same icon, slightly repositioned)
 
 ## Current Signals
 
@@ -45,10 +51,15 @@ The current scaffold uses only signals that already exist or are cheap to read:
   - summed from `action["training_data"]["stat_gains"]`
 - `summer window`
   - based on the timeline label
-- `race availability / G1 / G2 / G3`
+- `energy level`
+  - from `state_obj["energy_level"]` / `state_obj["max_energy"]`; minimum 5% to race
+- `mandatory race schedule (G1 / Race Day only)`
   - inferred from `constants.RACES` for the current date after aptitude filtering
+  - only used for Race Day and G1 mandatory checks; not used as a gate for optional races
 - `rival indicator`
   - cheap lobby pre-check from `scenarios/trackblazer.py::check_rival_race_indicator()`
+  - scans `SCREEN_BOTTOM_BBOX` for the VS icon on the race button
+  - this is the primary signal for optional race availability
 
 This does not yet read the live race list to determine race grade from UI assets.
 
@@ -134,16 +145,15 @@ The payload is attached to the selected action as `trackblazer_race_decision`.
 
 ## Current Limitations
 
-### Race tier detection is schedule-based, not UI-based
+### Race tier detection is schedule-based for mandatory races only
 
-The helper currently uses `constants.RACES` for the current date, not OCR/template matching on the live race list.
+The schedule (`constants.RACES`) is only consulted for Race Day and G1 mandatory checks. Optional race availability is determined by the rival indicator on screen, not the schedule.
 
-That means:
+Remaining schedule-based limitations:
 
-- it knows which races should be available for the date after aptitude filtering
-- it can choose a best scheduled `G1` or `G2/G3` by fan gain
-- it does not yet verify the grade icon from the race list screen itself
-- it currently assumes schedule-backed grade availability rather than proving from the live row that a rival race is graded
+- G1 detection still relies on the schedule, not a live UI grade icon
+- the helper does not yet verify race grade from the race list screen itself
+- it does not yet prove from the live row that a rival race is graded (relies on the scout finding 2-aptitude match)
 
 ## Race List Recognition Notes
 
@@ -210,6 +220,7 @@ Twinkle Star Climax should eventually become its own branch or sub-phase. Right 
 Current tuneables live at module scope in `core/trackblazer_race_logic.py`:
 
 - `_WEAK_TRAINING_THRESHOLD = 35`
+- `_MIN_RACE_ENERGY_PCT = 0.05` (5% minimum energy to consider racing)
 - `_SUMMER_WINDOWS`
 
 If live testing shows we need more operator-level tuning, move these into config later. For now, keeping them local makes iteration faster.
@@ -256,11 +267,11 @@ Add the following in roughly this order:
 
 While testing:
 
-- summer should mostly stay training-first
-- weak training outside summer should bias toward optional races
-- `G1` should be treated as forced
-- rival detection should only be a positive bias, not the sole source of truth for race quality
-- on dead turns, any aptitude-valid race is an acceptable fallback even without rival value
+- summer should mostly stay training-first (rival only overrides when training is weak)
+- weak training outside summer should bias toward rival race when available
+- `G1` should be treated as forced (schedule-driven)
+- rival indicator on the lobby race button is the sole signal for optional race availability
+- the scout verifies aptitude inside the race list; if no 2-aptitude rival found, fallback to training
 
 If a live run looks wrong, capture:
 
