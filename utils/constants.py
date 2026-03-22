@@ -137,6 +137,12 @@ MANT_CRITERIA_REGION = CRITERIA_REGION
 CURRENT_STATS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (120, 723, -122, -315))
 CURRENT_STATS_REGION = convert_xyxy_to_xywh(CURRENT_STATS_BBOX)
 
+MANT_CURRENT_STATS_BBOX = CURRENT_STATS_BBOX
+MANT_CURRENT_STATS_REGION = CURRENT_STATS_REGION
+
+MANT_LOBBY_SKILL_PTS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (650, 723, -20, -315))
+MANT_LOBBY_SKILL_PTS_REGION = convert_xyxy_to_xywh(MANT_LOBBY_SKILL_PTS_BBOX)
+
 RACE_INFO_TEXT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (135, 335, -140, -710))
 RACE_INFO_TEXT_REGION = convert_xyxy_to_xywh(RACE_INFO_TEXT_BBOX)
 
@@ -296,7 +302,13 @@ TRACKBLAZER_SHOP_UI_TEMPLATES = {
   "shop_item_purchased": "assets/trackblazer/shop_item_purchased.png",
   "shop_select_unchecked_grey": "assets/trackblazer/shop_select_unchecked_grey.png",
   "inventory_use_training_items": "assets/trackblazer/inventory_use_training_items.png",
+  "inventory_increment_greyed": "assets/trackblazer/inventory_incremeny_greyed.png",
 }
+
+# Trackblazer lobby buff icon — visible when a megaphone or similar buff is active.
+TRACKBLAZER_LOBBY_BUFF_ICON = "assets/trackblazer/lobby_buff_active.png"
+# Region covering the top-left area of the game window where buff icons appear.
+TRACKBLAZER_LOBBY_BUFF_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 50, -670, -930))
 
 # Trackblazer item use flow UI templates.
 TRACKBLAZER_ITEM_USE_TEMPLATES = {
@@ -649,6 +661,10 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_CRITERIA_REGION",
   "CURRENT_STATS_BBOX",
   "CURRENT_STATS_REGION",
+  "MANT_CURRENT_STATS_BBOX",
+  "MANT_CURRENT_STATS_REGION",
+  "MANT_LOBBY_SKILL_PTS_BBOX",
+  "MANT_LOBBY_SKILL_PTS_REGION",
   "RACE_INFO_TEXT_BBOX",
   "RACE_INFO_TEXT_REGION",
   "RACE_LIST_BOX_BBOX",

@@ -1208,6 +1208,48 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   }
 
 
+_LOBBY_ANCHOR_TEMPLATES = (
+  "assets/buttons/training_btn.png",
+  "assets/buttons/rest_btn.png",
+  "assets/buttons/rest_summer_btn.png",
+  "assets/buttons/recreation_btn.png",
+  "assets/buttons/races_btn.png",
+)
+
+
+def _wait_for_lobby_after_item_use(state_obj, action, max_wait=5.0, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  """Brief poll for a lobby bottom-bar button after pre-action item use.
+
+  If the inventory close was slow or the game lingered on an overlay, the
+  lobby buttons won't be visible yet.  Poll up to *max_wait* seconds,
+  trying a back/close click once if nothing appears quickly.
+  """
+  import time as _time_mod
+
+  deadline = _time_mod.time() + max_wait
+  recovery_attempted = False
+  while _time_mod.time() < deadline:
+    if bot.stop_event.is_set():
+      return
+    device_action.flush_screenshot_cache()
+    screenshot = device_action.screenshot()
+    for tpl in _LOBBY_ANCHOR_TEMPLATES:
+      if device_action.match_template(tpl, screenshot, threshold=0.8, region_ltrb=constants.SCREEN_BOTTOM_BBOX):
+        info("[ITEM_USE] Lobby anchor confirmed after item use.")
+        return
+    if not recovery_attempted:
+      # One recovery attempt: try closing any leftover overlay.
+      info("[ITEM_USE] Lobby not yet visible after item use; attempting recovery close.")
+      for close_tpl in ("assets/buttons/close_btn.png", "assets/buttons/back_btn.png"):
+        if device_action.locate_and_click(close_tpl, min_search_time=get_secs(0.4), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
+          info(f"[ITEM_USE] Clicked {close_tpl} to dismiss leftover overlay.")
+          sleep(0.6)
+          break
+      recovery_attempted = True
+    sleep(0.4)
+  warning("[ITEM_USE] Timed out waiting for lobby after item use; proceeding anyway.")
+
+
 def _run_trackblazer_shop_purchases(state_obj, action):
   planned_buys = list(action.get("trackblazer_shop_buy_plan") or [])
   if not planned_buys:
@@ -1756,6 +1798,12 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       planned_clicks=planned_clicks,
     )
     return "reassess"
+  if pre_action_item_result.get("status") == "executed":
+    # After item use the inventory should be closed and we should be back
+    # on the career lobby.  If the close was slow or the game lingered on
+    # an overlay, the next action.run() would fail to find lobby buttons.
+    # Poll briefly for a lobby anchor before proceeding.
+    _wait_for_lobby_after_item_use(state_obj, action, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks)
   result = action.run()
   if not result:
     update_operator_snapshot(
@@ -2100,6 +2148,18 @@ def career_lobby(dry_run_turn=False):
       state_obj = collect_main_state()
 
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        # Detect lobby buff icon (megaphone/ankle weight effect active).
+        buff_match = device_action.locate(
+          constants.TRACKBLAZER_LOBBY_BUFF_ICON,
+          region_ltrb=constants.TRACKBLAZER_LOBBY_BUFF_BBOX,
+          confidence=0.7,
+          template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+        )
+        state_obj["trackblazer_buff_active"] = bool(buff_match)
+        state_obj["trackblazer_allow_buff_override"] = bot.get_trackblazer_allow_buff_override()
+        if buff_match:
+          info("[TB_BUFF] Lobby buff icon detected — a megaphone or similar effect is active.")
+
         execution_intent = bot.get_execution_intent()
         if _restore_cached_trackblazer_inventory(state_obj):
           info("[TB_INV] Using cached inventory (no changes since last scan).")

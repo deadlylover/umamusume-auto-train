@@ -691,6 +691,8 @@ def _usage_context(state_obj, action):
     "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
     "commit_training_after_items": commit_training_after_items,
     "is_tsc": timeline_label == "Finale Underway",
+    "trackblazer_buff_active": bool(state_obj.get("trackblazer_buff_active")),
+    "allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
   }
 
 
@@ -860,6 +862,15 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
   if usage_group == "training_burst":
     if context["action_func"] != "do_training":
       return None
+    # A megaphone buff is already active on the lobby screen. Only the
+    # Empowering Megaphone (60%) can override a weaker active buff; the
+    # Motivating (40%) and Coaching megaphones cannot override and their
+    # increment buttons will be greyed out in-game.
+    if context.get("trackblazer_buff_active"):
+      if not (context.get("allow_buff_override") and item_key == "empowering_megaphone"):
+        return {
+          "defer_reason": "megaphone buff already active; increment would be greyed out",
+        }
     if not context["commit_training_after_items"]:
       return {
         "defer_reason": "waiting for a committed burst training",
@@ -969,9 +980,13 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     if item_key == "good_luck_charm":
       if context["action_func"] != "do_training":
         return None
+      if context["failure_rate"] <= 5:
+        return {
+          "defer_reason": f"no fail risk (fail {context['failure_rate']}% <= 5%); charm would be greyed out",
+        }
       return {
         "candidate_score": 220 + priority_score + context["rainbow_count"] * 10,
-        "reason": "insurance item for a reviewed training turn",
+        "reason": f"insurance for training at {context['failure_rate']}% fail",
         "reserved_quantity": reserve_quantity,
         "use_now": True,
       } if context["high_value_training"] else None
@@ -1051,6 +1066,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "summer_reroll_target_name": context.get("summer_reroll_target_name"),
       "summer_reroll_target_failure": context.get("summer_reroll_target_failure"),
       "commit_training_after_items": context.get("commit_training_after_items"),
+      "trackblazer_buff_active": context.get("trackblazer_buff_active"),
     },
     "candidates": candidates[: max(0, int(limit))],
     "deferred": deferred[: max(0, int(limit))],

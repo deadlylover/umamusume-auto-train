@@ -62,6 +62,7 @@ trackblazer_use_items_enabled = False
 trackblazer_scoring_mode = "stat_focused"  # "legacy" = use timeline template, "stat_focused" = stat_weight_training
 trackblazer_bond_boost_enabled = True  # +10 score per blue/green friend on training (+15 on wit)
 trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive after this turn
+trackblazer_allow_buff_override = False  # allow 60% megaphone to override active 40% buff
 skill_dry_run_enabled = False
 
 
@@ -211,6 +212,18 @@ def set_trackblazer_bond_boost_enabled(enabled):
 def get_trackblazer_bond_boost_enabled():
   with runtime_lock:
     return trackblazer_bond_boost_enabled
+
+
+def set_trackblazer_allow_buff_override(enabled):
+  global trackblazer_allow_buff_override, runtime_updated_at
+  with runtime_lock:
+    trackblazer_allow_buff_override = bool(enabled)
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_allow_buff_override():
+  with runtime_lock:
+    return trackblazer_allow_buff_override
 
 
 def set_trackblazer_bond_boost_cutoff(cutoff):

@@ -307,15 +307,18 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_info=race_info,
     )
 
-  # Non-summer, adequate training, rival present — still worth racing.
+  # Non-summer, adequate training, rival present — prefer training.
   return _decision(
-    should_race=True,
-    reason="Rival race indicator present; bias toward racing for bonus stats",
+    should_race=False,
+    reason=(
+      f"Rival present but training is strong enough to skip "
+      f"({training_stats} >= {_WEAK_TRAINING_THRESHOLD})"
+    ),
     training_total_stats=training_stats,
     is_summer=False,
     g1_forced=False,
-    prefer_rival_race=True,
-    race_tier_target="any",
+    prefer_rival_race=False,
+    race_tier_target=None,
     race_name=None,
     race_available=True,
     rival_indicator=True,

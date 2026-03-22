@@ -359,6 +359,30 @@
     553,
     32
   ],
+  "MANT_CURRENT_STATS_BBOX": [
+    66,
+    1047,
+    624,
+    1081
+  ],
+  "MANT_CURRENT_STATS_REGION": [
+    66,
+    1047,
+    558,
+    34
+  ],
+  "MANT_LOBBY_SKILL_PTS_BBOX": [
+    641,
+    1053,
+    736,
+    1095
+  ],
+  "MANT_LOBBY_SKILL_PTS_REGION": [
+    641,
+    1053,
+    95,
+    42
+  ],
   "RACE_INFO_TEXT_BBOX": [
     183,
     201,
@@ -706,5 +730,11 @@
     366,
     264,
     228
+  ],
+  "TRACKBLAZER_LOBBY_BUFF_BBOX": [
+    13,
+    456,
+    109,
+    649
   ]
 }

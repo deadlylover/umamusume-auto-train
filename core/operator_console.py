@@ -232,7 +232,7 @@ class OperatorConsole:
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
-    tk.Button(primary_controls, text="Stat Weights", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
+    tk.Button(primary_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "execute"):
       tk.Radiobutton(
@@ -2373,9 +2373,9 @@ class OperatorConsole:
         pass
 
     window = tk.Toplevel(self._root)
-    window.title("Trackblazer Stat Weights")
+    window.title("Training Behaviour")
     window.configure(bg="#101418")
-    window.geometry("380x340")
+    window.geometry("400x380")
     window.resizable(False, False)
     window.bind(
       "<Destroy>",
@@ -2437,6 +2437,21 @@ class OperatorConsole:
     cutoff_menu["menu"].configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white")
     cutoff_menu.pack(side=tk.LEFT, padx=(4, 0))
 
+    buff_override_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    buff_override_frame.pack(fill=tk.X)
+    self._buff_override_var = tk.BooleanVar(value=bot.get_trackblazer_allow_buff_override())
+    tk.Checkbutton(
+      buff_override_frame,
+      text="Allow megaphone buff override (60% over 40%)",
+      variable=self._buff_override_var,
+      command=self._toggle_buff_override,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT)
+
     buttons = tk.Frame(window, bg="#101418", padx=8, pady=8)
     buttons.pack(fill=tk.X)
     tk.Button(buttons, text="Save", command=self._save_stat_weights).pack(side=tk.LEFT, padx=(0, 8))
@@ -2449,6 +2464,13 @@ class OperatorConsole:
     bot.set_trackblazer_bond_boost_enabled(enabled)
     label = "on" if enabled else "off"
     self._message_value.set(f"Bond boost: {label}.")
+    self.publish()
+
+  def _toggle_buff_override(self):
+    enabled = self._buff_override_var.get()
+    bot.set_trackblazer_allow_buff_override(enabled)
+    label = "on" if enabled else "off"
+    self._message_value.set(f"Megaphone buff override: {label}.")
     self.publish()
 
   def _set_bond_boost_cutoff(self, value):

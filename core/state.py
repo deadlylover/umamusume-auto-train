@@ -1205,20 +1205,36 @@ def is_number(text):
     return False
 
 def get_current_stats(turn, enable_debug=True):
-  stats_region = constants.CURRENT_STATS_REGION
+  if constants.SCENARIO_NAME == "trackblazer":
+    stats_region = constants.MANT_CURRENT_STATS_REGION
+  else:
+    stats_region = constants.CURRENT_STATS_REGION
   if turn == "Race Day":
     stats_region = (stats_region[0], stats_region[1] + 55, stats_region[2], stats_region[3])
   image = device_action.screenshot(region_xywh=stats_region)
 
   # Arcane numbers that divide the screen into boxes with ratios. Left, top, width, height
-  boxes = {
-    "spd":  (0.0636, 0, 0.10, 0.56),
-    "sta":  (0.238,  0, 0.10, 0.56),
-    "pwr":  (0.4036, 0, 0.10, 0.56),
-    "guts": (0.5746, 0, 0.10, 0.56),
-    "wit":  (0.7436, 0, 0.10, 0.56),
-    "sp":   (0.860,  0, 0.14, 0.98),
-  }
+  if constants.SCENARIO_NAME == "trackblazer":
+    # Trackblazer lobby has aptitude grade icons (D/C/E+) left of each number,
+    # shifting the number positions right compared to the base layout.
+    # Positions derived from blue-text column projection on the MANT region.
+    # SP is read from a separate MANT_LOBBY_SKILL_PTS_REGION.
+    boxes = {
+      "spd":  (0.036, 0, 0.118, 1.0),
+      "sta":  (0.255, 0, 0.117, 1.0),
+      "pwr":  (0.468, 0, 0.117, 1.0),
+      "guts": (0.683, 0, 0.115, 1.0),
+      "wit":  (0.896, 0, 0.100, 1.0),
+    }
+  else:
+    boxes = {
+      "spd":  (0.0636, 0, 0.10, 0.56),
+      "sta":  (0.238,  0, 0.10, 0.56),
+      "pwr":  (0.4036, 0, 0.10, 0.56),
+      "guts": (0.5746, 0, 0.10, 0.56),
+      "wit":  (0.7436, 0, 0.10, 0.56),
+      "sp":   (0.860,  0, 0.14, 0.98),
+    }
 
   h, w = image.shape[:2]
   current_stats={}
@@ -1247,6 +1263,17 @@ def get_current_stats(turn, enable_debug=True):
       final_stat_value = -1
     current_stats[key] = final_stat_value
   
+  # Read SP: Trackblazer has a separate Skill Pts box on the lobby
+  if constants.SCENARIO_NAME == "trackblazer" and "sp" not in current_stats:
+    sp_image = device_action.screenshot(region_xywh=constants.MANT_LOBBY_SKILL_PTS_REGION)
+    if enable_debug:
+      debug_window(sp_image, save_name="stat_sp_cropped")
+    sp_value = extract_text(sp_image, allowlist="0123456789")
+    if sp_value == "":
+      sp_image = enhance_image_for_ocr(sp_image, binarize_threshold=None)
+      sp_value = extract_text(sp_image, allowlist="0123456789")
+    current_stats["sp"] = int(sp_value) if is_number(sp_value) else -1
+
   info(f"Current stats: {current_stats}")
   return current_stats
 
