@@ -974,8 +974,20 @@ def _build_trackblazer_planned_actions(state_obj, action):
     shop_status = "skipped" if shop_flow.get("reason") else "failed"
 
   race_decision = action.get("trackblazer_race_decision") if hasattr(action, "get") else {}
+  rival_scout = action.get("rival_scout") if hasattr(action, "get") else {}
   race_planned = {}
+  race_check = {}
   race_entry_gate = {}
+  race_scout_planned = {}
+  rival_indicator_detected = state_obj.get("rival_indicator_detected")
+  if rival_indicator_detected is not None:
+    race_check = {
+      "phase": "collecting_race_state",
+      "sub_phase": "check_rival_indicator",
+      "method": "lobby_race_button_indicator",
+      "rival_indicator_detected": bool(rival_indicator_detected),
+      "scout_required": bool(hasattr(action, "get") and _action_func(action) == "do_race" and action.get("prefer_rival_race")),
+    }
   if isinstance(race_decision, dict) and race_decision:
     race_info = race_decision.get("race_tier_info") or {}
     race_planned = {
@@ -1010,10 +1022,29 @@ def _build_trackblazer_planned_actions(state_obj, action):
         "cancel_action": "return_to_lobby",
         "expected_branch": expected_branch,
       }
+  if isinstance(rival_scout, dict) and rival_scout:
+    race_scout_planned = {
+      "phase": "scouting_rival_race",
+      "executed": True,
+      "rival_found": rival_scout.get("rival_found"),
+      "selected_race_name": rival_scout.get("race_name"),
+      "selected_match_count": rival_scout.get("match_count"),
+      "selected_grade": rival_scout.get("grade"),
+      "reverted_to_training": bool(rival_scout.get("rival_found") is False),
+    }
+  elif hasattr(action, "get") and action.get("prefer_rival_race"):
+    race_scout_planned = {
+      "phase": "scouting_rival_race",
+      "executed": False,
+      "status": "pending_execute_commit",
+      "reason": "Full rival scout only runs after commit.",
+    }
 
   return {
+    "race_check": race_check,
     "race_decision": race_planned,
     "race_entry_gate": race_entry_gate,
+    "race_scout": race_scout_planned,
     "inventory_scan": {
       "status": inventory_status,
       "reason": pre_shop_inventory_flow.get("reason") or "",
@@ -1311,6 +1342,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       turn=state_obj.get("turn"),
       limit=10,
     )
+    state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
   selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,

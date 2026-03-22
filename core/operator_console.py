@@ -880,6 +880,10 @@ class OperatorConsole:
     if rival_line:
       lines.append(rival_line)
 
+    race_check_line = self._format_race_check_line(planned)
+    if race_check_line:
+      lines.append(race_check_line)
+
     race_gate_lines = self._format_trackblazer_race_lines(selected_action)
     if race_gate_lines:
       lines.extend(race_gate_lines)
@@ -980,10 +984,44 @@ class OperatorConsole:
         return "Race: rival race found"
       if rival_found is False:
         return "Race: rival race not found"
+    rival_indicator = state_summary.get("rival_indicator_detected")
+    if rival_indicator is True:
+      return "Race: rival indicator detected"
+    if rival_indicator is False:
+      return "Race: rival indicator not detected"
     mission = state_summary.get("race_mission_available")
     if mission is not None:
       return f"Race mission available: {mission}"
     return ""
+
+  def _format_race_check_line(self, planned):
+    race_check = planned.get("race_check") or {}
+    race_scout = planned.get("race_scout") or {}
+    if not race_check and not race_scout:
+      return ""
+
+    parts = []
+    if race_check:
+      indicator = race_check.get("rival_indicator_detected")
+      if indicator is True:
+        parts.append("indicator yes")
+      elif indicator is False:
+        parts.append("indicator no")
+      method = race_check.get("method")
+      if method:
+        parts.append(f"check {method}")
+    if race_scout:
+      if race_scout.get("executed"):
+        rival_found = race_scout.get("rival_found")
+        if rival_found is True:
+          parts.append("scout found")
+        elif rival_found is False:
+          parts.append("scout none")
+        else:
+          parts.append("scout ran")
+      else:
+        parts.append("scout deferred")
+    return f"Race Flow: {' | '.join(parts)}" if parts else ""
 
   def _format_trackblazer_race_lines(self, selected_action):
     decision = selected_action.get("trackblazer_race_decision") or {}
@@ -1171,8 +1209,10 @@ class OperatorConsole:
   def _format_planned_action_sections(self, planned):
     lines = []
     for section_name, payload in (
+      ("Race Check", planned.get("race_check") or {}),
       ("Race Decision", planned.get("race_decision") or {}),
       ("Race Entry Gate", planned.get("race_entry_gate") or {}),
+      ("Race Scout", planned.get("race_scout") or {}),
       ("Inventory Scan", planned.get("inventory_scan") or {}),
       ("Would Use", planned.get("would_use") or []),
       ("Deferred Use", planned.get("deferred_use") or []),

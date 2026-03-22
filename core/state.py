@@ -632,7 +632,7 @@ def collect_training_state(state_object, training_function_name):
           hold_active = True
         pyautogui_actions.moveTo(mouse_pos[0], mouse_pos[1], duration=0.12)
 
-      sleep(0.3)
+      sleep(0.5)
       device_action.flush_screenshot_cache()
 
       if args.debug is not None and args.debug > 11:
