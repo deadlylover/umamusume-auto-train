@@ -5,6 +5,7 @@
 import utils.constants as constants
 import core.config as config
 import re
+from time import time
 from utils.tools import sleep, get_secs
 import utils.device_action_wrapper as device_action
 from utils.log import error, info, warning, debug
@@ -91,6 +92,88 @@ event_progress_templates = [
   "assets/ui/pal_progress_5.png"
 ]
 
+_POST_RACE_LOBBY_TEMPLATES = (
+  "assets/ui/tazuna_hint.png",
+  "assets/buttons/training_btn.png",
+  "assets/buttons/rest_btn.png",
+  "assets/buttons/rest_summer_btn.png",
+  "assets/buttons/recreation_btn.png",
+  "assets/buttons/races_btn.png",
+  "assets/buttons/details_btn.png",
+  "assets/buttons/details_btn_2.png",
+)
+
+_POST_RACE_ADVANCE_TEMPLATES = (
+  ("next2", "assets/buttons/next2_btn.png", constants.GAME_WINDOW_BBOX),
+  ("next", "assets/buttons/next_btn.png", constants.GAME_WINDOW_BBOX),
+  ("close", "assets/buttons/close_btn.png", constants.GAME_WINDOW_BBOX),
+  ("retry", "assets/buttons/retry_btn.png", constants.GAME_WINDOW_BBOX),
+  ("view_results", "assets/buttons/view_results.png", constants.SCREEN_BOTTOM_BBOX),
+)
+
+
+def _is_back_in_career_lobby():
+  screenshot = device_action.screenshot()
+  matched = []
+  for template_path in _POST_RACE_LOBBY_TEMPLATES:
+    if device_action.match_template(template_path, screenshot, threshold=0.8):
+      matched.append(template_path)
+  return len(matched) > 0, matched
+
+
+def _wait_for_post_race_lobby(max_wait_seconds=45.0):
+  """Advance post-race screens until the stable lobby reappears.
+
+  Successful races can still chain into result taps, concert screens, and
+  random events before the normal lobby anchors come back. The race action
+  should not complete until we can see that stable lobby again.
+  """
+  from core.events import select_event
+
+  bot.set_phase("executing_action", status="active", message="Resolving post-race screens before returning to lobby.")
+  deadline = time() + max_wait_seconds
+  idle_loops = 0
+  while time() < deadline:
+    if bot.stop_event.is_set():
+      return False
+
+    device_action.flush_screenshot_cache()
+    in_lobby, anchors = _is_back_in_career_lobby()
+    if in_lobby:
+      bot.set_phase("executing_action", status="active", message="Stable lobby detected after race; finalizing turn.")
+      info(f"[RACE] Stable lobby detected after race. anchors={anchors}")
+      return True
+
+    if select_event():
+      info("[RACE] Advanced post-race event choice.")
+      idle_loops = 0
+      sleep(0.6)
+      continue
+
+    progressed = False
+    for label, template_path, region_ltrb in _POST_RACE_ADVANCE_TEMPLATES:
+      if device_action.locate_and_click(template_path, min_search_time=get_secs(0.4), region_ltrb=region_ltrb):
+        info(f"[RACE] Advanced post-race screen via {label}.")
+        progressed = True
+        idle_loops = 0
+        sleep(0.6)
+        break
+    if progressed:
+      continue
+
+    idle_loops += 1
+    if idle_loops >= 3:
+      info("[RACE] No post-race buttons matched; tapping safe space to advance overlays.")
+      device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
+      idle_loops = 0
+      sleep(0.6)
+      continue
+
+    sleep(0.5)
+
+  warning("[RACE] Timed out waiting to confirm the career lobby after race; finalizing turn anyway.")
+  return True
+
 def do_recreation(options=None):
   recreation_btn = device_action.locate("assets/buttons/recreation_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
 
@@ -159,8 +242,7 @@ def do_race(options=None):
   debug(f"do_race options after enter race: {options}")
   sleep(2)
 
-  start_race()
-  return True
+  return bool(start_race())
 
 
 def skip_turn(options=None):
@@ -296,7 +378,7 @@ def start_race():
     device_action.locate_and_click("assets/buttons/next_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX)
     device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
     if device_action.locate_and_click("assets/buttons/next2_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX):
-      return True
+      break
     sleep(0.25)
 
   if device_action.locate_and_click("assets/buttons/race_btn.png", min_search_time=get_secs(10), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
@@ -347,6 +429,8 @@ def start_race():
         break
 
     device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(5))
+
+  return _wait_for_post_race_lobby()
 
 def find_skip_buttons(min_search_time):
   skip_btn = device_action.locate("assets/buttons/skip_btn.png", min_search_time=min_search_time, region_ltrb=constants.SCREEN_BOTTOM_BBOX)

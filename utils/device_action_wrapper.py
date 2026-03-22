@@ -439,6 +439,8 @@ def locate(img_path : str, confidence=0.8, min_search_time=0, region_ltrb : tupl
   elapsed_time = time() - time_start
 
   while len(boxes) < 1 and elapsed_time < min_search_time:
+    if not bot.is_bot_running or bot.stop_event.is_set():
+      return None
     tries += 1
     flush_screenshot_cache()
     _screenshot = screenshot(region_ltrb=region_ltrb)

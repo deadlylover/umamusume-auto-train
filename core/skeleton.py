@@ -719,6 +719,40 @@ def _trackblazer_pre_action_items(action):
 def _planned_clicks_for_action(action):
   action_func = _action_func(action)
   pre_action_items = _trackblazer_pre_action_items(action)
+  shop_buy_plan = list(action.get("trackblazer_shop_buy_plan") or []) if hasattr(action, "get") else []
+
+  # Shop purchase clicks (run before main action).
+  shop_clicks = []
+  if shop_buy_plan:
+    shop_clicks.append(
+      _planned_click(
+        "Open shop for purchases",
+        note="Trackblazer shop buy step before the main action",
+      )
+    )
+    for entry in shop_buy_plan:
+      item_name = entry.get("display_name") or entry.get("name") or str(entry.get("key", "item")).replace("_", " ").title()
+      cost = entry.get("cost")
+      cost_label = f" ({cost} coins)" if cost else ""
+      shop_clicks.append(
+        _planned_click(
+          f"Buy {item_name}{cost_label}",
+          note=f"policy={entry.get('priority_label', '?')}; hold {entry.get('held', '?')}/{entry.get('cap', '?')}",
+        )
+      )
+    shop_clicks.append(
+      _planned_click(
+        "Confirm shop purchase",
+        note="Press confirm to finalize all selected shop items",
+      )
+    )
+    shop_clicks.append(
+      _planned_click(
+        "Close shop",
+        note="Return to lobby after purchase",
+      )
+    )
+
   pre_action_clicks = []
   if pre_action_items:
     pre_action_clicks.append(
@@ -760,10 +794,10 @@ def _planned_clicks_for_action(action):
         )
       )
   if not action_func:
-    return pre_action_clicks
+    return shop_clicks + pre_action_clicks
   if action_func == "do_training":
     training_name = _action_value(action, "training_name")
-    return pre_action_clicks + [
+    return shop_clicks + pre_action_clicks + [
       _planned_click("Open training menu", "assets/buttons/training_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         f"Select training: {training_name or 'unknown'}",
@@ -772,23 +806,23 @@ def _planned_clicks_for_action(action):
       ),
     ]
   if action_func == "do_rest":
-    return pre_action_clicks + [
+    return shop_clicks + pre_action_clicks + [
       _planned_click("Click rest button", "assets/buttons/rest_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer rest button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_recreation":
-    return pre_action_clicks + [
+    return shop_clicks + pre_action_clicks + [
       _planned_click("Open recreation menu", "assets/buttons/recreation_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer recreation button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_infirmary":
-    return pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
+    return shop_clicks + pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
   if action_func == "do_race":
     race_name = _action_value(action, "race_name")
     race_grade_target = _action_value(action, "race_grade_target")
     prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
-    clicks = pre_action_clicks + [
+    clicks = shop_clicks + pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         "Check consecutive-race warning",
@@ -825,7 +859,7 @@ def _planned_clicks_for_action(action):
     ]
     return clicks
   if action_func == "buy_skill":
-    return pre_action_clicks + [
+    return shop_clicks + pre_action_clicks + [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR and template scan only"),
       _planned_click("Confirm selected skills", "assets/buttons/confirm_btn.png"),
@@ -1650,17 +1684,22 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     pre_run_hook()
   shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
   if shop_purchase_result.get("status") == "failed":
+    # Shop purchase failure is non-fatal — log it and continue with the
+    # main action.  The shop close is handled by the finally block in
+    # execute_trackblazer_shop_purchases so we should be back at the lobby.
+    warning(
+      f"[TB_SHOP] Shop purchase failed: {shop_purchase_result.get('reason')}. "
+      "Continuing with main action."
+    )
     update_operator_snapshot(
       state_obj,
       action,
-      phase="recovering",
-      status="error",
-      error_text=f"Trackblazer shop purchase failed: {shop_purchase_result.get('reason')}",
+      phase="executing_action",
+      message=f"Shop purchase failed ({shop_purchase_result.get('reason')}); proceeding with {action.func}.",
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
-    return "failed"
   pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
   if pre_action_item_result.get("status") == "failed":
     update_operator_snapshot(
@@ -2234,6 +2273,23 @@ def career_lobby(dry_run_turn=False):
         message="Training scan complete. Preparing pre-training decision.",
       )
 
+      # Collect race state for Trackblazer: checks the rival indicator on
+      # the race button (cheap screenshot check, no game interaction).
+      # The full race decision is deferred until after strategy.decide()
+      # populates training data. The expensive rival scout is deferred
+      # to execution time (pre_run_hook).
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        update_operator_snapshot(phase="collecting_race_state", message="Checking race indicators.")
+        from scenarios.trackblazer import check_rival_race_indicator
+        rival_indicator = check_rival_race_indicator()
+        state_obj["rival_indicator_detected"] = rival_indicator
+        update_operator_snapshot(
+          state_obj, action,
+          phase="collecting_race_state",
+          message=f"Rival indicator: {'detected' if rival_indicator else 'not detected'}",
+          sub_phase="check_rival_indicator",
+        )
+
       # Review skill buying separately so OCR and planned clicks can be inspected.
       skill_result = maybe_review_skill_purchase(state_obj, action_count)
       if skill_result in ("failed", "previewed"):
@@ -2246,22 +2302,14 @@ def career_lobby(dry_run_turn=False):
       action = strategy.decide(state_obj, action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
 
-      # Trackblazer race-vs-training gate: evaluate whether a race is
-      # preferable to the strategy's default action. This replaces the
-      # older rival-only fallback with a broader heuristic that covers
-      # G1 forcing, summer bias, weak-training bias, and rival bonus.
+      # Trackblazer race-vs-training gate: evaluate race-vs-training using the
+      # rival indicator collected earlier (no game interaction here).  The
+      # expensive rival scout is deferred to execution time (pre_run_hook).
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
-        update_operator_snapshot(
-          state_obj, action,
-          phase="evaluating_strategy",
-          message="Evaluating Trackblazer race decision.",
-          sub_phase="evaluate_trackblazer_race",
-          reasoning_notes="Applying Trackblazer race-vs-training gate.",
-        )
         race_decision = evaluate_trackblazer_race(state_obj, action)
         action["trackblazer_race_decision"] = race_decision
 
-        if race_decision["should_race"] and action.func != "do_race":
+        if race_decision.get("should_race") and action.func != "do_race":
           # Save fallback in case rival scout fails and we need to revert.
           action["_rival_fallback_func"] = action.func
           action["_rival_fallback_training_name"] = action.get("training_name")
@@ -2269,7 +2317,7 @@ def career_lobby(dry_run_turn=False):
           action.func = "do_race"
           action["race_name"] = race_decision.get("race_name") or "any"
           action["race_grade_target"] = race_decision.get("race_tier_target")
-          if race_decision["prefer_rival_race"]:
+          if race_decision.get("prefer_rival_race"):
             action["prefer_rival_race"] = True
           info(f"[TB_RACE] Overriding to race: {race_decision['reason']}")
           update_operator_snapshot(
@@ -2284,13 +2332,13 @@ def career_lobby(dry_run_turn=False):
               f"training_total={race_decision.get('training_total_stats')}"
             ),
           )
-        elif race_decision["should_race"] and action.func == "do_race":
+        elif race_decision.get("should_race") and action.func == "do_race":
           if race_decision.get("race_name") and action.get("race_name") in (None, "", "any"):
             action["race_name"] = race_decision["race_name"]
           if race_decision.get("race_tier_target") and not action.get("race_grade_target"):
             action["race_grade_target"] = race_decision["race_tier_target"]
 
-        elif not race_decision["should_race"] and action.func == "do_race" and not action.get("scheduled_race") and not action.get("is_race_day"):
+        elif not race_decision.get("should_race") and action.func == "do_race" and not action.get("scheduled_race") and not action.get("is_race_day"):
           # Strategy wanted to race (e.g. rival fallback from evaluate_training_alternatives)
           # but the Trackblazer gate says train. Revert if fallback data is available.
           fallback_func = action.get("_rival_fallback_func")
@@ -2316,28 +2364,6 @@ def career_lobby(dry_run_turn=False):
               f"training_total={race_decision.get('training_total_stats')}"
             ),
           )
-
-      # Trackblazer rival-race scout: if the action is do_race with rival
-      # preference, open the race list to check if one exists, then back out.
-      # If none found, revert to the original training decision.
-      if action.func == "do_race" and action.get("prefer_rival_race"):
-        update_operator_snapshot(state_obj, action, phase="scouting_rival_race", message="Scouting race list for rival race...")
-        from scenarios.trackblazer import scout_rival_race
-        scout_result = scout_rival_race()
-        action["rival_scout"] = scout_result
-        if not scout_result.get("rival_found"):
-          fallback_func = action.get("_rival_fallback_func", "do_training")
-          info(f"[RIVAL] No rival race found, reverting to {fallback_func}.")
-          action.func = fallback_func
-          if action.get("_rival_fallback_training_name"):
-            action["training_name"] = action["_rival_fallback_training_name"]
-          if action.get("_rival_fallback_training_data"):
-            action["training_data"] = action["_rival_fallback_training_data"]
-          action.options.pop("race_name", None)
-          action.options.pop("prefer_rival_race", None)
-          update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="No rival race available. Reverted to training.")
-        else:
-          update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Rival race found! Proposing rival race.")
 
       action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
 
@@ -2370,10 +2396,39 @@ def career_lobby(dry_run_turn=False):
           update_operator_snapshot(state_obj, action, phase="recovering", message="Dry run turn requested; quitting.")
           info("Dry run turn, quitting.")
           quit()
+
+        # Build a pre_run_hook that scouts the rival race list when the
+        # user commits a rival-race action.  The scout opens the race list,
+        # checks aptitude, and backs out.  If no suitable rival is found
+        # the action reverts to the training fallback.
+        pre_run_hook = None
+        if action.func == "do_race" and action.get("prefer_rival_race"):
+          def _rival_scout_hook():
+            from scenarios.trackblazer import scout_rival_race
+            update_operator_snapshot(state_obj, action, phase="scouting_rival_race", message="Scouting race list for rival race...")
+            scout_result = scout_rival_race()
+            action["rival_scout"] = scout_result
+            if not scout_result.get("rival_found"):
+              fallback_func = action.get("_rival_fallback_func", "do_training")
+              info(f"[RIVAL] No rival race found, reverting to {fallback_func}.")
+              action.func = fallback_func
+              if action.get("_rival_fallback_training_name"):
+                action["training_name"] = action["_rival_fallback_training_name"]
+              if action.get("_rival_fallback_training_data"):
+                action["training_data"] = action["_rival_fallback_training_data"]
+              action.options.pop("race_name", None)
+              action.options.pop("prefer_rival_race", None)
+              update_operator_snapshot(state_obj, action, phase="executing_action", message="No rival race available. Reverted to training.")
+            else:
+              info(f"[RIVAL] Rival race found! Proceeding with race.")
+              update_operator_snapshot(state_obj, action, phase="executing_action", message="Rival race confirmed. Proceeding.")
+          pre_run_hook = _rival_scout_hook
+
         action_result = run_action_with_review(
           state_obj,
           action,
           "Review proposed action before execution.",
+          pre_run_hook=pre_run_hook,
           sub_phase="preview_race_selection" if action.func == "do_race" else "preview_action_clicks",
         )
         executed_action = action_result == "executed"

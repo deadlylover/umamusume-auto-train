@@ -2280,7 +2280,33 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
             confirm_threshold=0.7,
         )
         flow["scan_timing"] = (shared_scan.get("flow") or {}).get("timing") or {}
-        for item_key in requested_keys:
+
+        # Reset scrollbar to the top before selecting items — the scan
+        # leaves the scrollbar at the bottom and subsequent per-item
+        # seeks are unreliable when starting from the bottom edge.
+        post_scan_scrollbar = inspect_trackblazer_shop_scrollbar()
+        if post_scan_scrollbar.get("detected") and not post_scan_scrollbar.get("is_at_top"):
+            reset_result = _drag_trackblazer_shop_scrollbar(post_scan_scrollbar, edge="top")
+            flow["pre_select_reset"] = reset_result
+            sleep(0.3)
+        else:
+            # Fallback: swipe up if scrollbar detection failed after scan
+            for _ in range(3):
+                scroll_trackblazer_shop(direction="up")
+            flow["pre_select_reset"] = {"direction": "swipe_up_fallback", "swiped": True}
+            sleep(0.3)
+
+        # Sort items by their scan scroll position (top-to-bottom) so seeks
+        # are short monotonic drags rather than back-and-forth jumps.
+        def _item_scroll_ratio(key):
+            for page in (shared_scan.get("pages") or []):
+                for row in (page.get("rows") or []):
+                    if row.get("item_name") == key:
+                        return (page.get("scrollbar") or {}).get("position_ratio") or 0.0
+            return 999.0
+        sorted_keys = sorted(requested_keys, key=_item_scroll_ratio)
+
+        for item_key in sorted_keys:
             catalog_entry = catalog.get(item_key) or {}
             item_name = catalog_entry.get("display_name") or str(item_key).replace("_", " ").title()
             selection_result = prepare_trackblazer_shop_item_selection(item_key, scan_result=shared_scan)
@@ -2369,6 +2395,21 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
         )
         result["success"] = bool(flow["success"])
     finally:
+        # Always try to close the shop if we entered but haven't closed yet.
+        if flow.get("entered") and not flow.get("closed"):
+            try:
+                shop_open, _, _ = detect_shop_screen(threshold=0.75)
+                if shop_open:
+                    emergency_close = close_trackblazer_shop()
+                    flow["emergency_close"] = True
+                    flow["closed"] = bool(emergency_close.get("closed"))
+                    if not flow.get("reason"):
+                        flow["reason"] = "closed_after_error"
+                else:
+                    flow["closed"] = True
+            except Exception as exc:
+                warning(f"[TB_SHOP] Emergency shop close failed: {exc}")
+
         flow["timing_total"] = round(_time() - t_total, 3)
         result["trackblazer_shop_flow"] = flow
         result["success"] = bool(flow.get("success"))

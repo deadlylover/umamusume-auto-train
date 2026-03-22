@@ -14,7 +14,11 @@ from utils.log import info, warning, error, debug
 
 def sleep(seconds=1):
   debug(f"sleep called from {inspect.stack()[1].function} for {seconds} seconds")
-  time.sleep(seconds * config.SLEEP_TIME_MULTIPLIER)
+  # Use stop_event.wait() so that pressing Stop interrupts sleeps immediately
+  # instead of blocking until the full duration expires.
+  adjusted = seconds * config.SLEEP_TIME_MULTIPLIER
+  if bot.stop_event.wait(timeout=adjusted):
+    debug(f"sleep interrupted by stop_event after requesting {adjusted}s")
 
 def get_secs(seconds=1):
   return seconds * config.SLEEP_TIME_MULTIPLIER

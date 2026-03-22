@@ -691,11 +691,11 @@ class OperatorConsole:
       },
       "planned_clicks": snapshot.get("planned_clicks"),
     }
-    self._summary_raw_value = json.dumps(summary_payload, indent=2, ensure_ascii=True)
+    self._summary_raw_value = json.dumps(summary_payload, indent=2, ensure_ascii=True, default=str)
     self._set_text(self._planned_actions_text, self._format_planned_actions(snapshot))
     self._set_text(self._timing_text, self._format_timing(snapshot))
     self._update_quick_bar(snapshot)
-    self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True))
+    self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True, default=str))
     inventory_payload = {
       "summary": state_summary.get("trackblazer_inventory_summary"),
       "controls": state_summary.get("trackblazer_inventory_controls"),
@@ -739,7 +739,7 @@ class OperatorConsole:
         )[:12]
       ],
     }
-    self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True))
+    self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True, default=str))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
     self._render_ocr_debug_entries()
 
@@ -1739,8 +1739,20 @@ class OperatorConsole:
     self.publish()
 
   def _stop_bot(self):
-    bot.invoke_control_callback("stop_bot")
-    self.publish()
+    # Signal stop immediately so the bot thread sees it ASAP, then
+    # run the full stop (which joins the thread) in the background
+    # so the Tkinter main thread stays responsive.
+    # Note: only set stop_event here, NOT is_bot_running — the full
+    # _stop_bot_locked() needs is_bot_running=True to do cleanup.
+    bot.stop_event.set()
+    bot.cancel_review_wait()
+    self._stop_bot_button.configure(state="disabled")
+    self._message_value.set("Stopping bot...")
+    def _do_stop():
+      bot.invoke_control_callback("stop_bot")
+      if self._root is not None:
+        self._root.after(0, self.publish)
+    threading.Thread(target=_do_stop, daemon=True).start()
 
   def _run_phase_check(self, callback_name):
     triggered = bot.invoke_control_callback(callback_name)

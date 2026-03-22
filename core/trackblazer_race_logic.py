@@ -168,8 +168,10 @@ def evaluate_trackblazer_race(state_obj, action):
   The race schedule (``constants.RACES``) is only used for mandatory checks:
   Race Day and G1 dates.  For all other race decisions the rival indicator
   on the race button (visible on the lobby screen) is the source of truth.
-  If the rival button is present, the scout will open the race list and
-  verify aptitude inside.
+
+  If ``state_obj["rival_indicator_detected"]`` is already set (pre-collected
+  during collecting_race_state), that value is used instead of re-checking
+  the screen.  The expensive rival scout is deferred to execution time.
   """
   year = state_obj.get("year", "")
   turn = state_obj.get("turn", "")
@@ -211,7 +213,12 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # --- Optional races (rival indicator on screen is the source of truth) --
 
-  rival_indicator = _detect_rival_available()
+  # Use pre-collected indicator from collecting_race_state if available,
+  # otherwise fall back to a live check.
+  if "rival_indicator_detected" in state_obj:
+    rival_indicator = bool(state_obj["rival_indicator_detected"])
+  else:
+    rival_indicator = _detect_rival_available()
 
   if not rival_indicator:
     return _decision(
