@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import utils.constants as constants
+from utils.log import info
 from core.trackblazer_shop import PRIORITY_LEVELS, get_shop_catalog, normalize_priority, policy_context
 
 
@@ -857,6 +858,29 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   return candidates, deferred, kept_energy
 
 
+_MEGAPHONE_KEYS = frozenset({"motivating_megaphone", "empowering_megaphone", "coaching_megaphone"})
+
+
+def _apply_megaphone_mutual_exclusion(candidates, deferred):
+  """Only one megaphone buff can be active per turn. Keep the highest-scored
+  megaphone candidate and defer the rest."""
+  candidates = list(candidates or [])
+  deferred = list(deferred or [])
+  megaphone_candidates = [e for e in candidates if e.get("key") in _MEGAPHONE_KEYS]
+  if len(megaphone_candidates) <= 1:
+    return candidates, deferred
+  # Already sorted by candidate_score descending from _evaluate_item_candidates
+  kept = megaphone_candidates[0]
+  kept_name = kept.get("name", kept.get("key", "megaphone"))
+  non_megaphone = [e for e in candidates if e.get("key") not in _MEGAPHONE_KEYS]
+  for entry in megaphone_candidates[1:]:
+    entry.pop("candidate_score", None)
+    entry["reason"] = f"only one megaphone buff active per turn; {kept_name} preferred"
+    deferred.append(entry)
+  candidates = non_megaphone + [kept]
+  return candidates, deferred
+
+
 def _should_commit_after_energy(context, kept_energy):
   if context.get("commit_training_after_items"):
     return False
@@ -1058,6 +1082,18 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return None
     if not (context["summer_window"] or context["high_value_training"]):
       return None
+    # When fail is already 0% and energy is above half, the energy item won't
+    # change this turn's outcome — no fail to reduce, no training gain boost.
+    # Only spend energy items when they actually matter: high fail risk, or
+    # energy is genuinely low enough that the deficit threatens upcoming turns.
+    energy_ratio = context["energy_level"] / max(context["max_energy"], 1)
+    if context["failure_rate"] <= 0 and energy_ratio > 0.5:
+      return {
+        "defer_reason": (
+          f"fail already 0% and energy healthy ({context['energy_level']}"
+          f"/{context['max_energy']}); item would not affect this turn"
+        ),
+      }
     reason_parts = [f"energy deficit {context['energy_deficit']}"]
     if context["summer_window"]:
       reason_parts.append("summer burst window")
@@ -1124,6 +1160,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     hammer_spendable,
   )
   candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
+  candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred)
 
   if _should_commit_after_energy(context, kept_energy) or _should_commit_after_charm(normalized_policy, context, candidates):
     context = {
@@ -1138,6 +1175,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       hammer_spendable,
     )
     candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
+    candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred)
 
   return {
     "context": {

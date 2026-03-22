@@ -987,6 +987,9 @@ def close_training_items_inventory(threshold=0.8):
     timing["screenshot"] = round(_time() - t0, 4)
 
     attempt_entries = []
+    last_clicked_entry = None
+    last_click_metrics = None
+    last_checks = []
     t0 = _time()
     for key, template_path, template_scaling in attempts:
         if not template_path:
@@ -1010,6 +1013,8 @@ def close_training_items_inventory(threshold=0.8):
         clicked = bool(click_metrics.get("clicked"))
         timing["click_total"] = round(_time() - t0, 4)
         timing["click_breakdown"] = click_metrics
+        last_clicked_entry = entry
+        last_click_metrics = click_metrics
 
         t0 = _time()
         sleep(0.15)
@@ -1025,27 +1030,37 @@ def close_training_items_inventory(threshold=0.8):
         else:
             still_open, _, checks = detect_inventory_screen(threshold=threshold)
         timing["verify"] = round(_time() - t0, 4)
+        last_checks = checks
 
-        timing["total"] = round(_time() - t_total, 4)
-        info(f"[TB_INV] close timing: {timing}")
-        return {
-            "closed": bool(clicked and not still_open),
-            "clicked": bool(clicked),
-            "attempt": entry,
-            "attempts": attempt_entries,
-            "verification_checks": checks,
-            "timing": timing,
-        }
+        if not still_open:
+            timing["total"] = round(_time() - t_total, 4)
+            info(f"[TB_INV] close timing: {timing}")
+            return {
+                "closed": True,
+                "clicked": True,
+                "attempt": entry,
+                "attempts": attempt_entries,
+                "verification_checks": checks,
+                "timing": timing,
+            }
+        # Click landed but screen is still open — the template may have
+        # matched a decorative element instead of the real button.  Take a
+        # fresh screenshot and try the next template.
+        info(f"[TB_INV] close: {key} matched (score={entry.get('score')}) but screen still open after click; trying next template.")
+        close_screenshot = device_action.screenshot(region_ltrb=region_ltrb)
 
     timing["match_attempts"] = round(_time() - t0, 4)
     timing["total"] = round(_time() - t_total, 4)
-    info(f"[TB_INV] close timing: no_match — {timing}")
+    if last_clicked_entry:
+        info(f"[TB_INV] close timing: click_did_not_close — {timing}")
+    else:
+        info(f"[TB_INV] close timing: no_match — {timing}")
     return {
         "closed": False,
-        "clicked": False,
-        "attempt": None,
+        "clicked": bool(last_click_metrics and last_click_metrics.get("clicked")),
+        "attempt": last_clicked_entry,
         "attempts": attempt_entries,
-        "verification_checks": [],
+        "verification_checks": last_checks,
         "timing": timing,
     }
 
@@ -1072,19 +1087,38 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
         ("back_btn", "assets/buttons/back_btn.png", 1.0),
     )
 
+    # Track positions that were clicked but didn't close the screen, so we
+    # don't keep clicking the same decorative element on every poll.
+    failed_click_positions = set()
+    detect_controls_exhausted = False
+
     deadline = _time() + max(0.0, float(max_wait_seconds))
     while _time() <= deadline:
         polls += 1
-        controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.1))
-        close_entry = controls.get("close") or {}
-        if close_entry.get("passed_threshold") and close_entry.get("click_target"):
-            clicked_entry = {**close_entry, "region_name": "inventory_controls_detect"}
-            click_result = device_action.click_with_metrics(
-                close_entry["click_target"],
-                text="[TB_INV] Close inventory after item-use animation.",
-            )
-            clicked = bool(click_result.get("clicked"))
+
+        # Try detect_inventory_controls first, but skip if a previous attempt
+        # from this path already failed to close the screen.
+        if not detect_controls_exhausted:
+            controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.1))
+            close_entry = controls.get("close") or {}
+            close_target = close_entry.get("click_target")
+            if (
+                close_entry.get("passed_threshold")
+                and close_target
+                and close_target not in failed_click_positions
+            ):
+                clicked_entry = {**close_entry, "region_name": "inventory_controls_detect"}
+                click_result = device_action.click_with_metrics(
+                    close_target,
+                    text="[TB_INV] Close inventory after item-use animation.",
+                )
+                clicked = bool(click_result.get("clicked"))
+            else:
+                clicked = False
         else:
+            clicked = False
+
+        if not clicked:
             for region_name, region_ltrb in search_regions:
                 screenshot = device_action.screenshot(region_ltrb=region_ltrb)
                 for key, template_path, template_scaling in template_attempts:
@@ -1100,11 +1134,14 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
                     entry["key"] = key
                     entry["region_name"] = region_name
                     attempts.append(entry)
-                    if not entry.get("passed_threshold") or not entry.get("click_target"):
+                    click_target = entry.get("click_target")
+                    if not entry.get("passed_threshold") or not click_target:
+                        continue
+                    if click_target in failed_click_positions:
                         continue
                     clicked_entry = entry
                     click_result = device_action.click_with_metrics(
-                        entry["click_target"],
+                        click_target,
                         text=f"[TB_INV] Close inventory via {key} in {region_name}.",
                     )
                     clicked = bool(click_result.get("clicked"))
@@ -1118,6 +1155,112 @@ def _wait_for_post_item_use_close_button(max_wait_seconds=8.0, poll_seconds=0.4,
             closed = not still_open
             if closed:
                 break
+            # This click position didn't close the screen — record it so we
+            # try a different location on the next poll.
+            if clicked_entry and clicked_entry.get("click_target"):
+                failed_click_positions.add(clicked_entry["click_target"])
+            if not detect_controls_exhausted:
+                detect_controls_exhausted = True
+                info("[TB_INV] detect_inventory_controls close click did not close screen; falling back to template loop.")
+            clicked = False
+
+        sleep(max(0.1, float(poll_seconds)))
+
+    return {
+        "clicked": bool(click_result and click_result.get("clicked")),
+        "closed": bool(closed),
+        "clicked_entry": clicked_entry,
+        "click_result": click_result,
+        "attempts": attempts,
+        "polls": polls,
+        "verification_checks": verification_checks,
+        "timing_total": round(_time() - t_total, 3),
+    }
+
+
+def _wait_for_post_shop_close_button(max_wait_seconds=4.0, poll_seconds=0.3, threshold=0.75):
+    """Wait for the exchange-complete close button after confirming shop purchases."""
+    t_total = _time()
+    attempts = []
+    polls = 0
+    clicked = False
+    closed = False
+    click_result = None
+    clicked_entry = None
+    verification_checks = []
+
+    search_regions = (
+        ("inventory_controls", _trackblazer_inventory_controls_region()),
+        ("screen_bottom", constants.SCREEN_BOTTOM_BBOX),
+        ("trackblazer_ui", _trackblazer_ui_region()),
+    )
+    template_attempts = (
+        ("shop_aftersale_close", constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close"), _INVERSE_GLOBAL_SCALE),
+        ("close_btn", "assets/buttons/close_btn.png", 1.0),
+        ("back_btn", "assets/buttons/back_btn.png", 1.0),
+        ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
+    )
+
+    failed_click_positions = set()
+    deadline = _time() + max(0.0, float(max_wait_seconds))
+    while _time() <= deadline:
+        polls += 1
+        controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.1))
+        close_entry = controls.get("close") or {}
+        close_target = close_entry.get("click_target")
+        if (
+            close_entry.get("passed_threshold")
+            and close_target
+            and close_target not in failed_click_positions
+        ):
+            clicked_entry = {**close_entry, "region_name": "inventory_controls_detect"}
+            click_result = device_action.click_with_metrics(
+                close_target,
+                text="[TB_SHOP] Dismiss exchange-complete dialog.",
+            )
+            clicked = bool(click_result.get("clicked"))
+        else:
+            clicked = False
+
+        if not clicked:
+            for region_name, region_ltrb in search_regions:
+                screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+                for key, template_path, template_scaling in template_attempts:
+                    if not template_path:
+                        continue
+                    entry = _best_match_entry(
+                        template_path,
+                        region_ltrb=region_ltrb,
+                        threshold=threshold,
+                        template_scaling=template_scaling,
+                        screenshot=screenshot,
+                    )
+                    entry["key"] = key
+                    entry["region_name"] = region_name
+                    attempts.append(entry)
+                    click_target = entry.get("click_target")
+                    if not entry.get("passed_threshold") or not click_target:
+                        continue
+                    if click_target in failed_click_positions:
+                        continue
+                    clicked_entry = entry
+                    click_result = device_action.click_with_metrics(
+                        click_target,
+                        text=f"[TB_SHOP] Close shop dialog via {key} in {region_name}.",
+                    )
+                    clicked = bool(click_result.get("clicked"))
+                    break
+                if clicked:
+                    break
+
+        if clicked:
+            sleep(0.2)
+            still_open, _, verification_checks = detect_shop_screen(threshold=threshold)
+            closed = not still_open
+            if closed:
+                break
+            if clicked_entry and clicked_entry.get("click_target"):
+                failed_click_positions.add(clicked_entry["click_target"])
             clicked = False
 
         sleep(max(0.1, float(poll_seconds)))
@@ -2359,17 +2502,12 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
         flow["timing_post_confirm_controls"] = round(_time() - post_confirm_controls_t0, 3)
         flow["post_confirm_controls"] = post_confirm_controls
 
-        aftersale_close = post_confirm_controls.get("close") or {}
-        if aftersale_close.get("passed_threshold") and aftersale_close.get("click_target"):
-            dismiss_t0 = _time()
-            dismiss_result = device_action.click_with_metrics(
-                aftersale_close.get("click_target"),
-                text="[TB_SHOP] Dismiss after-sale prompt.",
-            )
-            flow["timing_dismiss_after_sale"] = round(_time() - dismiss_t0, 3)
-            flow["dismiss_after_sale_result"] = dismiss_result
-            flow["dismiss_after_sale_clicked"] = bool(dismiss_result.get("clicked"))
-            sleep(0.2)
+        dismiss_t0 = _time()
+        post_confirm_close = _wait_for_post_shop_close_button()
+        flow["timing_dismiss_after_sale"] = round(_time() - dismiss_t0, 3)
+        flow["dismiss_after_sale_result"] = post_confirm_close
+        flow["dismiss_after_sale_clicked"] = bool(post_confirm_close.get("clicked"))
+        flow["dismiss_after_sale_closed"] = bool(post_confirm_close.get("closed"))
 
         verify_open_t0 = _time()
         shop_open, _, verify_checks = detect_shop_screen(threshold=0.75)
@@ -2984,7 +3122,12 @@ def close_trackblazer_shop(threshold=0.8, verify_threshold=0.75):
     timing["screenshot"] = round(_time() - t0, 4)
 
     attempt_entries = []
+    last_clicked_entry = None
+    last_click_metrics = None
+    last_verification_entry = None
+    last_verification_checks = []
     attempts = [
+        ("shop_aftersale_close", constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_aftersale_close"), _INVERSE_GLOBAL_SCALE),
         ("use_back", constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back"), _INVERSE_GLOBAL_SCALE),
         ("close_btn", "assets/buttons/close_btn.png", 1.0),
         ("back_btn", "assets/buttons/back_btn.png", 1.0),
@@ -3015,6 +3158,8 @@ def close_trackblazer_shop(threshold=0.8, verify_threshold=0.75):
         clicked = bool(click_metrics.get("clicked"))
         timing["click_total"] = round(_time() - t0, 4)
         timing["click_breakdown"] = click_metrics
+        last_clicked_entry = entry
+        last_click_metrics = click_metrics
 
         t0 = _time()
         sleep(0.2)
@@ -3023,28 +3168,36 @@ def close_trackblazer_shop(threshold=0.8, verify_threshold=0.75):
         t0 = _time()
         still_open, verification_entry, verification_checks = detect_shop_screen(threshold=verify_threshold)
         timing["verify"] = round(_time() - t0, 4)
-        timing["total"] = round(_time() - t_total, 4)
-        info(f"[TB_SHOP] close timing: {timing}")
-        return {
-            "closed": bool(clicked and not still_open),
-            "clicked": bool(clicked),
-            "attempt": entry,
-            "attempts": attempt_entries,
-            "verification": verification_entry,
-            "verification_checks": verification_checks,
-            "timing": timing,
-        }
+        last_verification_entry = verification_entry
+        last_verification_checks = verification_checks
+        if not still_open:
+            timing["total"] = round(_time() - t_total, 4)
+            info(f"[TB_SHOP] close timing: {timing}")
+            return {
+                "closed": True,
+                "clicked": True,
+                "attempt": entry,
+                "attempts": attempt_entries,
+                "verification": verification_entry,
+                "verification_checks": verification_checks,
+                "timing": timing,
+            }
+        info(f"[TB_SHOP] close: {key} matched (score={entry.get('score')}) but shop still open after click; trying next template.")
+        screenshot = device_action.screenshot(region_ltrb=region_ltrb)
 
     timing["match_attempts"] = round(_time() - t0, 4)
     timing["total"] = round(_time() - t_total, 4)
-    info(f"[TB_SHOP] close timing: no_match {timing}")
+    if last_clicked_entry:
+        info(f"[TB_SHOP] close timing: click_did_not_close {timing}")
+    else:
+        info(f"[TB_SHOP] close timing: no_match {timing}")
     return {
         "closed": False,
-        "clicked": False,
-        "attempt": None,
+        "clicked": bool(last_click_metrics and last_click_metrics.get("clicked")),
+        "attempt": last_clicked_entry,
         "attempts": attempt_entries,
-        "verification": None,
-        "verification_checks": [],
+        "verification": last_verification_entry,
+        "verification_checks": last_verification_checks,
         "timing": timing,
     }
 
