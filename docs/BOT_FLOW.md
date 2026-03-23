@@ -103,9 +103,10 @@ For planning and scenario design, these labels are more useful than only the UI 
   The selected action is committed. Pressing Continue (F2) during `action_preview` in `check_only` mode triggers a one-shot execute — the full sequence (shop purchases → inventory refresh → item use → reassess → action) runs once, then the bot returns to `check_only` for the next turn. This supports a step-through walkthrough workflow.
 - `post_action_resolution`
   The bot handles screens that appear after training, races, events, or other
-  committed actions but before the stable lobby is back. This is where
-  scenario popups like Trackblazer shop sale / refresh and scheduled race
-  notices should live.
+  committed actions but before the stable lobby is back. This is the **unified
+  resolver** — the single owner for ALL post-action follow-up screens including
+  post-race result chains. See **Post-Action Resolution** below for the full
+  branch table.
 - `recovery`
   The bot retries, skips, or returns to lobby after a failed or invalid step.
 
@@ -153,9 +154,75 @@ These are the kinds of sub-phases that are useful to document and expose.
 
 - `post_action_resolution`
 - `resolve_post_action_popup`
+- `resolve_event_choice`
+- `resolve_shop_refresh_popup`
+- `resolve_scheduled_race_popup`
+- `resolve_consecutive_race_warning`
 - `state_invalid_retry`
 - `action_failed_retry`
 - `return_to_lobby`
+
+## Post-Action Resolution
+
+`_resolve_post_action_resolution()` in `core/skeleton.py` is the **unified resolver** that runs after every committed action (training, race, rest, recreation, infirmary). It replaced the former dual-resolution system where `start_race()` in `actions.py` owned its own post-race lobby loop AND skeleton.py ran a second resolution pass.
+
+### Two-tier safety net
+
+1. **Resolver** (`_resolve_post_action_resolution`) — runs for up to `max_wait` seconds (45s for races, 20s for everything else). Handles structured popups with logging and operator console updates.
+2. **Generic lobby scan** (`career_lobby()` main loop) — if the resolver times out, control returns to the lobby scan which has its own handlers for every template. This is the ultimate fallback — nothing truly gets stuck, but unhandled branches add up to `max_wait` seconds of idle timeout.
+
+### Resolver loop priority order
+
+Each iteration of the resolver checks in this order:
+
+1. **Stable lobby** — template-match against `STABLE_CAREER_SCREEN_ANCHORS` (tazuna_hint, training_btn, rest_btn, recreation_btn, races_btn, details_btn, details_btn_2). If any anchor matches → done, return success.
+2. **Event choice** — `select_event()` handles support events, character events, and trainee events.
+3. **Trackblazer shop refresh popup** — `_handle_trackblazer_shop_refresh_popup()` detects the refresh dialog, dismisses it, and queues a deferred shop check (only if dismiss click succeeds).
+4. **Trackblazer scheduled race popup** — `_handle_trackblazer_scheduled_race_popup()` detects the scheduled race banner, clicks through race entry, handles the consecutive-race warning, calls `start_race()`, and returns. The outer resolver loop then handles the scheduled race's own post-race screens in subsequent iterations.
+5. **Generic advance buttons** — `_generic_post_action_return_to_lobby_step()` tries each of these in order: next2, next, ok_2_btn, retry, close, view_results, back, cancel. The cancel button is guarded by a clock_icon check (skipped if clock_icon is present, meaning lost-race screen).
+6. **Idle safe-space tap** — after 3 consecutive loops with no button matched, taps safe space to try to advance any unknown screen.
+7. **Timeout** — logs a warning and returns `True`, falling through to the lobby scan.
+
+### All post-action branches
+
+| Branch | Resolver handler | Lobby scan fallback | Notes |
+|--------|-----------------|---------------------|-------|
+| **Event choice** (support / character / trainee) | `select_event()` | `select_event()` | Covered in both tiers |
+| **TB shop refresh popup** | `_handle_trackblazer_shop_refresh_popup()` | Same function + non-TB cancel fallback | Covered in both tiers |
+| **TB scheduled race popup** | `_handle_trackblazer_scheduled_race_popup()` | — | Resolver-only; lobby scan has no equivalent |
+| **Post-race result screens** (view_results, next, next2) | Generic advance templates | next / next2 in cached_templates | Covered in both tiers |
+| **Post-race concert** (landscape close) | N/A — handled inside `start_race()` before resolver starts | — | Pre-resolver |
+| **Retry prompt** (failed race retry) | Generic advance — "retry" | retry in cached_templates | Covered in both tiers |
+| **Cancel button** (with clock_icon guard) | Generic advance — "cancel" with clock_icon skip | cancel with clock_icon check | Covered in both tiers |
+| **OK confirmation dialog** | Generic advance — "ok_2_btn" | ok_2_btn in cached_templates | Covered in both tiers |
+| **Close button** (generic overlay) | Generic advance — "close" | close_btn in unity_templates | Covered in both tiers |
+| **Back button** | Generic advance — "back" | — | Resolver-only |
+| **Inspiration** | **Not covered** | inspiration_btn in cached_templates | Lobby scan fallback only |
+| **Claw machine** | **Not covered** | claw_btn in cached_templates | Lobby scan fallback only |
+| **TB year-end screen** | **Not covered** — likely dismissed by generic next/close/ok_2_btn | Same generic buttons | Needs verification; auto-handled by legacy flow previously |
+| **URA finale screens** | Generic next/close buttons | Same | Likely sufficient |
+| **Unity Cup popup** | **Not covered** | unity_cup_btn / unity_banner_mid_screen | Lobby scan fallback only |
+| **Non-TB shop sales popup** | Generic cancel button | cancel in cached_templates | Covered |
+| **Safe-space tap** | After 3 idle loops | — | Resolver-only fallback |
+| **Timeout** | Returns to lobby scan | Picks up from there | Safety net |
+
+### Known gaps (handled by lobby scan fallback)
+
+These branches are not recognized by the resolver. They will cause idle loops until timeout, then the lobby scan picks them up:
+
+- **Inspiration** — rare during post-action; low impact.
+- **Claw machine** — rare during post-action; low impact.
+- **Unity Cup popup** — only relevant in Unity scenario; the resolver is most exercised in Trackblazer.
+- **TB year-end screen** — appears at the end of each year in Trackblazer. The generic advance buttons (next/close/ok_2_btn) likely handle it, but this has not been explicitly verified post-unification.
+
+### Debugging post-action stalls
+
+When the bot appears stuck after an action:
+
+1. Check the operator console — the resolver logs every iteration with `sub_phase`, `popup_type`, and `reasoning_notes`.
+2. Look for `[POST_ACTION] Timed out` in the terminal — this means the resolver exhausted its budget and fell through to the lobby scan.
+3. If the lobby scan also can't resolve, `non_match_count` will climb toward 20, after which the bot quits.
+4. To identify the stuck screen: the resolver's `_update_post_action_resolution_snapshot` records `anchor_counts` on each loop — this shows which lobby anchors were visible (or not) and what the resolver tried to click.
 
 ## Scenario Extension Rule
 

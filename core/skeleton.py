@@ -236,13 +236,12 @@ def _handle_trackblazer_shop_refresh_popup():
       "deferred_work": [],
     }
 
-  bot.request_trackblazer_shop_check("refresh_dialog_popup")
-  deferred_work = ["shop_check_pending"]
   dismiss_entry = refresh_dialog.get("dismiss") or {}
   dismiss_target = dismiss_entry.get("click_target")
   if dismiss_target:
     click_metrics = device_action.click_with_metrics(dismiss_target)
     if click_metrics.get("clicked"):
+      bot.request_trackblazer_shop_check("refresh_dialog_popup")
       info("[TB_SHOP] Refresh popup detected; dismissed it and queued a shop check.")
       bot.push_debug_history({"event": "click", "asset": "shop_refresh_cancel", "result": "clicked", "context": "trackblazer_refresh_popup"})
       return {
@@ -250,16 +249,16 @@ def _handle_trackblazer_shop_refresh_popup():
         "handled": True,
         "popup_type": "shop_refresh_popup",
         "reason": "dismissed_and_queued_shop_check",
-        "deferred_work": deferred_work,
+        "deferred_work": ["shop_check_pending"],
       }
 
-  warning("[TB_SHOP] Refresh popup detected and shop check queued, but dismiss button was not clickable.")
+  warning("[TB_SHOP] Refresh popup detected but dismiss button was not clickable; shop check NOT queued.")
   return {
     "detected": True,
     "handled": False,
     "popup_type": "shop_refresh_popup",
     "reason": "dismiss_target_not_clickable",
-    "deferred_work": deferred_work,
+    "deferred_work": [],
   }
 
 
@@ -1339,6 +1338,7 @@ _POST_ACTION_GENERIC_ADVANCE_TEMPLATES = (
   ("ok_2_btn", "assets/buttons/ok_2_btn.png", constants.GAME_WINDOW_BBOX),
   ("retry", "assets/buttons/retry_btn.png", constants.GAME_WINDOW_BBOX),
   ("close", "assets/buttons/close_btn.png", constants.GAME_WINDOW_BBOX),
+  ("view_results", "assets/buttons/view_results.png", constants.SCREEN_BOTTOM_BBOX),
   ("back", "assets/buttons/back_btn.png", constants.SCREEN_BOTTOM_BBOX),
   ("cancel", "assets/buttons/cancel_btn.png", constants.GAME_WINDOW_BBOX),
 )
@@ -1553,10 +1553,19 @@ def _generic_post_action_return_to_lobby_step():
   return ""
 
 
-def _resolve_post_action_resolution(state_obj, action, max_wait=20.0):
+_POST_ACTION_MAX_WAIT_RACE = 45.0
+_POST_ACTION_MAX_WAIT_DEFAULT = 20.0
+
+
+def _resolve_post_action_resolution(state_obj, action, max_wait=None):
   import time as _time_mod
 
   action_name = _action_func(action) or "unknown_action"
+  if max_wait is None:
+    # Races chain through result screens, concerts, and events before stable
+    # lobby returns — give them the longer budget that the old post-race loop
+    # used.
+    max_wait = _POST_ACTION_MAX_WAIT_RACE if action_name == "do_race" else _POST_ACTION_MAX_WAIT_DEFAULT
   bot.begin_post_action_resolution(
     source_action=action_name,
     reason="action_committed_waiting_for_stable_lobby",
@@ -2805,7 +2814,11 @@ def career_lobby(dry_run_turn=False):
       update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
       state_obj = collect_main_state()
 
-      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+      trackblazer_pre_debut = (
+        constants.SCENARIO_NAME in ("mant", "trackblazer")
+        and state_obj.get("year") == "Junior Year Pre-Debut"
+      )
+      if constants.SCENARIO_NAME in ("mant", "trackblazer") and not trackblazer_pre_debut:
         # Detect lobby buff icon (megaphone/ankle weight effect active).
         buff_match = device_action.locate(
           constants.TRACKBLAZER_LOBBY_BUFF_ICON,
@@ -3064,7 +3077,8 @@ def career_lobby(dry_run_turn=False):
       # Trackblazer race-vs-training gate: evaluate race-vs-training using the
       # rival indicator collected earlier (no game interaction here).  The
       # expensive rival scout is deferred to execution time (pre_run_hook).
-      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+      # Skip during Junior Pre-Debut — race list is not available yet.
+      if constants.SCENARIO_NAME in ("mant", "trackblazer") and not trackblazer_pre_debut:
         race_decision = evaluate_trackblazer_race(state_obj, action)
         action["trackblazer_race_decision"] = race_decision
 
@@ -3124,7 +3138,8 @@ def career_lobby(dry_run_turn=False):
             ),
           )
 
-      action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+      if not trackblazer_pre_debut:
+        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
 
       if isinstance(action, dict):
         update_operator_snapshot(

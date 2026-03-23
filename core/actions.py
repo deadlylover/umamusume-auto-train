@@ -12,12 +12,6 @@ from utils.log import error, info, warning, debug
 from utils.screenshot import are_screenshots_same
 import pyautogui
 import core.bot as bot
-from core.runtime_flow import (
-  PHASE_POST_ACTION_RESOLUTION,
-  SUB_PHASE_POST_ACTION_RESOLUTION,
-  SUB_PHASE_RESOLVE_EVENT_CHOICE,
-  SUB_PHASE_RETURN_TO_LOBBY,
-)
 from utils.shared import CleanDefaultDict, get_race_type
 
 class Action:
@@ -98,134 +92,8 @@ event_progress_templates = [
   "assets/ui/pal_progress_5.png"
 ]
 
-_POST_RACE_LOBBY_TEMPLATES = (
-  "assets/ui/tazuna_hint.png",
-  "assets/buttons/training_btn.png",
-  "assets/buttons/rest_btn.png",
-  "assets/buttons/rest_summer_btn.png",
-  "assets/buttons/recreation_btn.png",
-  "assets/buttons/races_btn.png",
-  "assets/buttons/details_btn.png",
-  "assets/buttons/details_btn_2.png",
-)
-
-_POST_RACE_ADVANCE_TEMPLATES = (
-  ("next2", "assets/buttons/next2_btn.png", constants.GAME_WINDOW_BBOX),
-  ("next", "assets/buttons/next_btn.png", constants.GAME_WINDOW_BBOX),
-  ("close", "assets/buttons/close_btn.png", constants.GAME_WINDOW_BBOX),
-  ("retry", "assets/buttons/retry_btn.png", constants.GAME_WINDOW_BBOX),
-  ("view_results", "assets/buttons/view_results.png", constants.SCREEN_BOTTOM_BBOX),
-)
 
 
-def _is_back_in_career_lobby():
-  screenshot = device_action.screenshot()
-  matched = []
-  for template_path in _POST_RACE_LOBBY_TEMPLATES:
-    if device_action.match_template(template_path, screenshot, threshold=0.8):
-      matched.append(template_path)
-  return len(matched) > 0, matched
-
-
-def _wait_for_post_race_lobby(max_wait_seconds=45.0):
-  """Advance post-race screens until the stable lobby reappears.
-
-  Successful races can still chain into result taps, concert screens, and
-  random events before the normal lobby anchors come back. The race action
-  should not complete until we can see that stable lobby again.
-  """
-  from core.events import select_event
-
-  bot.begin_post_action_resolution(
-    source_action="do_race",
-    reason="post_race_followups",
-    sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
-  )
-  bot.set_phase(
-    PHASE_POST_ACTION_RESOLUTION,
-    status="active",
-    message="Resolving post-race screens before returning to lobby.",
-    sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
-  )
-  deadline = time() + max_wait_seconds
-  idle_loops = 0
-  while time() < deadline:
-    if bot.stop_event.is_set():
-      return False
-
-    device_action.flush_screenshot_cache()
-    in_lobby, anchors = _is_back_in_career_lobby()
-    if in_lobby:
-      bot.set_phase(
-        PHASE_POST_ACTION_RESOLUTION,
-        status="active",
-        message="Stable lobby detected after race; finalizing turn.",
-        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
-      )
-      bot.end_post_action_resolution(outcome="stable_lobby_confirmed_after_race")
-      info(f"[RACE] Stable lobby detected after race. anchors={anchors}")
-      return True
-
-    if select_event():
-      bot.update_post_action_resolution(
-        active=True,
-        popup_type="event_choice",
-        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
-        status="active",
-      )
-      bot.set_phase(
-        PHASE_POST_ACTION_RESOLUTION,
-        status="active",
-        message="Resolving post-race event choice.",
-        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
-      )
-      info("[RACE] Advanced post-race event choice.")
-      idle_loops = 0
-      sleep(0.6)
-      continue
-
-    progressed = False
-    for label, template_path, region_ltrb in _POST_RACE_ADVANCE_TEMPLATES:
-      if device_action.locate_and_click(template_path, min_search_time=get_secs(0.4), region_ltrb=region_ltrb):
-        bot.update_post_action_resolution(
-          active=True,
-          popup_type=label,
-          sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
-          status="active",
-        )
-        bot.set_phase(
-          PHASE_POST_ACTION_RESOLUTION,
-          status="active",
-          message=f"Advancing post-race screen via {label}.",
-          sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
-        )
-        info(f"[RACE] Advanced post-race screen via {label}.")
-        progressed = True
-        idle_loops = 0
-        sleep(0.6)
-        break
-    if progressed:
-      continue
-
-    idle_loops += 1
-    if idle_loops >= 3:
-      bot.set_phase(
-        PHASE_POST_ACTION_RESOLUTION,
-        status="active",
-        message="No post-race buttons matched; tapping safe space to continue toward the lobby.",
-        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
-      )
-      info("[RACE] No post-race buttons matched; tapping safe space to advance overlays.")
-      device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
-      idle_loops = 0
-      sleep(0.6)
-      continue
-
-    sleep(0.5)
-
-  warning("[RACE] Timed out waiting to confirm the career lobby after race; finalizing turn anyway.")
-  bot.end_post_action_resolution(outcome="timed_out_after_race", status="warning")
-  return True
 
 def do_recreation(options=None):
   recreation_btn = device_action.locate("assets/buttons/recreation_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
@@ -483,7 +351,10 @@ def start_race():
 
     device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(5))
 
-  return _wait_for_post_race_lobby()
+  # Race mechanics complete.  Post-race follow-up screens (events, result
+  # taps, Trackblazer popups) are handled by the unified post-action
+  # resolver in skeleton._resolve_post_action_resolution().
+  return True
 
 def find_skip_buttons(min_search_time):
   skip_btn = device_action.locate("assets/buttons/skip_btn.png", min_search_time=min_search_time, region_ltrb=constants.SCREEN_BOTTOM_BBOX)
