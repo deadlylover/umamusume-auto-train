@@ -3333,6 +3333,8 @@ def inspect_shop_entry_state(threshold=0.8):
         return method_summary
 
     def _refresh_dialog_summary():
+        dialog_template_keys = ("shop_sale_popup", "shop_refresh_dialog")
+
         def _dialog_button_entry(key, template_path, game_region, game_screenshot, dialog_region):
             fallback = _best_match_entry(
                 template_path,
@@ -3385,8 +3387,12 @@ def inspect_shop_entry_state(threshold=0.8):
                 "region_ltrb": fallback.get("region_ltrb"),
             }
 
-        dialog_template = _entry_template("shop_refresh_dialog")
-        if not dialog_template:
+        dialog_templates = {
+            key: _entry_template(key)
+            for key in dialog_template_keys
+            if _entry_template(key)
+        }
+        if not dialog_templates:
             return {
                 "method": "refresh_dialog",
                 "matched": False,
@@ -3395,26 +3401,46 @@ def inspect_shop_entry_state(threshold=0.8):
                 "dismiss": None,
                 "best_match": None,
                 "region_ltrb": [int(v) for v in _trackblazer_ui_region()],
-                "required_keys": ["shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel"],
-                "missing_required": ["shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel"],
+                "required_keys": ["dialog", "shop_refresh_shop", "shop_refresh_cancel"],
+                "missing_required": ["dialog", "shop_refresh_shop", "shop_refresh_cancel"],
                 "checks": {},
                 "reason": "templates_missing",
             }
 
         game_region = _trackblazer_ui_region()
         game_screenshot = device_action.screenshot(region_ltrb=game_region)
-        dialog_entry = _best_match_entry(
-            dialog_template,
-            region_ltrb=game_region,
-            threshold=threshold,
-            template_scaling=_INVERSE_GLOBAL_SCALE,
-            screenshot=game_screenshot,
-        )
-        dialog_entry["key"] = "shop_refresh_dialog"
-        checks = {"shop_refresh_dialog": dialog_entry}
+        checks = {}
+        dialog_candidates = []
+        for dialog_key, dialog_template in dialog_templates.items():
+            dialog_entry = _best_match_entry(
+                dialog_template,
+                region_ltrb=game_region,
+                threshold=threshold,
+                template_scaling=_INVERSE_GLOBAL_SCALE,
+                screenshot=game_screenshot,
+            )
+            dialog_entry["key"] = dialog_key
+            checks[dialog_key] = dialog_entry
+            if dialog_entry.get("score") is not None:
+                dialog_candidates.append(dialog_entry)
+
+        passed_dialog_candidates = [
+            entry for entry in dialog_candidates if entry.get("passed_threshold")
+        ]
+        dialog_entry = None
+        if passed_dialog_candidates:
+            dialog_entry = max(
+                passed_dialog_candidates,
+                key=lambda entry: entry.get("score") or 0.0,
+            )
+        elif dialog_candidates:
+            dialog_entry = max(
+                dialog_candidates,
+                key=lambda entry: entry.get("score") or 0.0,
+            )
 
         dialog_region = game_region
-        if dialog_entry.get("passed_threshold") and dialog_entry.get("location") and dialog_entry.get("size"):
+        if dialog_entry and dialog_entry.get("passed_threshold") and dialog_entry.get("location") and dialog_entry.get("size"):
             dialog_x, dialog_y = dialog_entry["location"]
             dialog_w, dialog_h = dialog_entry["size"]
             dialog_region = (
@@ -3437,11 +3463,12 @@ def inspect_shop_entry_state(threshold=0.8):
             )
             checks[key] = entry
 
-        required_keys = ("shop_refresh_dialog", "shop_refresh_shop", "shop_refresh_cancel")
-        missing_required = [
-            key for key in required_keys
-            if not (checks.get(key) or {}).get("passed_threshold")
-        ]
+        missing_required = []
+        if not (dialog_entry or {}).get("passed_threshold"):
+            missing_required.append("dialog")
+        for key in ("shop_refresh_shop", "shop_refresh_cancel"):
+            if not (checks.get(key) or {}).get("passed_threshold"):
+                missing_required.append(key)
         scored_checks = [entry for entry in checks.values() if entry.get("score") is not None]
         best_entry = max(scored_checks, key=lambda entry: entry.get("score") or 0.0) if scored_checks else None
         matched = not missing_required
@@ -3451,10 +3478,10 @@ def inspect_shop_entry_state(threshold=0.8):
             "ready": matched,
             "entry": checks.get("shop_refresh_shop"),
             "dismiss": checks.get("shop_refresh_cancel"),
-            "dialog": checks.get("shop_refresh_dialog"),
+            "dialog": dialog_entry,
             "best_match": best_entry,
             "region_ltrb": [int(v) for v in dialog_region],
-            "required_keys": list(required_keys),
+            "required_keys": ["dialog", "shop_refresh_shop", "shop_refresh_cancel"],
             "missing_required": missing_required,
             "checks": checks,
         }

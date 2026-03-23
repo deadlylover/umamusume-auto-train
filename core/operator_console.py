@@ -36,6 +36,7 @@ PHASES = [
   "idle",
   "focusing_window",
   "scanning_lobby",
+  "post_action_resolution",
   "collecting_main_state",
   "checking_inventory",
   "checking_inventory_selection",
@@ -103,6 +104,12 @@ class OperatorConsole:
     self._preview_windows = {}
     self._training_collapsed = True
     self._ocr_collapsed = True
+    self._debug_history_collapsed = True
+    self._debug_history_header = None
+    self._debug_history_panel = None
+    self._debug_history_toggle_label = None
+    self._debug_history_text = None
+    self._debug_history_rendered_count = 0
     self._training_header = None
     self._training_panel = None
     self._training_toggle_label = None
@@ -362,6 +369,7 @@ class OperatorConsole:
     right.rowconfigure(2, weight=1)
     right.rowconfigure(4, weight=1)
     right.rowconfigure(6, weight=3)
+    right.rowconfigure(8, weight=0)
     self._right_pane = right
 
     quick_bar = tk.Frame(right, bg="#192028", padx=6, pady=3)
@@ -534,14 +542,43 @@ class OperatorConsole:
     self._ocr_debug_meta.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
     ocr_panel.add(ocr_detail_frame, minsize=260)
 
-    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=7, column=0, sticky="ew")
-    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=8, column=0, sticky="ew")
+    # Debug History collapsible section
+    debug_history_header = tk.Frame(right, bg="#101418")
+    debug_history_header.grid(row=7, column=0, sticky="ew")
+    debug_history_header.columnconfigure(0, weight=0)
+    debug_history_header.columnconfigure(1, weight=1)
+    debug_history_header.columnconfigure(2, weight=0)
+    self._debug_history_toggle_label = tk.Label(debug_history_header, text="\u25bc Debug History", fg="white", bg="#101418", anchor="w", cursor="hand2")
+    self._debug_history_toggle_label.grid(row=0, column=0, sticky="w")
+    self._debug_history_toggle_label.bind("<Button-1>", lambda _e: self._toggle_debug_history_section())
+    tk.Button(debug_history_header, text="Copy History", command=self._copy_debug_history).grid(row=0, column=1, sticky="e", padx=(0, 4))
+    tk.Button(debug_history_header, text="Clear", command=self._clear_debug_history).grid(row=0, column=2, sticky="e")
+    self._debug_history_header = debug_history_header
+    debug_history_panel = tk.Frame(right, bg="#101418")
+    debug_history_panel.grid(row=8, column=0, sticky="nsew", pady=(2, 6))
+    debug_history_panel.rowconfigure(0, weight=1)
+    debug_history_panel.columnconfigure(0, weight=1)
+    self._debug_history_text = scrolledtext.ScrolledText(
+      debug_history_panel,
+      height=8,
+      bg="#192028",
+      fg="#d6dde5",
+      insertbackground="white",
+    )
+    self._debug_history_text.grid(row=0, column=0, sticky="nsew")
+    self._debug_history_panel = debug_history_panel
+
+    tk.Label(right, textvariable=self._message_value, fg="#8bd5ca", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=9, column=0, sticky="ew")
+    tk.Label(right, textvariable=self._error_value, fg="#ff8c8c", bg="#101418", anchor="w", justify="left", wraplength=430).grid(row=10, column=0, sticky="ew")
     if self._training_collapsed:
       self._training_toggle_label.configure(text="\u25b6 Ranked Trainings")
       self._training_panel.grid_remove()
     if self._ocr_collapsed:
       self._ocr_toggle_label.configure(text="\u25b6 OCR Debug")
       self._ocr_panel.grid_remove()
+    if self._debug_history_collapsed:
+      self._debug_history_toggle_label.configure(text="\u25b6 Debug History")
+      self._debug_history_panel.grid_remove()
     self._rebalance_right_pane_weights()
 
   def _make_stat(self, parent, column, title):
@@ -560,10 +597,13 @@ class OperatorConsole:
       return
     training_weight = 0 if self._training_collapsed else 1
     ocr_weight = 0 if self._ocr_collapsed else 3
-    planned_weight = 4 + (1 if self._training_collapsed else 0) + (3 if self._ocr_collapsed else 0)
+    debug_history_weight = 0 if self._debug_history_collapsed else 2
+    collapsed_reclaim = (1 if self._training_collapsed else 0) + (3 if self._ocr_collapsed else 0) + (2 if self._debug_history_collapsed else 0)
+    planned_weight = 4 + collapsed_reclaim
     right.rowconfigure(2, weight=planned_weight)
     right.rowconfigure(4, weight=training_weight)
     right.rowconfigure(6, weight=ocr_weight)
+    right.rowconfigure(8, weight=debug_history_weight)
 
   def _toggle_training_section(self):
     self._training_collapsed = not self._training_collapsed
@@ -584,6 +624,66 @@ class OperatorConsole:
       self._ocr_toggle_label.configure(text="\u25bc OCR Debug")
       self._ocr_panel.grid()
     self._rebalance_right_pane_weights()
+
+  def _toggle_debug_history_section(self):
+    self._debug_history_collapsed = not self._debug_history_collapsed
+    if self._debug_history_collapsed:
+      self._debug_history_toggle_label.configure(text="\u25b6 Debug History")
+      self._debug_history_panel.grid_remove()
+    else:
+      self._debug_history_toggle_label.configure(text="\u25bc Debug History")
+      self._debug_history_panel.grid()
+      self._render_debug_history()
+    self._rebalance_right_pane_weights()
+
+  def _copy_debug_history(self):
+    if self._debug_history_text is None:
+      return
+    value = self._debug_history_text.get("1.0", tk.END).strip()
+    if not value:
+      value = "(empty)"
+    self._root.clipboard_clear()
+    self._root.clipboard_append(value)
+    self._message_value.set("Copied debug history to clipboard.")
+
+  def _clear_debug_history(self):
+    import core.bot as _bot
+    _bot.clear_debug_history()
+    self._debug_history_rendered_count = 0
+    if self._debug_history_text:
+      self._debug_history_text.configure(state=tk.NORMAL)
+      self._debug_history_text.delete("1.0", tk.END)
+      self._debug_history_text.configure(state=tk.DISABLED)
+
+  def _render_debug_history(self):
+    """Render debug history entries into the text widget (append-only)."""
+    import core.bot as _bot
+    if self._debug_history_text is None:
+      return
+    history = _bot.get_debug_history()
+    new_count = len(history)
+    if new_count <= self._debug_history_rendered_count:
+      return
+    new_entries = history[self._debug_history_rendered_count:]
+    self._debug_history_rendered_count = new_count
+    self._debug_history_text.configure(state=tk.NORMAL)
+    import datetime
+    for entry in new_entries:
+      ts = entry.get("_ts", 0)
+      ts_str = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "??:??:??"
+      event = entry.get("event", "?")
+      asset = entry.get("asset", "")
+      result = entry.get("result", "")
+      context = entry.get("context", "")
+      line = f"[{ts_str}] {event}: {asset}"
+      if result:
+        line += f" -> {result}"
+      if context:
+        line += f"  ({context})"
+      line += "\n"
+      self._debug_history_text.insert(tk.END, line)
+    self._debug_history_text.see(tk.END)
+    self._debug_history_text.configure(state=tk.DISABLED)
 
   def _update_quick_bar(self, snapshot):
     planned = snapshot.get("planned_actions") or {}
@@ -642,7 +742,7 @@ class OperatorConsole:
     self._turn_value.set(snapshot.get("turn_label") or "-")
     self._energy_value.set(snapshot.get("energy_label") or "-")
     self._action_value.set(selected_action.get("func") or "-")
-    self._sub_phase_value.set(snapshot.get("sub_phase") or "-")
+    self._sub_phase_value.set(snapshot.get("sub_phase") or runtime_state.get("sub_phase") or "-")
     self._intent_value.set(runtime_state.get("execution_intent") or snapshot.get("execution_intent") or "-")
     self._backend_value.set(backend_state.get("active_backend") or "-")
     self._device_value.set(backend_state.get("device_id") or "-")
@@ -685,6 +785,7 @@ class OperatorConsole:
       "reasoning_notes": snapshot.get("reasoning_notes"),
       "sub_phase": snapshot.get("sub_phase"),
       "execution_intent": snapshot.get("execution_intent") or runtime_state.get("execution_intent"),
+      "post_action_resolution": runtime_state.get("post_action_resolution") or {},
       "backend_state": backend_state,
       "adb_health": {
         "available": adb_state.get("adb_available"),
@@ -746,6 +847,8 @@ class OperatorConsole:
     self._set_text(self._inventory_text, json.dumps(inventory_payload, indent=2, ensure_ascii=True, default=str))
     self._ocr_debug_entries = snapshot.get("ocr_debug") or []
     self._render_ocr_debug_entries()
+    if not self._debug_history_collapsed:
+      self._render_debug_history()
 
   def _set_text(self, widget, value):
     widget.configure(state=tk.NORMAL)

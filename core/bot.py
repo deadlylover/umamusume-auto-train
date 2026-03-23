@@ -4,6 +4,8 @@
 import threading
 import time
 
+from core.runtime_flow import SUB_PHASE_IDLE, default_post_action_resolution_state
+
 # Bot running state
 is_bot_running = False
 bot_thread = None
@@ -46,11 +48,16 @@ PREFERRED_POSITION_SET = False
 # Operator console / semi-auto runtime state
 runtime_lock = threading.RLock()
 runtime_phase = "idle"
+runtime_sub_phase = SUB_PHASE_IDLE
 runtime_phase_status = "idle"
 runtime_phase_message = ""
 runtime_error = ""
 runtime_updated_at = 0.0
 latest_snapshot = {}
+debug_history = []          # Ring buffer of recent template match / action events
+DEBUG_HISTORY_MAX = 200
+pending_trackblazer_shop_check = False
+pending_trackblazer_shop_check_reason = ""
 review_waiting = False
 review_event = threading.Event()
 operator_console = None
@@ -64,12 +71,15 @@ trackblazer_bond_boost_enabled = True  # +10 score per blue/green friend on trai
 trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive after this turn
 trackblazer_allow_buff_override = False  # allow 60% megaphone to override active 40% buff
 skill_dry_run_enabled = False
+post_action_resolution = default_post_action_resolution_state()
 
 
-def set_phase(phase, status="active", message="", error=""):
-  global runtime_phase, runtime_phase_status, runtime_phase_message, runtime_error, runtime_updated_at
+def set_phase(phase, status="active", message="", error="", sub_phase=None):
+  global runtime_phase, runtime_sub_phase, runtime_phase_status, runtime_phase_message, runtime_error, runtime_updated_at
   with runtime_lock:
     runtime_phase = phase
+    if sub_phase is not None:
+      runtime_sub_phase = str(sub_phase or SUB_PHASE_IDLE)
     runtime_phase_status = status
     runtime_phase_message = message
     runtime_error = error
@@ -80,6 +90,7 @@ def get_runtime_state():
   with runtime_lock:
     return {
       "phase": runtime_phase,
+      "sub_phase": runtime_sub_phase,
       "status": runtime_phase_status,
       "message": runtime_phase_message,
       "error": runtime_error,
@@ -88,10 +99,13 @@ def get_runtime_state():
       "pause_requested": pause_requested,
       "manual_control_active": manual_control_active,
       "execution_intent": execution_intent,
+      "pending_trackblazer_shop_check": pending_trackblazer_shop_check,
+      "pending_trackblazer_shop_check_reason": pending_trackblazer_shop_check_reason,
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
       "trackblazer_scoring_mode": trackblazer_scoring_mode,
       "skill_dry_run_enabled": skill_dry_run_enabled,
       "is_bot_running": is_bot_running,
+      "post_action_resolution": dict(post_action_resolution or {}),
       "backend_state": get_backend_state(),
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
     }
@@ -102,6 +116,52 @@ def set_snapshot(snapshot):
   with runtime_lock:
     latest_snapshot = snapshot
     runtime_updated_at = time.time()
+
+
+def push_debug_history(entry):
+  """Append an event to the debug history ring buffer (thread-safe)."""
+  with runtime_lock:
+    entry["_ts"] = time.time()
+    debug_history.append(entry)
+    if len(debug_history) > DEBUG_HISTORY_MAX:
+      del debug_history[:len(debug_history) - DEBUG_HISTORY_MAX]
+
+
+def get_debug_history():
+  """Return a shallow copy of the debug history list."""
+  with runtime_lock:
+    return list(debug_history)
+
+
+def clear_debug_history():
+  with runtime_lock:
+    debug_history.clear()
+
+
+def request_trackblazer_shop_check(reason=""):
+  global pending_trackblazer_shop_check, pending_trackblazer_shop_check_reason, runtime_updated_at
+  with runtime_lock:
+    pending_trackblazer_shop_check = True
+    pending_trackblazer_shop_check_reason = str(reason or "")
+    runtime_updated_at = time.time()
+
+
+def clear_trackblazer_shop_check_request():
+  global pending_trackblazer_shop_check, pending_trackblazer_shop_check_reason, runtime_updated_at
+  with runtime_lock:
+    pending_trackblazer_shop_check = False
+    pending_trackblazer_shop_check_reason = ""
+    runtime_updated_at = time.time()
+
+
+def has_pending_trackblazer_shop_check():
+  with runtime_lock:
+    return bool(pending_trackblazer_shop_check)
+
+
+def get_pending_trackblazer_shop_check_reason():
+  with runtime_lock:
+    return str(pending_trackblazer_shop_check_reason or "")
 
 
 def begin_review_wait():
@@ -248,6 +308,50 @@ def set_skill_dry_run_enabled(enabled):
 def get_skill_dry_run_enabled():
   with runtime_lock:
     return skill_dry_run_enabled
+
+
+def begin_post_action_resolution(source_action="", reason="", sub_phase=SUB_PHASE_IDLE):
+  global post_action_resolution, runtime_updated_at
+  with runtime_lock:
+    post_action_resolution = default_post_action_resolution_state()
+    post_action_resolution.update({
+      "active": True,
+      "source_action": str(source_action or ""),
+      "reason": str(reason or ""),
+      "sub_phase": str(sub_phase or SUB_PHASE_IDLE),
+      "status": "active",
+      "outcome": "",
+    })
+    runtime_updated_at = time.time()
+
+
+def update_post_action_resolution(**changes):
+  global post_action_resolution, runtime_updated_at
+  with runtime_lock:
+    if not isinstance(post_action_resolution, dict):
+      post_action_resolution = default_post_action_resolution_state()
+    for key, value in (changes or {}).items():
+      if key == "deferred_work" and value is not None:
+        post_action_resolution[key] = list(value)
+      elif value is not None:
+        post_action_resolution[key] = value
+    runtime_updated_at = time.time()
+
+
+def end_post_action_resolution(outcome="", status="completed"):
+  update_post_action_resolution(active=False, outcome=str(outcome or ""), status=str(status or "completed"))
+
+
+def clear_post_action_resolution():
+  global post_action_resolution, runtime_updated_at
+  with runtime_lock:
+    post_action_resolution = default_post_action_resolution_state()
+    runtime_updated_at = time.time()
+
+
+def get_post_action_resolution_state():
+  with runtime_lock:
+    return dict(post_action_resolution or {})
 
 
 def set_control_backend_state(

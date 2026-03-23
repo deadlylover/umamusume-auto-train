@@ -3,6 +3,73 @@
 This document is a holding area for product and engineering improvements that
 should be specified and implemented later.
 
+## Trackblazer Post-Action Resolution Flow State
+
+### Problem
+
+The bot still treats too much of the "after an action, before stable lobby"
+window as generic lobby cleanup.
+
+That is the wrong abstraction for Trackblazer because important scenario
+screens can appear in that resolution window:
+
+- shop refresh / shop sale popups
+- scheduled race available popups
+- consecutive-race warning and similar gates
+- result / reward / follow-up scenario dialogs that are not just generic
+  `cancel` / `next` recovery noise
+
+Today those screens are easy to accidentally handle in the wrong place:
+
+- they get mixed into generic lobby scanning branches
+- they compete with fallback "press cancel / next / back to get to lobby"
+  behavior
+- new popup assets do not have a canonical home, so adding them risks more
+  one-off branches
+
+### Goal
+
+Add a documented flow boundary for `post_action_resolution` so scenario popups
+that happen after training/races/events are handled before the bot falls back
+to generic "return to lobby" cleanup.
+
+### Proposed Direction
+
+- Treat the period after action execution and before stable lobby confirmation
+  as its own domain flow, not as plain `lobby_scan`.
+- Add a canonical runtime sub-phase family for this window, for example:
+  - `post_action_resolution`
+  - `resolve_post_action_popup`
+  - `resolve_shop_refresh_popup`
+  - `resolve_scheduled_race_popup`
+  - `return_to_lobby`
+- Route scenario-aware popup checks through this boundary first.
+- Keep generic fallback clicks such as `cancel`, `next`, `back`, and close
+  buttons as a final recovery layer only after known scenario popups were
+  checked and declined.
+- When a popup implies deferred work rather than immediate execution, let the
+  resolution flow set an explicit pending flag for later controlled handling.
+  Example:
+  - shop refresh / sale popup => dismiss popup, mark `shop_check_pending`
+  - scheduled race popup => mark or enter the race flow using a named branch,
+    not a lobby-template side path
+- Document which popup classes belong to:
+  - immediate resolution
+  - deferred scenario work
+  - generic recovery
+
+### Notes
+
+- This should align with `docs/BOT_FLOW.md` and
+  `docs/PRD_TRACKBLAZER_FLOW_UPDATES.md`, but the backlog owner should be this
+  TODO entry.
+- The main requirement is architectural: new assets like shop sale, shop
+  refresh, scheduled race available, and future Trackblazer popups need a
+  predictable insertion point.
+- The fallback "get back to lobby no matter what" behavior is still required,
+  but it should be downstream of scenario-aware resolution, not competing with
+  it.
+
 ## Failure OCR Stabilization
 
 ### Problem

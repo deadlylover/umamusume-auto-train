@@ -12,6 +12,12 @@ from utils.log import error, info, warning, debug
 from utils.screenshot import are_screenshots_same
 import pyautogui
 import core.bot as bot
+from core.runtime_flow import (
+  PHASE_POST_ACTION_RESOLUTION,
+  SUB_PHASE_POST_ACTION_RESOLUTION,
+  SUB_PHASE_RESOLVE_EVENT_CHOICE,
+  SUB_PHASE_RETURN_TO_LOBBY,
+)
 from utils.shared import CleanDefaultDict, get_race_type
 
 class Action:
@@ -130,7 +136,17 @@ def _wait_for_post_race_lobby(max_wait_seconds=45.0):
   """
   from core.events import select_event
 
-  bot.set_phase("executing_action", status="active", message="Resolving post-race screens before returning to lobby.")
+  bot.begin_post_action_resolution(
+    source_action="do_race",
+    reason="post_race_followups",
+    sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
+  )
+  bot.set_phase(
+    PHASE_POST_ACTION_RESOLUTION,
+    status="active",
+    message="Resolving post-race screens before returning to lobby.",
+    sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
+  )
   deadline = time() + max_wait_seconds
   idle_loops = 0
   while time() < deadline:
@@ -140,11 +156,29 @@ def _wait_for_post_race_lobby(max_wait_seconds=45.0):
     device_action.flush_screenshot_cache()
     in_lobby, anchors = _is_back_in_career_lobby()
     if in_lobby:
-      bot.set_phase("executing_action", status="active", message="Stable lobby detected after race; finalizing turn.")
+      bot.set_phase(
+        PHASE_POST_ACTION_RESOLUTION,
+        status="active",
+        message="Stable lobby detected after race; finalizing turn.",
+        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+      )
+      bot.end_post_action_resolution(outcome="stable_lobby_confirmed_after_race")
       info(f"[RACE] Stable lobby detected after race. anchors={anchors}")
       return True
 
     if select_event():
+      bot.update_post_action_resolution(
+        active=True,
+        popup_type="event_choice",
+        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
+        status="active",
+      )
+      bot.set_phase(
+        PHASE_POST_ACTION_RESOLUTION,
+        status="active",
+        message="Resolving post-race event choice.",
+        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
+      )
       info("[RACE] Advanced post-race event choice.")
       idle_loops = 0
       sleep(0.6)
@@ -153,6 +187,18 @@ def _wait_for_post_race_lobby(max_wait_seconds=45.0):
     progressed = False
     for label, template_path, region_ltrb in _POST_RACE_ADVANCE_TEMPLATES:
       if device_action.locate_and_click(template_path, min_search_time=get_secs(0.4), region_ltrb=region_ltrb):
+        bot.update_post_action_resolution(
+          active=True,
+          popup_type=label,
+          sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+          status="active",
+        )
+        bot.set_phase(
+          PHASE_POST_ACTION_RESOLUTION,
+          status="active",
+          message=f"Advancing post-race screen via {label}.",
+          sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+        )
         info(f"[RACE] Advanced post-race screen via {label}.")
         progressed = True
         idle_loops = 0
@@ -163,6 +209,12 @@ def _wait_for_post_race_lobby(max_wait_seconds=45.0):
 
     idle_loops += 1
     if idle_loops >= 3:
+      bot.set_phase(
+        PHASE_POST_ACTION_RESOLUTION,
+        status="active",
+        message="No post-race buttons matched; tapping safe space to continue toward the lobby.",
+        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+      )
       info("[RACE] No post-race buttons matched; tapping safe space to advance overlays.")
       device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
       idle_loops = 0
@@ -172,6 +224,7 @@ def _wait_for_post_race_lobby(max_wait_seconds=45.0):
     sleep(0.5)
 
   warning("[RACE] Timed out waiting to confirm the career lobby after race; finalizing turn anyway.")
+  bot.end_post_action_resolution(outcome="timed_out_after_race", status="warning")
   return True
 
 def do_recreation(options=None):

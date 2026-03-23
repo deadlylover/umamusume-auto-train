@@ -101,6 +101,11 @@ For planning and scenario design, these labels are more useful than only the UI 
   The operator console exposes OCR evidence and intended clicks. In `check_only` mode the bot pauses here.
 - `action_execution`
   The selected action is committed. Pressing Continue (F2) during `action_preview` in `check_only` mode triggers a one-shot execute — the full sequence (shop purchases → inventory refresh → item use → reassess → action) runs once, then the bot returns to `check_only` for the next turn. This supports a step-through walkthrough workflow.
+- `post_action_resolution`
+  The bot handles screens that appear after training, races, events, or other
+  committed actions but before the stable lobby is back. This is where
+  scenario popups like Trackblazer shop sale / refresh and scheduled race
+  notices should live.
 - `recovery`
   The bot retries, skips, or returns to lobby after a failed or invalid step.
 
@@ -146,6 +151,8 @@ These are the kinds of sub-phases that are useful to document and expose.
 
 ### Recovery Path
 
+- `post_action_resolution`
+- `resolve_post_action_popup`
 - `state_invalid_retry`
 - `action_failed_retry`
 - `return_to_lobby`
@@ -165,6 +172,7 @@ Preferred extension points:
 Avoid:
 
 - adding unrelated scenario branches throughout the generic lobby scan
+- treating scenario post-action popups as generic `cancel` / `next` cleanup
 - adding undocumented keys to the state dict
 - mixing scenario-exclusive shop/inventory logic directly into generic training choice code
 
@@ -183,6 +191,9 @@ For MANT / Trackblazer, the likely scenario-specific sub-phases are:
 - `open_trackblazer_shop`
 - `scan_trackblazer_shop`
 - `preview_shop_purchase`
+- `post_action_resolution`
+- `resolve_shop_refresh_popup`
+- `resolve_scheduled_race_popup`
 - `prepare_summer_burst`
 - `plan_twinkle_star_climax`
 

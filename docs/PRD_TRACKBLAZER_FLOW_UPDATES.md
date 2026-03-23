@@ -102,6 +102,10 @@ That top-level phase model is good enough to keep.
 
 The missing layer is explicit Trackblazer sub-flow modeling inside those phases.
 
+One concrete gap is the window after action execution and before stable lobby
+confirmation. Trackblazer needs that modeled as a post-action resolution
+boundary, not left as generic lobby cleanup.
+
 ## Key Design Principle
 
 Trackblazer should be modeled as a race-centric scenario with training windows.
@@ -164,6 +168,10 @@ Required Trackblazer-oriented sub-phases to support:
 - `scan_trackblazer_shop`
 - `preview_shop_purchase`
 - `plan_twinkle_star_climax`
+- `post_action_resolution`
+- `resolve_post_action_popup`
+- `resolve_shop_refresh_popup`
+- `resolve_scheduled_race_popup`
 
 Requirement:
 
@@ -205,11 +213,13 @@ Preferred boundary points:
 - before race-vs-training gating
 - during race candidate evaluation
 - before skill or shop entry
+- after action execution but before fallback return-to-lobby handling
 - before finale-specific execution
 
 Requirement:
 
 - avoid scattering Trackblazer checks across unrelated generic lobby handling branches
+- avoid handling post-action scenario popups as ad hoc `cancel` / `next` lobby cleanup
 
 ### 5. Race-Centric Decision Gate
 
@@ -274,6 +284,8 @@ Required visibility:
 - proposed action
 - relevant OCR/debug sources
 - planned clicks for shop, race, and skill actions
+- whether the bot is resolving a known post-action popup versus doing generic
+  return-to-lobby fallback
 
 ## Proposed Implementation Shape
 
@@ -312,6 +324,8 @@ The implementation does not need a full rewrite, but it should move toward this 
 
 - add dedicated shop-related sub-phases
 - add dedicated Twinkle Star Climax sub-phases
+- add dedicated post-action resolution sub-phases for scenario popups that
+  appear after training/races/events resolve
 - keep execution safe even if some logic remains preview-only
 
 ## Dependencies And Sequencing
@@ -345,6 +359,9 @@ Recommended sequencing:
 - The operator console can show Trackblazer-specific flow state in a way that is useful for debugging.
 - Trackblazer race-vs-training reasoning becomes a first-class part of the implementation.
 - Shop/fatigue/checkpoint/finale concepts have named homes in the flow, even if some remain partially implemented.
+- Post-action scenario popups such as shop sale/refresh and scheduled race
+  notices have a named flow boundary instead of being mixed into generic lobby
+  cleanup.
 
 ## Risks
 

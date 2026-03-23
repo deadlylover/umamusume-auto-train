@@ -323,6 +323,7 @@ TRACKBLAZER_ITEM_USE_TEMPLATES = {
 # Trackblazer shop entry templates.
 TRACKBLAZER_SHOP_ENTRY_TEMPLATES = {
   "shop_refresh_dialog": "assets/trackblazer/shop_refresh.png",
+  "shop_sale_popup": "assets/trackblazer/shop_sale_popup.png",
   "shop_refresh_cancel": "assets/trackblazer/shop_refresh_cancel.png",
   "shop_refresh_shop": "assets/trackblazer/shop_refresh_shop.png",
   "shop_enter_lobby": "assets/buttons/shop_enter_lobby.png",

@@ -20,6 +20,16 @@ from core.skill_scanner import collect_skill_purchase
 from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
+from core.runtime_flow import (
+  PHASE_POST_ACTION_RESOLUTION,
+  SUB_PHASE_POST_ACTION_RESOLUTION,
+  SUB_PHASE_RESOLVE_CONSECUTIVE_RACE_WARNING,
+  SUB_PHASE_RESOLVE_EVENT_CHOICE,
+  SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+  SUB_PHASE_RESOLVE_SCHEDULED_RACE_POPUP,
+  SUB_PHASE_RESOLVE_SHOP_REFRESH_POPUP,
+  SUB_PHASE_RETURN_TO_LOBBY,
+)
 from core.trackblazer_shop import get_effective_shop_items, get_priority_preview, policy_context
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
@@ -206,6 +216,51 @@ def _trackblazer_turn_key(state_obj):
   if not isinstance(state_obj, dict):
     return None
   return (state_obj.get("year"), state_obj.get("turn"))
+
+
+def _trackblazer_scenario_active():
+  return constants.SCENARIO_NAME in ("mant", "trackblazer")
+
+
+def _handle_trackblazer_shop_refresh_popup():
+  from scenarios.trackblazer import inspect_shop_entry_state
+
+  shop_state = inspect_shop_entry_state(threshold=0.75)
+  refresh_dialog = (shop_state.get("methods") or {}).get("refresh_dialog") or {}
+  if not refresh_dialog.get("matched"):
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "shop_refresh_popup",
+      "reason": "refresh_dialog_not_matched",
+      "deferred_work": [],
+    }
+
+  bot.request_trackblazer_shop_check("refresh_dialog_popup")
+  deferred_work = ["shop_check_pending"]
+  dismiss_entry = refresh_dialog.get("dismiss") or {}
+  dismiss_target = dismiss_entry.get("click_target")
+  if dismiss_target:
+    click_metrics = device_action.click_with_metrics(dismiss_target)
+    if click_metrics.get("clicked"):
+      info("[TB_SHOP] Refresh popup detected; dismissed it and queued a shop check.")
+      bot.push_debug_history({"event": "click", "asset": "shop_refresh_cancel", "result": "clicked", "context": "trackblazer_refresh_popup"})
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "shop_refresh_popup",
+        "reason": "dismissed_and_queued_shop_check",
+        "deferred_work": deferred_work,
+      }
+
+  warning("[TB_SHOP] Refresh popup detected and shop check queued, but dismiss button was not clickable.")
+  return {
+    "detected": True,
+    "handled": False,
+    "popup_type": "shop_refresh_popup",
+    "reason": "dismiss_target_not_clickable",
+    "deferred_work": deferred_work,
+  }
 
 
 def _scenario_banner_templates():
@@ -1278,6 +1333,352 @@ _LOBBY_ANCHOR_TEMPLATES = (
   "assets/buttons/races_btn.png",
 )
 
+_POST_ACTION_GENERIC_ADVANCE_TEMPLATES = (
+  ("next2", "assets/buttons/next2_btn.png", constants.GAME_WINDOW_BBOX),
+  ("next", "assets/buttons/next_btn.png", constants.GAME_WINDOW_BBOX),
+  ("ok_2_btn", "assets/buttons/ok_2_btn.png", constants.GAME_WINDOW_BBOX),
+  ("retry", "assets/buttons/retry_btn.png", constants.GAME_WINDOW_BBOX),
+  ("close", "assets/buttons/close_btn.png", constants.GAME_WINDOW_BBOX),
+  ("back", "assets/buttons/back_btn.png", constants.SCREEN_BOTTOM_BBOX),
+  ("cancel", "assets/buttons/cancel_btn.png", constants.GAME_WINDOW_BBOX),
+)
+
+
+def _is_stable_career_lobby_screen(screenshot=None, threshold=0.8):
+  screenshot = screenshot if screenshot is not None else device_action.screenshot()
+  stable_anchor_counts = _detect_stable_career_screen_anchors(screenshot, threshold=threshold)
+  return _has_stable_career_screen(stable_anchor_counts), stable_anchor_counts
+
+
+def _update_post_action_resolution_snapshot(
+  state_obj,
+  action,
+  message,
+  sub_phase,
+  popup_type="",
+  deferred_work=None,
+  reasoning_notes=None,
+  status="active",
+):
+  bot.update_post_action_resolution(
+    active=True,
+    source_action=_action_func(action),
+    sub_phase=sub_phase,
+    popup_type=str(popup_type or ""),
+    deferred_work=list(deferred_work or []),
+    status=status,
+  )
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase=PHASE_POST_ACTION_RESOLUTION,
+    status=status,
+    message=message,
+    reasoning_notes=reasoning_notes,
+    sub_phase=sub_phase,
+  )
+
+
+def _handle_trackblazer_scheduled_race_popup(state_obj, action):
+  from core.actions import start_race
+
+  _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+  screenshot = device_action.screenshot()
+  sched_race_banner = device_action.match_template(
+    "assets/trackblazer/lobby_scheduled_race_available.png",
+    screenshot,
+    threshold=0.8,
+    template_scaling=_inv_scale,
+  )
+  if not sched_race_banner:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "scheduled_race_popup",
+      "reason": "banner_not_found",
+      "deferred_work": [],
+    }
+
+  _update_post_action_resolution_snapshot(
+    state_obj,
+    action,
+    message="Trackblazer scheduled race popup detected.",
+    sub_phase=SUB_PHASE_RESOLVE_SCHEDULED_RACE_POPUP,
+    popup_type="scheduled_race_popup",
+  )
+  info("[TB_POST] Scheduled race popup detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "lobby_scheduled_race_available.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+
+  race_btn = device_action.match_template(
+    "assets/trackblazer/lobby_scheduled_race_race.png",
+    screenshot,
+    threshold=0.7,
+    template_scaling=_inv_scale,
+  )
+  if not race_btn:
+    warning("[TB_POST] Scheduled race popup detected but the popup Race button was not matched.")
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "lobby_scheduled_race_race.png",
+      "result": "not_found",
+      "context": "post_action_resolution",
+    })
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "scheduled_race_popup",
+      "reason": "popup_race_button_not_found",
+      "deferred_work": [],
+    }
+
+  x, y, w, h = race_btn[0]
+  device_action.click(target=(x + w // 2, y + h // 2), text="Clicked scheduled race Race button on popup.")
+  bot.push_debug_history({
+    "event": "click",
+    "asset": "lobby_scheduled_race_race.png",
+    "result": "clicked",
+    "context": "post_action_resolution",
+  })
+  sleep(1.2)
+
+  consecutive_cancel_btn = device_action.locate(
+    "assets/buttons/cancel_btn.png",
+    min_search_time=get_secs(1),
+    region_ltrb=constants.GAME_WINDOW_BBOX,
+  )
+  if consecutive_cancel_btn:
+    _update_post_action_resolution_snapshot(
+      state_obj,
+      action,
+      message="Consecutive-race warning detected while resolving scheduled race popup.",
+      sub_phase=SUB_PHASE_RESOLVE_CONSECUTIVE_RACE_WARNING,
+      popup_type="scheduled_race_popup",
+    )
+    if config.CANCEL_CONSECUTIVE_RACE:
+      device_action.locate_and_click(
+        "assets/buttons/cancel_btn.png",
+        min_search_time=get_secs(1),
+        region_ltrb=constants.GAME_WINDOW_BBOX,
+        text="Cancelled scheduled race because consecutive-race warning was shown.",
+      )
+      info("[TB_POST] Consecutive-race warning dismissed via Cancel during scheduled race popup flow.")
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "scheduled_race_popup",
+        "reason": "canceled_due_to_consecutive_race_warning",
+        "deferred_work": [],
+      }
+    if not device_action.locate_and_click(
+      "assets/buttons/ok_btn.png",
+      min_search_time=get_secs(1),
+      region_ltrb=constants.GAME_WINDOW_BBOX,
+      text="Accepted consecutive-race warning during scheduled race popup flow.",
+    ):
+      warning("[TB_POST] Consecutive-race warning detected but OK button was not found.")
+      return {
+        "detected": True,
+        "handled": False,
+        "popup_type": "scheduled_race_popup",
+        "reason": "consecutive_race_warning_ok_not_found",
+        "deferred_work": [],
+      }
+    sleep(1.0)
+
+  confirmed_race = False
+  confirm_asset = ""
+  for template_path, min_search_time in (
+    ("assets/buttons/race_btn.png", get_secs(5)),
+    ("assets/buttons/bluestacks/race_btn.png", get_secs(3)),
+  ):
+    if device_action.locate_and_click(template_path, min_search_time=min_search_time):
+      confirmed_race = True
+      confirm_asset = template_path
+      break
+  if not confirmed_race:
+    warning("[TB_POST] Could not find race confirm button after scheduled race popup.")
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "race_btn.png",
+      "result": "not_found",
+      "context": "post_action_resolution",
+    })
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "scheduled_race_popup",
+      "reason": "race_confirm_button_not_found",
+      "deferred_work": [],
+    }
+
+  bot.push_debug_history({
+    "event": "click",
+    "asset": confirm_asset,
+    "result": "clicked",
+    "context": "post_action_resolution",
+  })
+  info("[TB_POST] Scheduled race confirmed from popup flow; starting race sequence.")
+  if not start_race():
+    warning("[TB_POST] Scheduled race popup branch reached race start but the race flow did not complete cleanly.")
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "scheduled_race_popup",
+      "reason": "race_sequence_failed",
+      "deferred_work": [],
+    }
+
+  return {
+    "detected": True,
+    "handled": True,
+    "popup_type": "scheduled_race_popup",
+    "reason": "scheduled_race_completed",
+    "deferred_work": [],
+  }
+
+
+def _generic_post_action_return_to_lobby_step():
+  for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
+    if label == "cancel":
+      screenshot = device_action.screenshot()
+      if device_action.match_template("assets/icons/clock_icon.png", screenshot=screenshot, threshold=0.9):
+        continue
+    if device_action.locate_and_click(template_path, min_search_time=get_secs(0.4), region_ltrb=region_ltrb):
+      return label
+  return ""
+
+
+def _resolve_post_action_resolution(state_obj, action, max_wait=20.0):
+  import time as _time_mod
+
+  action_name = _action_func(action) or "unknown_action"
+  bot.begin_post_action_resolution(
+    source_action=action_name,
+    reason="action_committed_waiting_for_stable_lobby",
+    sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
+  )
+  deadline = _time_mod.time() + max_wait
+  idle_loops = 0
+
+  while _time_mod.time() < deadline:
+    if bot.stop_event.is_set():
+      bot.end_post_action_resolution(outcome="bot_stopped", status="stopped")
+      return False
+
+    device_action.flush_screenshot_cache()
+    screenshot = device_action.screenshot()
+    stable_lobby, anchor_counts = _is_stable_career_lobby_screen(screenshot=screenshot)
+    if stable_lobby:
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message=f"Stable lobby confirmed after {action_name}.",
+        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+        reasoning_notes=f"anchor_counts={anchor_counts}",
+      )
+      bot.end_post_action_resolution(outcome="stable_lobby_confirmed")
+      return True
+
+    _update_post_action_resolution_snapshot(
+      state_obj,
+      action,
+      message=f"Resolving post-action popup or follow-up screen after {action_name}.",
+      sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+      reasoning_notes=f"anchor_counts={anchor_counts}",
+    )
+
+    if select_event():
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message="Resolved post-action event choice.",
+        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
+        popup_type="event_choice",
+      )
+      idle_loops = 0
+      sleep(0.6)
+      continue
+
+    if _trackblazer_scenario_active():
+      shop_refresh_result = _handle_trackblazer_shop_refresh_popup()
+      if shop_refresh_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer shop refresh popup." if shop_refresh_result.get("handled") else "Trackblazer shop refresh popup detected but not fully dismissed.",
+          sub_phase=SUB_PHASE_RESOLVE_SHOP_REFRESH_POPUP,
+          popup_type=shop_refresh_result.get("popup_type"),
+          deferred_work=shop_refresh_result.get("deferred_work"),
+          reasoning_notes=shop_refresh_result.get("reason"),
+        )
+        if shop_refresh_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+      scheduled_race_result = _handle_trackblazer_scheduled_race_popup(state_obj, action)
+      if scheduled_race_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer scheduled race popup." if scheduled_race_result.get("handled") else "Trackblazer scheduled race popup detected but race branch did not complete cleanly.",
+          sub_phase=SUB_PHASE_RESOLVE_SCHEDULED_RACE_POPUP,
+          popup_type=scheduled_race_result.get("popup_type"),
+          deferred_work=scheduled_race_result.get("deferred_work"),
+          reasoning_notes=scheduled_race_result.get("reason"),
+        )
+        if scheduled_race_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+    generic_step = _generic_post_action_return_to_lobby_step()
+    if generic_step:
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message=f"Generic post-action recovery clicked {generic_step}.",
+        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+        popup_type="generic_recovery",
+        reasoning_notes=f"clicked={generic_step}",
+      )
+      idle_loops = 0
+      sleep(0.6)
+      continue
+
+    idle_loops += 1
+    if idle_loops >= 3:
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message="No post-action buttons matched; tapping safe space to continue toward the lobby.",
+        sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+        popup_type="generic_recovery",
+      )
+      device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
+      idle_loops = 0
+      sleep(0.6)
+      continue
+
+    sleep(0.5)
+
+  warning(f"[POST_ACTION] Timed out resolving post-action screens after {action_name}; returning control to generic lobby scan.")
+  _update_post_action_resolution_snapshot(
+    state_obj,
+    action,
+    message=f"Timed out resolving post-action screens after {action_name}; falling back to generic lobby scan.",
+    sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+    popup_type="generic_timeout_fallback",
+    status="warning",
+  )
+  bot.end_post_action_resolution(outcome="timed_out_fallback", status="warning")
+  return True
+
 
 def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=None, ocr_debug=None, planned_clicks=None):
   """Brief poll for a lobby bottom-bar button after pre-action item use.
@@ -1349,6 +1750,97 @@ def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=No
     sleep(0.4)
 
   warning(f"[ITEM_USE] Timed out waiting for lobby after item use ({polls} polls).")
+  return False
+
+
+def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
+  """Brief poll for a lobby bottom-bar button after Trackblazer shop purchases.
+
+  After the shop close + inventory refresh, the game overlay may linger.
+  Poll up to *max_wait* seconds, closing any residual shop/inventory overlay
+  on each iteration (capped at 3 close attempts each).
+
+  Returns True if a lobby anchor was confirmed, False if timed out.
+  """
+  import time as _time_mod
+  from scenarios.trackblazer import (
+    detect_inventory_screen, close_training_items_inventory,
+    detect_shop_screen, close_trackblazer_shop,
+  )
+
+  deadline = _time_mod.time() + max_wait
+  generic_recovery_attempted = False
+  inventory_close_count = 0
+  shop_close_count = 0
+  max_close_attempts = 3
+  polls = 0
+
+  while _time_mod.time() < deadline:
+    if bot.stop_event.is_set():
+      return False
+    polls += 1
+    device_action.flush_screenshot_cache()
+
+    # 1. Check lobby anchors — if any match, we're done.
+    screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    lobby_found = False
+    for tpl in _LOBBY_ANCHOR_TEMPLATES:
+      if device_action.match_template(tpl, screenshot, threshold=0.8):
+        lobby_found = True
+        break
+    if lobby_found:
+      info(f"[TB_SHOP] Lobby anchor confirmed after shop purchase (poll {polls}).")
+      return True
+
+    # 2. Check if shop screen is still visible.
+    if shop_close_count < max_close_attempts:
+      device_action.flush_screenshot_cache()
+      shop_open, _, _ = detect_shop_screen(threshold=0.75)
+      if shop_open:
+        shop_close_count += 1
+        info(
+          f"[TB_SHOP] Shop screen visible (poll {polls}, "
+          f"close attempt {shop_close_count}/{max_close_attempts}); closing."
+        )
+        close_result = close_trackblazer_shop()
+        if close_result.get("closed"):
+          info("[TB_SHOP] Shop closed via explicit close in lobby wait.")
+        else:
+          warning("[TB_SHOP] Explicit shop close attempt did not succeed.")
+        sleep(0.3)
+        continue
+
+    # 3. Check if inventory screen is visible (from post-shop refresh).
+    if inventory_close_count < max_close_attempts:
+      device_action.flush_screenshot_cache()
+      inv_open, _, _ = detect_inventory_screen(threshold=0.75)
+      if inv_open:
+        inventory_close_count += 1
+        info(
+          f"[TB_SHOP] Inventory screen visible (poll {polls}, "
+          f"close attempt {inventory_close_count}/{max_close_attempts}); closing."
+        )
+        close_result = close_training_items_inventory()
+        if close_result.get("closed"):
+          info("[TB_SHOP] Inventory closed via explicit close in lobby wait.")
+        else:
+          warning("[TB_SHOP] Explicit inventory close attempt did not succeed.")
+        sleep(0.3)
+        continue
+
+    # 4. Generic back/close fallback — one attempt only.
+    if not generic_recovery_attempted:
+      info(f"[TB_SHOP] Lobby not visible (poll {polls}); attempting generic recovery close.")
+      for close_tpl in ("assets/buttons/close_btn.png", "assets/buttons/back_btn.png"):
+        if device_action.locate_and_click(close_tpl, min_search_time=get_secs(0.4), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
+          info(f"[TB_SHOP] Clicked {close_tpl} to dismiss leftover overlay.")
+          sleep(0.6)
+          break
+      generic_recovery_attempted = True
+
+    sleep(0.4)
+
+  warning(f"[TB_SHOP] Timed out waiting for lobby after shop purchase ({polls} polls).")
   return False
 
 
@@ -1451,6 +1943,7 @@ def _ocr_debug_for_action(state_obj, action):
 def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
   profile_info = _active_region_profile_info()
   backend_state = bot.get_backend_state()
+  post_action_resolution = bot.get_post_action_resolution_state()
   debug_entries = ([ _profile_debug_entry() ] + ocr_debug) if ocr_debug is not None else ([ _profile_debug_entry() ] + _ocr_debug_for_action(state_obj, action))
   debug_entries = _enrich_ocr_debug_entries(debug_entries)
   state_summary = {
@@ -1469,6 +1962,9 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "control_backend": backend_state.get("active_backend"),
     "screenshot_backend": backend_state.get("screenshot_backend"),
     "device_id": backend_state.get("device_id"),
+    "post_action_resolution": post_action_resolution,
+    "pending_trackblazer_shop_check": bot.has_pending_trackblazer_shop_check(),
+    "pending_trackblazer_shop_check_reason": bot.get_pending_trackblazer_shop_check_reason(),
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
@@ -1515,7 +2011,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "scenario_name": constants.SCENARIO_NAME or "default",
     "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
     "energy_label": f"{state_obj.get('energy_level', '?')}/{state_obj.get('max_energy', '?')}",
-    "sub_phase": sub_phase or "idle",
+    "sub_phase": sub_phase or (post_action_resolution.get("sub_phase") if post_action_resolution.get("active") else "idle") or "idle",
     "execution_intent": bot.get_execution_intent(),
     "state_summary": state_summary,
     "selected_action": selected_action,
@@ -1750,7 +2246,7 @@ def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_no
 
 
 def update_startup_scan_snapshot(message, sub_phase, ocr_debug=None, reasoning_notes=None, available_actions=None):
-  bot.set_phase("scanning_lobby", status="active", message=message)
+  bot.set_phase("scanning_lobby", status="active", message=message, sub_phase=sub_phase or "idle")
   bot.set_snapshot(
     build_startup_scan_snapshot(
       sub_phase=sub_phase,
@@ -1776,10 +2272,10 @@ def update_operator_snapshot(
   planned_clicks=None,
 ):
   if phase:
-    bot.set_phase(phase, status=status, message=message, error=error_text)
+    bot.set_phase(phase, status=status, message=message, error=error_text, sub_phase=sub_phase or "idle")
   elif message or error_text:
     current = bot.get_runtime_state()
-    bot.set_phase(current["phase"], status=status, message=message, error=error_text)
+    bot.set_phase(current["phase"], status=status, message=message, error=error_text, sub_phase=sub_phase or current.get("sub_phase"))
   if state_obj is not None and action is not None:
     bot.set_snapshot(
       build_review_snapshot(
@@ -1890,6 +2386,20 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
+  if shop_purchase_result.get("status") == "executed":
+    lobby_after_shop = _wait_for_lobby_after_shop_purchase()
+    if not lobby_after_shop:
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text="Lobby not visible after shop purchase; shop/inventory overlay may still be up.",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return "failed"
   pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
   if pre_action_item_result.get("status") == "failed":
     update_operator_snapshot(
@@ -1941,6 +2451,19 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       status="error",
       error_text=f"Action failed: {action.func}",
       sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "failed"
+  post_action_result = _resolve_post_action_resolution(state_obj, action)
+  if not post_action_result:
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Post-action resolution failed after {action.func}",
+      sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
@@ -2080,6 +2603,7 @@ def career_lobby(dry_run_turn=False):
   scenario_detection_attempts = 0
   last_trackblazer_shop_refresh_turn = None
   _cached_trackblazer_inventory = None
+  bot.clear_trackblazer_shop_check_request()
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
   constants.SCENARIO_NAME = ""
@@ -2135,35 +2659,36 @@ def career_lobby(dry_run_turn=False):
 
       # modify this portion to get event data out instead. Maybe call collect state or a partial version of it.
       if len(matches.get("event", [])) > 0:
+        bot.push_debug_history({"event": "template_match", "asset": "event", "result": "found", "context": "lobby_scan"})
         select_event()
         continue
       if click_match(matches.get("inspiration")):
+        bot.push_debug_history({"event": "click", "asset": "inspiration", "result": "clicked", "context": "lobby_scan"})
         info("Pressed inspiration.")
         non_match_count = 0
         continue
       if click_match(matches.get("next")):
+        bot.push_debug_history({"event": "click", "asset": "next", "result": "clicked", "context": "lobby_scan"})
         info("Pressed next.")
         non_match_count = 0
         continue
       if click_match(matches.get("next2")):
+        bot.push_debug_history({"event": "click", "asset": "next2", "result": "clicked", "context": "lobby_scan"})
         info("Pressed next2.")
         non_match_count = 0
         continue
       if matches.get("shop_refresh", False):
+        bot.push_debug_history({"event": "template_match", "asset": "shop_refresh", "result": "found", "context": "lobby_scan"})
         info("Shop refresh popup detected — shop has been refreshed.")
-        # Trackblazer policy: a refresh popup means there are fresh items to
-        # inspect, so default to entering the shop. The startup/menu-recovery
-        # path is the separate case where dismissing dialogs to reach a clean
-        # lobby state is still appropriate.
-        # TODO: wire in direct lobby shop entry as an alternate method.
-        if constants.SCENARIO_NAME in ("mant", "trackblazer"):
-          from scenarios.trackblazer import enter_shop
-          shop_result = enter_shop()
-          if shop_result.get("entered"):
-            info(f"Entered Trackblazer shop via {shop_result.get('method')}.")
+        # The primary Trackblazer home for this popup is post_action_resolution.
+        # Keep a lobby-scan fallback so an unexpected stale popup does not
+        # soft-lock the run after a restart or timeout.
+        if _trackblazer_scenario_active():
+          warning("[TB_POST] Shop refresh popup reached generic lobby scan; using fallback dismissal path.")
+          refresh_result = _handle_trackblazer_shop_refresh_popup()
+          if refresh_result.get("handled"):
             non_match_count = 0
           else:
-            warning(f"Trackblazer shop entry failed: {shop_result.get('reason')}")
             non_match_count += 1
         else:
           cancel_match = device_action.match_template("assets/buttons/cancel_btn.png", region_ltrb=constants.GAME_WINDOW_BBOX, threshold=0.9)
@@ -2178,13 +2703,16 @@ def career_lobby(dry_run_turn=False):
       if matches.get("cancel", False):
         clock_icon = device_action.match_template("assets/icons/clock_icon.png", screenshot=screenshot, threshold=0.9)
         if clock_icon:
+          bot.push_debug_history({"event": "template_match", "asset": "cancel + clock_icon", "result": "lost_race", "context": "lobby_scan"})
           info("Lost race, wait for input.")
           non_match_count += 1
         elif click_match(matches.get("cancel")):
+          bot.push_debug_history({"event": "click", "asset": "cancel", "result": "clicked", "context": "lobby_scan"})
           info("Pressed cancel.")
           non_match_count = 0
         continue
       if click_match(matches.get("retry")):
+        bot.push_debug_history({"event": "click", "asset": "retry", "result": "clicked", "context": "lobby_scan"})
         info("Pressed retry.")
         non_match_count = 0
         continue
@@ -2202,6 +2730,7 @@ def career_lobby(dry_run_turn=False):
         continue
 
       if click_match(matches.get("ok_2_btn")):
+        bot.push_debug_history({"event": "click", "asset": "ok_2_btn", "result": "clicked", "context": "lobby_scan"})
         info("Pressed Okay button.")
         non_match_count = 0
         continue
@@ -2219,47 +2748,6 @@ def career_lobby(dry_run_turn=False):
           continue
         if click_match(unity_matches.get("unity_banner_mid_screen")):
           info("Unity banner mid screen found. Starting over.")
-          non_match_count = 0
-          continue
-
-      # Trackblazer: scheduled race popup (appears after turn tick-over).
-      # The in-game agenda fires this overlay before we reach the normal lobby.
-      # Flow: detect banner → click Race on popup → race list opens with the
-      # scheduled race pre-selected → click Race confirm button directly
-      # (skip rival scouting / aptitude checks).
-      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
-        _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
-        sched_race_banner = device_action.match_template(
-          "assets/trackblazer/lobby_scheduled_race_available.png",
-          screenshot,
-          threshold=0.8,
-          template_scaling=_inv_scale,
-        )
-        if sched_race_banner:
-          info("[TB_LOBBY] Scheduled race popup detected — clicking Race button.")
-          race_btn = device_action.match_template(
-            "assets/trackblazer/lobby_scheduled_race_race.png",
-            screenshot,
-            threshold=0.7,
-            template_scaling=_inv_scale,
-          )
-          if race_btn:
-            x, y, w, h = race_btn[0]
-            device_action.click(target=(x + w // 2, y + h // 2), text="Clicked scheduled race Race button on popup.")
-            info("[TB_LOBBY] Clicked Race on popup — waiting for race list.")
-            sleep(1.5)
-            # Race list is now open with the scheduled race pre-selected.
-            # Click the Race confirm button directly (no rival/aptitude scouting).
-            if device_action.locate_and_click("assets/buttons/race_btn.png", min_search_time=get_secs(3)):
-              info("[TB_LOBBY] Confirmed scheduled race from race list.")
-            else:
-              # Fallback: try BlueStacks variant.
-              if device_action.locate_and_click("assets/buttons/bluestacks/race_btn.png", min_search_time=get_secs(2)):
-                info("[TB_LOBBY] Confirmed scheduled race (BlueStacks button).")
-              else:
-                warning("[TB_LOBBY] Could not find Race confirm button on race list.")
-          else:
-            warning("[TB_LOBBY] Scheduled race banner found but Race button not matched.")
           non_match_count = 0
           continue
 
@@ -2287,6 +2775,7 @@ def career_lobby(dry_run_turn=False):
         non_match_count += 1
         continue
       else:
+        bot.push_debug_history({"event": "state", "asset": "stable_career_screen", "result": "matched", "context": "lobby_scan"})
         info(f"Stable career screen matched, moving to state collection. anchor_counts={stable_anchor_counts}")
         if constants.SCENARIO_NAME == "":
           if config.SKIP_SCENARIO_DETECTION:
@@ -2346,32 +2835,41 @@ def career_lobby(dry_run_turn=False):
           )
           _cache_trackblazer_inventory(state_obj)
         _copy_trackblazer_inventory_snapshot(state_obj)
-        if execution_intent == "check_only":
-          current_trackblazer_turn = _trackblazer_turn_key(state_obj)
-          if current_trackblazer_turn != last_trackblazer_shop_refresh_turn:
-            update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
-            from scenarios.trackblazer import check_trackblazer_shop_inventory
-            shop_result = check_trackblazer_shop_inventory(trigger="automatic")
-            _merge_trackblazer_shop_result(state_obj, shop_result)
-            shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
-            if shop_flow.get("entered") and shop_flow.get("closed"):
-              update_operator_snapshot(
-                phase="checking_inventory",
-                message="Refreshing Trackblazer inventory after shop.",
-                sub_phase="scan_items_post_shop",
-              )
-              state_obj = collect_trackblazer_inventory(
-                state_obj,
-                allow_open_non_execute=True,
-                trigger="post_shop_refresh",
-              )
-              _cache_trackblazer_inventory(state_obj)
-              last_trackblazer_shop_refresh_turn = current_trackblazer_turn
-          else:
-            info(
-              "[TB_SHOP] Skipping automatic shop recheck for this turn; "
-              f"already refreshed inventory after shop for {current_trackblazer_turn}."
+        current_trackblazer_turn = _trackblazer_turn_key(state_obj)
+        pending_shop_check = bot.has_pending_trackblazer_shop_check()
+        pending_shop_reason = bot.get_pending_trackblazer_shop_check_reason()
+        automatic_turn_scan = execution_intent == "check_only" and current_trackblazer_turn != last_trackblazer_shop_refresh_turn
+        if pending_shop_check or automatic_turn_scan:
+          update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
+          from scenarios.trackblazer import check_trackblazer_shop_inventory
+          trigger = pending_shop_reason or ("automatic" if automatic_turn_scan else "pending_shop_check")
+          shop_result = check_trackblazer_shop_inventory(trigger=trigger)
+          _merge_trackblazer_shop_result(state_obj, shop_result)
+          shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
+          if shop_flow.get("entered") and shop_flow.get("closed"):
+            update_operator_snapshot(
+              phase="checking_inventory",
+              message="Refreshing Trackblazer inventory after shop.",
+              sub_phase="scan_items_post_shop",
             )
+            state_obj = collect_trackblazer_inventory(
+              state_obj,
+              allow_open_non_execute=True,
+              trigger="post_shop_refresh",
+            )
+            _cache_trackblazer_inventory(state_obj)
+            last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+            bot.clear_trackblazer_shop_check_request()
+          elif pending_shop_check:
+            warning(
+              "[TB_SHOP] Pending shop check was queued but shop scan did not complete; "
+              f"reason={shop_flow.get('reason') or 'unknown'}."
+            )
+        elif execution_intent == "check_only":
+          info(
+            "[TB_SHOP] Skipping automatic shop recheck for this turn; "
+            f"already refreshed inventory after shop for {current_trackblazer_turn}."
+          )
 
       if state_obj["turn"] == "Race Day":
         action.func = "do_race"
@@ -2746,6 +3244,12 @@ def career_lobby(dry_run_turn=False):
 
 def record_and_finalize_turn(state_obj, action):
   global last_state, action_count
+  bot.push_debug_history({
+    "event": "action_executed",
+    "asset": action.func or "unknown",
+    "result": "completed",
+    "context": f"turn_{action_count + 1}",
+  })
   if args.debug is not None:
     record_turn(state_obj, last_state, action)
     last_state = state_obj
