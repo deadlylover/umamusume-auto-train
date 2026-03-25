@@ -106,6 +106,8 @@ TRACKBLAZER_INVENTORY_STATE_KEYS = (
 )
 last_trackblazer_shop_refresh_turn = None
 _cached_trackblazer_inventory = None
+_cached_trackblazer_inventory_turn = None
+_TRACKBLAZER_INVENTORY_CACHE_MAX_TURNS = 3
 
 
 def _canonicalize_scenario_name(name):
@@ -114,28 +116,43 @@ def _canonicalize_scenario_name(name):
   return SCENARIO_NAME_ALIASES.get(name, name)
 
 
-def _cache_trackblazer_inventory(state_obj):
+def _cache_trackblazer_inventory(state_obj, turn_key=None):
   """Store the current inventory state keys so we can skip re-scanning next turn."""
-  global _cached_trackblazer_inventory
+  global _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   if not isinstance(state_obj, dict):
     return
   _cached_trackblazer_inventory = {
     key: copy.deepcopy(state_obj.get(key)) for key in TRACKBLAZER_INVENTORY_STATE_KEYS
   }
+  if turn_key is not None:
+    _cached_trackblazer_inventory_turn = turn_key
 
 
-def _restore_cached_trackblazer_inventory(state_obj):
-  """Apply cached inventory data to state_obj. Returns True if cache was available."""
+def _restore_cached_trackblazer_inventory(state_obj, current_turn_number=None):
+  """Apply cached inventory data to state_obj. Returns True if cache was available and fresh."""
   if not _cached_trackblazer_inventory or not isinstance(state_obj, dict):
     return False
+  # Expire cache if it's older than N turns.
+  if (
+    current_turn_number is not None
+    and _cached_trackblazer_inventory_turn is not None
+    and isinstance(_cached_trackblazer_inventory_turn, (int, float))
+    and isinstance(current_turn_number, (int, float))
+  ):
+    age = abs(current_turn_number - _cached_trackblazer_inventory_turn)
+    if age >= _TRACKBLAZER_INVENTORY_CACHE_MAX_TURNS:
+      info(f"[TB_INV] Inventory cache expired (age {age} turns >= {_TRACKBLAZER_INVENTORY_CACHE_MAX_TURNS}).")
+      _invalidate_trackblazer_inventory_cache()
+      return False
   for key, value in _cached_trackblazer_inventory.items():
     state_obj[key] = copy.deepcopy(value)
   return True
 
 
 def _invalidate_trackblazer_inventory_cache():
-  global _cached_trackblazer_inventory
+  global _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   _cached_trackblazer_inventory = None
+  _cached_trackblazer_inventory_turn = None
 
 
 def _apply_trackblazer_used_items_to_state(state_obj, used_item_keys):
@@ -1290,7 +1307,7 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
   state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
   state_obj["trackblazer_inventory_flow"] = flow
-  _cache_trackblazer_inventory(state_obj)
+  _cache_trackblazer_inventory(state_obj, turn_key=action_count)
 
   if commit_mode == "dry_run":
     return {
@@ -1308,7 +1325,7 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
 
   if not flow.get("graceful_noop"):
     _apply_trackblazer_used_items_to_state(state_obj, item_keys)
-    _cache_trackblazer_inventory(state_obj)
+    _cache_trackblazer_inventory(state_obj, turn_key=action_count)
 
   if action.get("trackblazer_reassess_after_item_use"):
     return {
@@ -1864,6 +1881,10 @@ def _run_trackblazer_shop_purchases(state_obj, action):
   if not item_keys:
     return {"status": "skipped"}
 
+  # Invalidate inventory cache before attempting purchases — even a partial
+  # purchase changes what we hold, so stale cache must not survive failures.
+  _invalidate_trackblazer_inventory_cache()
+
   result = execute_trackblazer_shop_purchases(item_keys, trigger="automatic")
   state_obj["trackblazer_shop_items"] = result.get("trackblazer_shop_items")
   state_obj["trackblazer_shop_summary"] = result.get("trackblazer_shop_summary")
@@ -1882,7 +1903,7 @@ def _run_trackblazer_shop_purchases(state_obj, action):
     trigger="post_shop_purchase_refresh",
   )
   state_obj.update(refreshed_state)
-  _cache_trackblazer_inventory(state_obj)
+  _cache_trackblazer_inventory(state_obj, turn_key=action_count)
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
   return {
     "status": "executed",
@@ -2606,12 +2627,13 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       return "execute"
 
 def career_lobby(dry_run_turn=False):
-  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory
+  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   non_match_count = 0
   action_count=0
   scenario_detection_attempts = 0
   last_trackblazer_shop_refresh_turn = None
   _cached_trackblazer_inventory = None
+  _cached_trackblazer_inventory_turn = None
   bot.clear_trackblazer_shop_check_request()
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
@@ -2832,7 +2854,7 @@ def career_lobby(dry_run_turn=False):
           info("[TB_BUFF] Lobby buff icon detected — a megaphone or similar effect is active.")
 
         execution_intent = bot.get_execution_intent()
-        if _restore_cached_trackblazer_inventory(state_obj):
+        if _restore_cached_trackblazer_inventory(state_obj, current_turn_number=action_count):
           info("[TB_INV] Using cached inventory (no changes since last scan).")
           state_obj["trackblazer_inventory_flow"] = {
             "trigger": "cached",
@@ -2846,7 +2868,7 @@ def career_lobby(dry_run_turn=False):
             state_obj,
             allow_open_non_execute=execution_intent != "execute",
           )
-          _cache_trackblazer_inventory(state_obj)
+          _cache_trackblazer_inventory(state_obj, turn_key=action_count)
         _copy_trackblazer_inventory_snapshot(state_obj)
         current_trackblazer_turn = _trackblazer_turn_key(state_obj)
         pending_shop_check = bot.has_pending_trackblazer_shop_check()
@@ -2874,7 +2896,7 @@ def career_lobby(dry_run_turn=False):
               allow_open_non_execute=True,
               trigger="post_shop_refresh",
             )
-            _cache_trackblazer_inventory(state_obj)
+            _cache_trackblazer_inventory(state_obj, turn_key=action_count)
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
           elif pending_shop_check:
