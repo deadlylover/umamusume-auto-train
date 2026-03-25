@@ -127,6 +127,7 @@ class OperatorConsole:
     self._history_last_timing_text = None
     self._history_last_summary_raw = None
     self._history_menu_button = None
+    self._history_menu = None
     self._history_label_var = None
     self._planned_clicks_value = None
     self._would_use_value = None
@@ -442,10 +443,11 @@ class OperatorConsole:
       relief=tk.FLAT, cursor="hand2", anchor="w",
     )
     self._history_menu_button.grid(row=0, column=1, sticky="w", padx=(8, 4))
-    self._history_menu_button["menu"] = tk.Menu(
+    self._history_menu = tk.Menu(
       self._history_menu_button, tearoff=0, bg="#192028", fg="#d6dde5",
       activebackground="#1f6feb", activeforeground="white",
     )
+    self._history_menu_button["menu"] = self._history_menu
     self._rebuild_history_menu()
     tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=2, sticky="e", padx=(0, 4))
     tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=3, sticky="e", padx=(0, 12))
@@ -1006,10 +1008,9 @@ class OperatorConsole:
 
   def _rebuild_history_menu(self):
     """Rebuild the history dropdown menu entries."""
-    btn = self._history_menu_button
-    if btn is None:
+    menu = self._history_menu
+    if menu is None:
       return
-    menu = btn["menu"]
     menu.delete(0, tk.END)
     menu.add_command(
       label="\u25b6 Live",
