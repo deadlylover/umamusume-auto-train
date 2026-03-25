@@ -1,3 +1,4 @@
+import difflib
 import numpy as np
 import operator
 import re
@@ -1214,6 +1215,14 @@ def get_current_year():
       break
     else:
       device_action.flush_screenshot_cache()
+
+  if text not in constants.TIMELINE:
+    fuzzy = difflib.get_close_matches(text, constants.TIMELINE, n=1, cutoff=0.7)
+    if fuzzy:
+      warning(f"[OCR] Year fuzzy-matched: '{text}' → '{fuzzy[0]}'")
+      text = fuzzy[0]
+    else:
+      warning(f"[OCR] Year unrecognized after retries: '{text}'")
 
   return text
 

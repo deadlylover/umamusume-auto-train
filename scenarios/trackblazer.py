@@ -2227,6 +2227,38 @@ def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
     return state
 
 
+def _match_single_shop_item(screenshot, item_name, threshold=0.7):
+    """Match a single item template against a shop screenshot, bypassing family resolution.
+
+    Returns a row dict compatible with scan_trackblazer_shop_inventory rows,
+    or None if the item is not found.  This avoids the family variant
+    resolution that can suppress an item when its sibling is visible on the
+    same page.
+    """
+    template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+    if not template_path or screenshot is None:
+        return None
+    icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
+    if icon_screenshot is None:
+        return None
+    item_threshold = _item_threshold(item_name, threshold)
+    matches = device_action.match_template(
+        template_path,
+        icon_screenshot,
+        item_threshold,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+    if not matches:
+        return None
+    best = min(matches, key=lambda m: m[1])
+    match = (int(best[0]), int(best[1] + icon_offset_y), int(best[2]), int(best[3]))
+    return {
+        "item_name": item_name,
+        "match": list(match),
+        "row_center_y": int(_match_center_y(match)),
+    }
+
+
 def prepare_trackblazer_shop_item_selection(
     item_name,
     quantity=1,
@@ -2282,26 +2314,40 @@ def prepare_trackblazer_shop_item_selection(
         flow["timing_total"] = round(_time() - t_total, 4)
         return flow
 
+    # Collect ALL unique scroll ratios where the item was observed during
+    # the initial scan.  The continuous-drag scan captures frames while the
+    # scrollbar is in motion so any single ratio may not exactly reproduce
+    # the original view.  Using every observed ratio (with offsets) gives the
+    # selection loop the best chance of re-finding the item.
+    observed_ratios = sorted(set(
+        float((entry.get("scrollbar") or {}).get("position_ratio"))
+        for entry in target_candidates
+        if (entry.get("scrollbar") or {}).get("position_ratio") is not None
+    ))
+    # Pick the median as the primary reference for flow logging.
     target_page = min(
         target_candidates,
-        key=lambda entry: (
-            999 if (entry.get("scrollbar") or {}).get("position_ratio") is None else float((entry.get("scrollbar") or {}).get("position_ratio")),
-            int(entry.get("page_index") or 0),
+        key=lambda entry: abs(
+            float((entry.get("scrollbar") or {}).get("position_ratio") or 0.0)
+            - (observed_ratios[len(observed_ratios) // 2] if observed_ratios else 0.0)
         ),
     )
     flow["target_page"] = {
         "page_index": target_page.get("page_index"),
         "capture_mode": target_page.get("capture_mode"),
         "scrollbar_ratio": (target_page.get("scrollbar") or {}).get("position_ratio"),
+        "observed_ratios": list(observed_ratios),
         "row": target_page.get("row"),
     }
 
     ratio_candidates = []
-    primary_ratio = (target_page.get("scrollbar") or {}).get("position_ratio")
-    if primary_ratio is not None:
-        ratio_candidates.append(float(primary_ratio))
-        for delta in (-0.04, 0.04, -0.08, 0.08):
-            ratio_candidates.append(min(1.0, max(0.0, float(primary_ratio) + delta)))
+    if observed_ratios:
+        # Start with each observed ratio, then fan out with offsets.
+        for obs_ratio in observed_ratios:
+            ratio_candidates.append(obs_ratio)
+        for obs_ratio in observed_ratios:
+            for delta in (-0.04, 0.04, -0.08, 0.08, -0.12, 0.12):
+                ratio_candidates.append(min(1.0, max(0.0, obs_ratio + delta)))
     else:
         ratio_candidates.append(0.0)
 
@@ -2317,21 +2363,13 @@ def prepare_trackblazer_shop_item_selection(
         flow["seek_result"] = seek_result
         live_screenshot = _capture_live_trackblazer_ui_screenshot()
         live_scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=live_screenshot)
-        live_page = scan_trackblazer_shop_inventory(
-            threshold=threshold,
-            checkbox_threshold=checkbox_threshold,
-            confirm_threshold=confirm_threshold,
-            screenshot=live_screenshot,
-            save_debug_image=False,
-        )
-        matched_row = next(
-            (row for row in (live_page.get("rows") or []) if row.get("item_name") == requested_item),
-            None,
-        )
+        # Direct single-template match — bypasses family variant resolution
+        # so that sibling items (e.g. artisan/master cleat hammer) visible on
+        # the same page don't suppress the item we're looking for.
+        matched_row = _match_single_shop_item(live_screenshot, requested_item, threshold=threshold)
         attempt = {
             "target_ratio": round(float(ratio), 4),
             "scrollbar": live_scrollbar,
-            "visible_items": list(live_page.get("visible_items") or []),
             "row_found": bool(matched_row),
             "row": matched_row,
             "checkbox_state": None,
@@ -2359,17 +2397,8 @@ def prepare_trackblazer_shop_item_selection(
         )
         attempt["click_result"] = click_result
         verify_screenshot = _capture_live_trackblazer_ui_screenshot()
-        verify_page = scan_trackblazer_shop_inventory(
-            threshold=threshold,
-            checkbox_threshold=checkbox_threshold,
-            confirm_threshold=confirm_threshold,
-            screenshot=verify_screenshot,
-            save_debug_image=False,
-        )
-        verify_row = next(
-            (row for row in (verify_page.get("rows") or []) if row.get("item_name") == requested_item),
-            None,
-        )
+        # Direct match for verification too — same family resolution bypass.
+        verify_row = _match_single_shop_item(verify_screenshot, requested_item, threshold=threshold)
         verify_state = _resolve_shop_row_checkbox_state(
             verify_screenshot,
             verify_row.get("match") if verify_row else None,

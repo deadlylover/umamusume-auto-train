@@ -849,7 +849,7 @@ def _planned_clicks_for_action(action):
       shop_clicks.append(
         _planned_click(
           f"Buy {item_name}{cost_label}",
-          note=f"policy={entry.get('priority_label', '?')}; hold {entry.get('held', '?')}/{entry.get('cap', '?')}",
+          note=f"policy={entry.get('priority', '?')}; hold {entry.get('held_quantity', '?')}/{entry.get('max_quantity', '?')}",
         )
       )
     shop_clicks.append(
