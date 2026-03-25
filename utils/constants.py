@@ -310,6 +310,9 @@ TRACKBLAZER_LOBBY_BUFF_ICON = "assets/trackblazer/lobby_buff_active.png"
 # Region covering the top-left area of the game window where buff icons appear.
 TRACKBLAZER_LOBBY_BUFF_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 50, -670, -930))
 
+# Trackblazer lobby "Scheduled Race" button — replaces the normal race button when a scheduled race is available.
+TRACKBLAZER_LOBBY_SCHEDULED_RACE = "assets/trackblazer/lobby_scheduled_race.png"
+
 # Trackblazer item use flow UI templates.
 TRACKBLAZER_ITEM_USE_TEMPLATES = {
   "use_training_items": "assets/trackblazer/shop_use_training_items.png",

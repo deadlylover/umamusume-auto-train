@@ -2888,6 +2888,24 @@ def career_lobby(dry_run_turn=False):
             f"already refreshed inventory after shop for {current_trackblazer_turn}."
           )
 
+        # Detect "Scheduled Race" button on the lobby race button area.
+        _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+        sched_btn = device_action.match_template(
+          constants.TRACKBLAZER_LOBBY_SCHEDULED_RACE,
+          screenshot,
+          threshold=0.8,
+          template_scaling=_inv_scale,
+        )
+        if sched_btn:
+          state_obj["trackblazer_lobby_scheduled_race"] = True
+          info("[TB_RACE] Scheduled Race button detected on lobby screen.")
+          bot.push_debug_history({
+            "event": "template_match",
+            "asset": "lobby_scheduled_race.png",
+            "result": "found",
+            "context": "lobby_scan_trackblazer",
+          })
+
       if state_obj["turn"] == "Race Day":
         action.func = "do_race"
         action["is_race_day"] = True
@@ -2973,6 +2991,55 @@ def career_lobby(dry_run_turn=False):
           action.func = None
           action.options.pop("race_name", None)
           action.options.pop("race_image_path", None)
+
+      # Trackblazer lobby "Scheduled Race" button — visual indicator on the race button area.
+      if (
+        action.func != "do_race"
+        and state_obj.get("trackblazer_lobby_scheduled_race")
+      ):
+        from core.trackblazer_item_use import _hammer_usage_state, _safe_int, _HAMMER_TIERS
+        held_quantities = {}
+        inventory = state_obj.get("trackblazer_inventory") or {}
+        for item_key in _HAMMER_TIERS:
+          held_quantities[item_key] = _safe_int(
+            (inventory.get(item_key) or {}).get("quantity"), 0
+          )
+        _, hammer_spendable = _hammer_usage_state(held_quantities)
+        total_spendable = sum(hammer_spendable.values())
+        info(
+          f"[TB_RACE] Lobby scheduled race detected. "
+          f"Hammer inventory: {held_quantities}, spendable (surplus beyond 3 reserved): {hammer_spendable}"
+        )
+        action.func = "do_race"
+        action["scheduled_race"] = True
+        action["race_name"] = "any"
+        action["trackblazer_lobby_scheduled_race"] = True
+        action["hammer_spendable"] = total_spendable
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message=f"Trackblazer scheduled race button detected on lobby. Surplus hammers: {total_spendable}.",
+        )
+        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+        if skill_result in ("failed", "previewed"):
+          continue
+        tb_sched_result = run_action_with_review(
+          state_obj,
+          action,
+          f"Trackblazer scheduled race detected (surplus hammers: {total_spendable}). Review before race entry.",
+          sub_phase="preview_race_selection",
+        )
+        if tb_sched_result == "executed":
+          record_and_finalize_turn(state_obj, action)
+          continue
+        elif tb_sched_result == "previewed":
+          continue
+        else:
+          action.func = None
+          action.options.pop("race_name", None)
+          action.options.pop("scheduled_race", None)
+          action.options.pop("trackblazer_lobby_scheduled_race", None)
+          action.options.pop("hammer_spendable", None)
 
       if (not config.PRIORITIZE_MISSIONS_OVER_G1) and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
         debug(f"Mission race logic entered.")

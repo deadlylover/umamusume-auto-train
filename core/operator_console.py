@@ -1062,12 +1062,15 @@ class OperatorConsole:
         self._history_last_timing_text,
         self._history_last_summary_raw,
       )
-    # Always save latest content
-    self._history_last_turn = turn_label
-    self._history_last_year = year
-    self._history_last_planned_text = planned_text
-    self._history_last_timing_text = timing_text
-    self._history_last_summary_raw = self._summary_raw_value
+    # Only update cached content when we have a real turn (non-empty turn_label).
+    # Scanning-lobby snapshots have turn_label="" and would overwrite the full
+    # planned-actions text, causing history to store the empty scanning state.
+    if turn_label:
+      self._history_last_turn = turn_label
+      self._history_last_year = year
+      self._history_last_planned_text = planned_text
+      self._history_last_timing_text = timing_text
+      self._history_last_summary_raw = self._summary_raw_value
 
   def _format_compact_summary(self, snapshot, include_prompt=True):
     state_summary = snapshot.get("state_summary") or {}

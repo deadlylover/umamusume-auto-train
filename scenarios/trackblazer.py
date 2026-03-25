@@ -26,6 +26,7 @@ from time import time as _time
 from pathlib import Path
 from queue import Queue
 import numpy as np
+import cv2
 import threading
 import re
 
@@ -69,6 +70,9 @@ _SHOP_SCROLLBAR_RESET_DURATION_SECONDS = 1.4
 _SHOP_SCROLLBAR_ANALYSIS_WORKERS = 3
 _SHOP_SCROLLBAR_SEEK_DURATION_SECONDS = 0.8
 _RIVAL_RACE_MATCH_THRESHOLD = 0.75
+# When two family-variant scores are within this margin, use color
+# disambiguation instead of trusting the raw template score.
+_FAMILY_COLOR_TIEBREAK_MARGIN = 0.025
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -504,11 +508,74 @@ def _held_quantity_crop_fixed_fallback(screenshot, row_center_y):
     return crop, region
 
 
+def _ankle_weight_color_vote(bgr_crop, candidates):
+    """Pick the best ankle-weight variant by accent-color ratios.
+
+    *bgr_crop* is the BGR icon region from the screenshot (OpenCV order).
+    *candidates* is a list of dicts with at least "item_name" and "score".
+
+    All four ankle-weight templates share the same orange/yellow background.
+    The distinguishing accent colours (from template hue analysis) are:
+        speed  → blue  (hue 88-125, ~25% of saturated pixels)
+        guts   → pink  (hue 148-170, ~29%)
+        stamina→ red   (hue 0-12 + 170-180, ~23%)
+        power  → mostly orange (hue 12-22, ~84%, least accent)
+
+    Returns the matching candidate, or None if no accent is clear enough.
+    """
+    if bgr_crop is None or getattr(bgr_crop, "size", 0) == 0:
+        return None
+    hsv = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0]
+    s = hsv[:, :, 1]
+    sat_mask = s >= 50
+    sat_count = int(sat_mask.sum())
+    if sat_count < 20:
+        return None
+    h_sat = h[sat_mask].astype(int)
+    bins = np.bincount(h_sat.flatten(), minlength=180)
+
+    red_px    = int(bins[0:12].sum() + bins[170:180].sum())
+    orange_px = int(bins[12:22].sum())
+    blue_px   = int(bins[88:125].sum())
+    pink_px   = int(bins[148:170].sum())
+
+    red_r    = red_px / sat_count
+    orange_r = orange_px / sat_count
+    blue_r   = blue_px / sat_count
+    pink_r   = pink_px / sat_count
+
+    # Map each variant to its accent ratio
+    accent = {
+        "speed_ankle_weights":   blue_r,
+        "guts_ankle_weights":    pink_r,
+        "stamina_ankle_weights": red_r,
+        # Power has no unique accent — it wins only when all others are low
+        "power_ankle_weights":   orange_r if (blue_r < 0.08 and pink_r < 0.12 and red_r < 0.08) else 0.0,
+    }
+
+    best_candidate = None
+    best_accent = -1.0
+    for cand in candidates:
+        a = accent.get(cand["item_name"], 0.0)
+        if a > best_accent:
+            best_accent = a
+            best_candidate = cand
+
+    debug(
+        f"[TB_COLOR] ankle_weight ratios: red={red_r:.3f} orange={orange_r:.3f} "
+        f"blue={blue_r:.3f} pink={pink_r:.3f} → {best_candidate['item_name'] if best_candidate else '?'}"
+    )
+    if best_accent < 0.05:
+        return None
+    return best_candidate
+
+
 def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
     left, top, right, bottom = _cluster_bounds(cluster, screenshot.shape)
     cluster_crop = screenshot[top:bottom, left:right].copy()
     effective_scale = device_action._effective_template_scale(_INVERSE_GLOBAL_SCALE)
-    best_resolution = None
+    passing_candidates = []
     for item_name in family_items:
         template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
         if not template_path:
@@ -533,9 +600,24 @@ def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
             "match": (int(left + mx), int(top + my), int(mw), int(mh)),
             "row_center_y": int(top + my + mh // 2),
         }
-        if best_resolution is None or candidate["score"] > best_resolution["score"]:
-            best_resolution = candidate
-    return best_resolution
+        passing_candidates.append(candidate)
+    if not passing_candidates:
+        return None
+    passing_candidates.sort(key=lambda c: c["score"], reverse=True)
+    best = passing_candidates[0]
+    # Ankle-weight templates are nearly identical in shape — template scores
+    # alone are unreliable.  Always use accent-color voting when any
+    # candidate is an ankle weight, regardless of score margin.
+    if any(c["item_name"].endswith("_ankle_weights") for c in passing_candidates):
+        color_winner = _ankle_weight_color_vote(cluster_crop, passing_candidates)
+        if color_winner is not None and color_winner["item_name"] != best["item_name"]:
+            debug(
+                f"[TB_FAMILY] Color tiebreak: {best['item_name']}({best['score']:.4f}) "
+                f"→ {color_winner['item_name']}({color_winner['score']:.4f}) "
+                f"margin={best['score'] - color_winner['score']:.4f}"
+            )
+            best = color_winner
+    return best
 
 
 def _extract_inventory_quantity_from_crop(crop):
@@ -2538,7 +2620,11 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
         controls_t0 = _time()
         controls = detect_inventory_controls()
         flow["timing_controls"] = round(_time() - controls_t0, 3)
-        confirm_entry = (controls.get("confirm_candidates") or {}).get("shop_confirm") or controls.get("confirm_use") or {}
+        # Prefer the best passing confirm candidate resolved by
+        # detect_inventory_controls (which checks all shop_confirm variants).
+        # Fall back to the specific "shop_confirm" candidate only if the
+        # general best is missing.
+        confirm_entry = controls.get("confirm_use") or (controls.get("confirm_candidates") or {}).get("shop_confirm") or {}
         flow["control_detection_result"] = {
             "confirm_key": confirm_entry.get("key"),
             "confirm_visible": bool(confirm_entry.get("passed_threshold")),
