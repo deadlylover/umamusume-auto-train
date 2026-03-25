@@ -59,12 +59,16 @@ def do_training(options):
     error(f"Training name \"{training_name}\" not found in training images.")
     return False
   mouse_pos = constants.TRAINING_BUTTON_POSITIONS[training_name]
+  bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opening", "context": "do_training"})
   if not device_action.locate_and_click("assets/buttons/training_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX, min_search_time=get_secs(2)):
     error(f"Couldn't find training button.")
+    bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "not_found", "context": "do_training"})
     return False
+  bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opened", "context": "do_training"})
   if config.VERBOSE_ACTIONS:
     info(f"[TRAIN] Training menu opened; clicking '{training_name}'.")
   sleep(0.75)
+  bot.push_debug_history({"event": "click", "asset": training_name, "result": "double_clicked", "context": "do_training"})
   device_action.click(target=mouse_pos, clicks=2, interval=0.15)
   return True
 

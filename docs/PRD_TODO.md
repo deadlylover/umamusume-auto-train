@@ -267,6 +267,104 @@ still allowing valid upgrades.
 - The operator console should eventually expose the detected active megaphone
   state and the reason an increment button is considered blocked.
 
+## Stat Goal Extrapolated Training
+
+### Problem
+
+Training decisions are currently turn-local: the bot picks the best training for
+*this turn* based on stat weights and scores. It has no awareness of the
+career arc — how many trainable turns remain, what the expected stat income is
+from those turns and upcoming races, or whether the run is on pace to hit a
+specific end-state stat target such as 1100 Speed for a 3-star spark.
+
+This means the bot can leave value on the table in the final stretch by
+picking marginally higher-score trainings that do not address a stat deficit,
+or by not recognising that a weaker-looking training is the only remaining
+path to a goal.
+
+### Goal
+
+Add an expected-value extrapolation layer that projects final stats from the
+current state and adjusts training weights accordingly.
+
+### Proposed Direction
+
+- **Race agenda awareness** — read the in-game race agenda (requires future
+  implementation) or fall back to the config JSON race list. Knowing which
+  upcoming turns are races vs trainable is the foundation.
+- **Race stat reward estimates** — approximate stat gains from G1/G2/G3 races
+  in Trackblazer. Needs data collection; rough constants are fine initially.
+- **Support card modelling** — allow the user to select which support cards are
+  in the deck. From each card's specialty and friendship level, estimate the
+  probability of it appearing on each training type and the stat contribution
+  it brings. This gives an expected-value distribution per training per
+  remaining turn.
+- **Remaining turn budget** — subtract races and expected rest turns (projected
+  from current energy trend) from the remaining calendar to get an effective
+  training count.
+- **Par tracking** — given a preset stat target (e.g. 1100 Speed), compare
+  current stats against the expected value at this game date. Surface
+  above-par / below-par clearly.
+- **Training weight adjustment** — when a stat is below par with few trainable
+  turns left, boost the weight for that stat's training even if another
+  training has a higher raw score. Example: 4 trainable turns remaining,
+  Speed at 1020 vs 1100 target → speed training gets boosted over a
+  technically higher-scoring power training.
+
+### Notes
+
+- Low priority — this is an idea capture, not an imminent implementation.
+- Prerequisites: race agenda reading or reliable config-based race schedule;
+  support card selection UI (web UI "Skeleton" or dedicated tab).
+- This complements the existing "Trackblazer Stat Goal And Pace Planner" TODO
+  (above) but focuses specifically on support-card expected-value modelling
+  and remaining-turn extrapolation rather than pace curves and hard-race
+  Stamina gates. The two may merge during implementation.
+- Relevant touchpoints: `core/strategies.py`, `core/trainings.py`,
+  `utils/constants.py` (timeline/race data), Trackblazer scenario policy.
+
+## Stat History Logging For Run Analytics
+
+### Problem
+
+There is no persistent record of stat progression across bot runs. Every run's
+stat readings disappear when the session ends. This makes it impossible to
+answer questions like "what is the average Speed at Senior Early Oct across
+the last 20 runs?" or "are recent config changes producing better results?"
+
+### Goal
+
+Log every stat reading together with its game date/year to a persistent file so
+that run performance can be tracked and averaged across many runs.
+
+### Proposed Direction
+
+- Each time the bot reads stats (via `collect_main_state()`), also read the
+  current in-game date/year and append a record to a persistent log file.
+- Record format should include at minimum: run ID or session timestamp, game
+  date (year + period, e.g. "Classic Early Jul"), and all five stat values
+  (Speed, Stamina, Power, Guts, Wit).
+- Use a simple append-friendly format — JSONL (one JSON object per line) or
+  CSV — so the file can be consumed by scripts, notebooks, or a future web UI
+  analytics tab.
+- File location: something like `data/stat_history.jsonl` or configurable via
+  `config.json`.
+- A run/session ID should be assigned at bot start so individual runs can be
+  grouped when computing averages.
+- Optional: also log energy, mood, scenario name, and active training template
+  for richer analysis.
+
+### Notes
+
+- Low priority — idea capture.
+- The stat and date OCR already exist in `core/state.py`; this is mainly a
+  persistence/write concern, not new OCR work.
+- Keep the write path lightweight (append, no locking beyond basic file I/O)
+  so it does not slow the main loop.
+- Pairs well with "Stat Goal Extrapolated Training" and "Stat Goal And Pace
+  Planner" — the historical data could seed the expected-value curves and
+  par targets those features need.
+
 ## Trackblazer Post-Summer Burst Commitment Tuning
 
 ### Problem

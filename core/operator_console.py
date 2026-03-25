@@ -3,6 +3,7 @@ import queue
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image, ImageTk
@@ -117,6 +118,16 @@ class OperatorConsole:
     self._ocr_panel = None
     self._ocr_toggle_label = None
     self._right_pane = None
+    self._history_entries = []  # ring buffer of {timestamp, turn_label, year, planned_text, timing_text, summary_raw}
+    self._history_max = 5
+    self._history_selected = "live"  # "live" or index string "0"-"4"
+    self._history_last_turn = None  # track turn changes
+    self._history_last_year = None
+    self._history_last_planned_text = None
+    self._history_last_timing_text = None
+    self._history_last_summary_raw = None
+    self._history_menu_button = None
+    self._history_label_var = None
     self._planned_clicks_value = None
     self._would_use_value = None
     self._would_buy_value = None
@@ -421,11 +432,24 @@ class OperatorConsole:
     summary_header.columnconfigure(0, weight=1)
     summary_header.columnconfigure(1, weight=0)
     summary_header.columnconfigure(2, weight=0)
-    summary_header.columnconfigure(3, weight=1)
+    summary_header.columnconfigure(3, weight=0)
+    summary_header.columnconfigure(4, weight=1)
     tk.Label(summary_header, text="Planned Actions / Timing", fg="white", bg="#101418", anchor="w").grid(row=0, column=0, sticky="w")
-    tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=1, sticky="e", padx=(0, 4))
-    tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=2, sticky="e", padx=(0, 12))
-    tk.Button(summary_header, text="Copy Summary", command=self._copy_active_summary).grid(row=0, column=3, sticky="e")
+    self._history_label_var = tk.StringVar(value="\u25be Live")
+    self._history_menu_button = tk.Menubutton(
+      summary_header, textvariable=self._history_label_var,
+      fg="#7cb3ff", bg="#101418", activebackground="#192028", activeforeground="white",
+      relief=tk.FLAT, cursor="hand2", anchor="w",
+    )
+    self._history_menu_button.grid(row=0, column=1, sticky="w", padx=(8, 4))
+    self._history_menu_button["menu"] = tk.Menu(
+      self._history_menu_button, tearoff=0, bg="#192028", fg="#d6dde5",
+      activebackground="#1f6feb", activeforeground="white",
+    )
+    self._rebuild_history_menu()
+    tk.Button(summary_header, text="Copy Planned", command=lambda: self._copy_widget(self._planned_actions_text)).grid(row=0, column=2, sticky="e", padx=(0, 4))
+    tk.Button(summary_header, text="Copy Timing", command=lambda: self._copy_widget(self._timing_text)).grid(row=0, column=3, sticky="e", padx=(0, 12))
+    tk.Button(summary_header, text="Copy Summary", command=self._copy_active_summary).grid(row=0, column=4, sticky="e")
     details_container = tk.Frame(right, bg="#101418")
     details_container.grid(row=2, column=0, sticky="nsew", pady=(2, 6))
     details_container.rowconfigure(0, weight=1)
@@ -797,8 +821,12 @@ class OperatorConsole:
       "planned_clicks": snapshot.get("planned_clicks"),
     }
     self._summary_raw_value = json.dumps(summary_payload, indent=2, ensure_ascii=True, default=str)
-    self._set_text(self._planned_actions_text, self._format_planned_actions(snapshot))
-    self._set_text(self._timing_text, self._format_timing(snapshot))
+    planned_text = self._format_planned_actions(snapshot)
+    timing_text = self._format_timing(snapshot)
+    self._update_history_on_render(snapshot, planned_text, timing_text)
+    if self._history_selected == "live":
+      self._set_text(self._planned_actions_text, planned_text)
+      self._set_text(self._timing_text, timing_text)
     self._update_quick_bar(snapshot)
     self._set_text(self._training_text, json.dumps(snapshot.get("ranked_trainings") or [], indent=2, ensure_ascii=True, default=str))
     inventory_payload = {
@@ -947,6 +975,98 @@ class OperatorConsole:
     self._root.clipboard_clear()
     self._root.clipboard_append(self._summary_raw_value or "")
     self._message_value.set("Copied raw summary to clipboard.")
+
+  # --- History ---
+
+  def _push_history(self, turn_label, year, planned_text, timing_text, summary_raw):
+    """Save the current turn's planned actions into the history ring buffer."""
+    if not planned_text or not planned_text.strip():
+      return
+    entry = {
+      "timestamp": datetime.now().strftime("%H:%M:%S"),
+      "turn_label": turn_label or "?",
+      "year": year or "",
+      "planned_text": planned_text,
+      "timing_text": timing_text or "",
+      "summary_raw": summary_raw or "",
+    }
+    self._history_entries.insert(0, entry)
+    if len(self._history_entries) > self._history_max:
+      self._history_entries = self._history_entries[: self._history_max]
+    # If viewing history, shift index to keep showing the same entry
+    if self._history_selected != "live":
+      try:
+        idx = int(self._history_selected)
+        self._history_selected = str(idx + 1)
+        if idx + 1 >= len(self._history_entries):
+          self._select_history("live")
+      except ValueError:
+        self._select_history("live")
+    self._rebuild_history_menu()
+
+  def _rebuild_history_menu(self):
+    """Rebuild the history dropdown menu entries."""
+    btn = self._history_menu_button
+    if btn is None:
+      return
+    menu = btn["menu"]
+    menu.delete(0, tk.END)
+    menu.add_command(
+      label="\u25b6 Live",
+      command=lambda: self._select_history("live"),
+    )
+    if self._history_entries:
+      menu.add_separator()
+    for i, entry in enumerate(self._history_entries):
+      year_part = f" {entry['year']}" if entry["year"] else ""
+      label = f"{entry['timestamp']}  Turn {entry['turn_label']}{year_part}"
+      menu.add_command(
+        label=label,
+        command=lambda idx=str(i): self._select_history(idx),
+      )
+
+  def _select_history(self, key):
+    """Select live view or a history entry by index string."""
+    self._history_selected = key
+    if key == "live":
+      self._history_label_var.set("\u25be Live")
+      # Restore live content — will be refreshed on next render
+      if self._history_last_planned_text is not None:
+        self._set_text(self._planned_actions_text, self._history_last_planned_text)
+      if self._history_last_timing_text is not None:
+        self._set_text(self._timing_text, self._history_last_timing_text)
+    else:
+      try:
+        idx = int(key)
+        entry = self._history_entries[idx]
+      except (ValueError, IndexError):
+        self._select_history("live")
+        return
+      year_part = f" {entry['year']}" if entry["year"] else ""
+      self._history_label_var.set(f"\u25be {entry['timestamp']} T{entry['turn_label']}{year_part}")
+      self._set_text(self._planned_actions_text, entry["planned_text"])
+      self._set_text(self._timing_text, entry["timing_text"])
+
+  def _update_history_on_render(self, snapshot, planned_text, timing_text):
+    """Check if the turn changed and push previous turn to history if so."""
+    turn_label = snapshot.get("turn_label") or ""
+    state_summary = snapshot.get("state_summary") or {}
+    year = state_summary.get("year") or ""
+    # Detect turn change — push old content to history
+    if self._history_last_turn is not None and turn_label and turn_label != self._history_last_turn:
+      self._push_history(
+        self._history_last_turn,
+        self._history_last_year,
+        self._history_last_planned_text,
+        self._history_last_timing_text,
+        self._history_last_summary_raw,
+      )
+    # Always save latest content
+    self._history_last_turn = turn_label
+    self._history_last_year = year
+    self._history_last_planned_text = planned_text
+    self._history_last_timing_text = timing_text
+    self._history_last_summary_raw = self._summary_raw_value
 
   def _format_compact_summary(self, snapshot, include_prompt=True):
     state_summary = snapshot.get("state_summary") or {}

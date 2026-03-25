@@ -2851,11 +2851,15 @@ def career_lobby(dry_run_turn=False):
         current_trackblazer_turn = _trackblazer_turn_key(state_obj)
         pending_shop_check = bot.has_pending_trackblazer_shop_check()
         pending_shop_reason = bot.get_pending_trackblazer_shop_check_reason()
-        automatic_turn_scan = execution_intent == "check_only" and current_trackblazer_turn != last_trackblazer_shop_refresh_turn
+        never_scanned = last_trackblazer_shop_refresh_turn is None
+        automatic_turn_scan = (
+          never_scanned
+          or (execution_intent == "check_only" and current_trackblazer_turn != last_trackblazer_shop_refresh_turn)
+        )
         if pending_shop_check or automatic_turn_scan:
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
-          trigger = pending_shop_reason or ("automatic" if automatic_turn_scan else "pending_shop_check")
+          trigger = pending_shop_reason or ("first_scan" if never_scanned else "automatic" if automatic_turn_scan else "pending_shop_check")
           shop_result = check_trackblazer_shop_inventory(trigger=trigger)
           _merge_trackblazer_shop_result(state_obj, shop_result)
           shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
@@ -3268,6 +3272,14 @@ def record_and_finalize_turn(state_obj, action):
   if args.debug is not None:
     record_turn(state_obj, last_state, action)
     last_state = state_obj
+
+  # Races award coins (e.g. 100 for a win), so recheck the shop next turn
+  # in case there were items we couldn't afford before.
+  if (
+    action.func == "do_race"
+    and constants.SCENARIO_NAME in ("mant", "trackblazer")
+  ):
+    bot.request_trackblazer_shop_check("post_race_coins")
 
   action_count += 1
   if LIMIT_TURNS > 0:

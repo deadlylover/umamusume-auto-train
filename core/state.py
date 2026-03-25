@@ -642,13 +642,16 @@ def collect_training_state(state_object, training_function_name):
 
   if config.VERBOSE_ACTIONS:
     info(f"[STATE] Collecting training state using '{training_function_name}'.")
+  bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opening", "context": "training_scan"})
   if device_action.locate_and_click("assets/buttons/training_btn.png", min_search_time=get_secs(5), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
+    bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opened", "context": "training_scan"})
     training_results = CleanDefaultDict()
     training_scan_debug = CleanDefaultDict()
     sleep(0.6)
     # Hold/drag across training buttons to reveal info without confirming training.
     hold_active = False
     for name, mouse_pos in constants.TRAINING_SCAN_POSITIONS.items():
+      bot.push_debug_history({"event": "scan", "asset": name, "result": "scanning", "context": "training_scan"})
       if bot.is_adb_input_active():
         # Keep the original swipe behavior for ADB devices.
         device_action.swipe(mouse_pos, (mouse_pos[0], mouse_pos[1] + 150), duration=0.15)
@@ -720,7 +723,9 @@ def collect_training_state(state_object, training_function_name):
         "[STATE] Training scan returned no usable results. "
         "This may indicate training hover/positions or OCR regions are misaligned."
       )
+    bot.push_debug_history({"event": "click", "asset": "back_btn", "result": "closing", "context": "training_scan"})
     device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(1), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    bot.push_debug_history({"event": "click", "asset": "back_btn", "result": "closed", "context": "training_scan"})
     state_object["training_results"] = training_results
     state_object["training_scan_debug"] = training_scan_debug
 
