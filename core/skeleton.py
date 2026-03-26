@@ -1973,6 +1973,27 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
   }
 
 
+def _click_trackblazer_next_button(context_label, min_search_time=0.6):
+  for label, template_path in (
+    ("next", "assets/buttons/next_btn.png"),
+    ("next2", "assets/buttons/next2_btn.png"),
+  ):
+    if device_action.locate_and_click(
+      template_path,
+      min_search_time=get_secs(min_search_time),
+      region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+      text=f"Clicked {label} on Trackblazer {context_label}.",
+    ):
+      bot.push_debug_history({
+        "event": "click",
+        "asset": template_path,
+        "result": "clicked",
+        "context": "post_action_resolution",
+      })
+      return label
+  return ""
+
+
 def _handle_trackblazer_goal_complete_screen(state_obj, action):
   if not _trackblazer_scenario_active():
     return {
@@ -2017,31 +2038,36 @@ def _handle_trackblazer_goal_complete_screen(state_obj, action):
     "context": "post_action_resolution",
   })
 
-  for label, template_path in (
-    ("next", "assets/buttons/next_btn.png"),
-    ("next2", "assets/buttons/next2_btn.png"),
-  ):
-    if device_action.locate_and_click(
-      template_path,
-      min_search_time=get_secs(0.6),
-      region_ltrb=constants.SCREEN_BOTTOM_BBOX,
-      text=f"Clicked {label} on Trackblazer goal complete screen.",
-    ):
-      bot.push_debug_history({
-        "event": "click",
-        "asset": template_path,
-        "result": "clicked",
-        "context": "post_action_resolution",
-      })
-      return {
-        "detected": True,
-        "handled": True,
-        "popup_type": "goal_complete",
-        "reason": f"{label}_clicked",
-        "deferred_work": [],
-      }
+  first_click = _click_trackblazer_next_button("goal complete screen")
+  if not first_click:
+    warning("[TB_POST] Goal complete screen detected but no bottom-region Next button matched.")
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "next_btn_or_next2_btn",
+      "result": "not_found",
+      "context": "post_action_resolution",
+    })
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "goal_complete",
+      "reason": "next_button_not_found",
+      "deferred_work": [],
+    }
 
-  warning("[TB_POST] Goal complete screen detected but no bottom-region Next button matched.")
+  sleep(3.0)
+  device_action.flush_screenshot_cache()
+  second_click = _click_trackblazer_next_button("goal complete second screen", min_search_time=0.8)
+  if second_click:
+    return {
+      "detected": True,
+      "handled": True,
+      "popup_type": "goal_complete",
+      "reason": f"{first_click}_then_{second_click}_clicked",
+      "deferred_work": [],
+    }
+
+  warning("[TB_POST] Goal complete second screen appeared but no bottom-region Next button matched after the animation wait.")
   bot.push_debug_history({
     "event": "template_match",
     "asset": "next_btn_or_next2_btn",
@@ -2052,7 +2078,7 @@ def _handle_trackblazer_goal_complete_screen(state_obj, action):
     "detected": True,
     "handled": False,
     "popup_type": "goal_complete",
-    "reason": "next_button_not_found",
+    "reason": "second_next_button_not_found_after_wait",
     "deferred_work": [],
   }
 
@@ -3658,9 +3684,46 @@ def career_lobby(dry_run_turn=False):
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
           trigger = pending_shop_reason or ("first_scan" if never_scanned else "automatic" if automatic_turn_scan else "pending_shop_check")
-          shop_result = check_trackblazer_shop_inventory(trigger=trigger)
+          shop_result = check_trackblazer_shop_inventory(
+            trigger=trigger,
+            year=state_obj.get("year"),
+          )
           _merge_trackblazer_shop_result(state_obj, shop_result)
           shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
+          shop_entry_result = shop_flow.get("entry_result") or {}
+          if shop_entry_result.get("clicked") and not shop_flow.get("entered"):
+            warning(
+              "[TB_SHOP] Shop entry clicked but was not verified; "
+              "retrying the same turn from lobby before opening training."
+            )
+            _wait_for_lobby_after_shop_purchase(max_wait=4.0)
+            last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+            bot.clear_trackblazer_shop_check_request()
+            update_operator_snapshot(
+              state_obj,
+              action,
+              phase="recovering",
+              status="error",
+              message="Shop entry was clicked but not verified; retrying turn before training scan.",
+              error_text="Trackblazer shop entry verification failed after click.",
+              reasoning_notes=(
+                "Skipped training scan for safety after a shop-entry misfire. "
+                "Retrying the same turn from the lobby."
+              ),
+              sub_phase="scan_shop",
+            )
+            _push_turn_retry_debug(
+              state_obj,
+              reason="Trackblazer shop entry clicked but was not verified.",
+              reasons=[shop_flow.get("reason") or "shop_verification_failed"],
+              before_phase="checking_shop",
+              context="scan_shop",
+              event="trackblazer_shop_entry",
+              result="invalid_retry",
+              sub_phase="scan_shop",
+              phase="checking_shop",
+            )
+            continue
           if shop_flow.get("entered") and shop_flow.get("closed"):
             ready_after_shop_scan = _wait_for_lobby_after_shop_purchase()
             if not ready_after_shop_scan:

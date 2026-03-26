@@ -375,7 +375,10 @@ def trigger_manual_shop_check():
 
       from scenarios.trackblazer import check_trackblazer_shop_inventory
 
-      shop_result = check_trackblazer_shop_inventory(trigger="manual_console")
+      shop_result = check_trackblazer_shop_inventory(
+        trigger="manual_console",
+        year=(snapshot.get("state_summary") or {}).get("year"),
+      )
       snapshot["trackblazer_shop_items"] = shop_result.get("trackblazer_shop_items")
       snapshot["state_summary"]["trackblazer_shop_summary"] = shop_result.get("trackblazer_shop_summary")
       snapshot["state_summary"]["trackblazer_shop_flow"] = shop_result.get("trackblazer_shop_flow")

@@ -134,10 +134,36 @@ _ITEM_VARIANT_FAMILY_MAP = {
     for _, family_items in _ITEM_VARIANT_FAMILIES
     for item_name in family_items
 }
+_SUMMER_SHOP_ENTRY_WINDOWS = (
+    "Classic Year Early Jul",
+    "Classic Year Late Jul",
+    "Classic Year Early Aug",
+    "Classic Year Late Aug",
+    "Senior Year Early Jul",
+    "Senior Year Late Jul",
+    "Senior Year Early Aug",
+    "Senior Year Late Aug",
+)
 
 
 def _trackblazer_ui_region():
     return constants.GAME_WINDOW_BBOX
+
+
+def _runtime_timeline_label():
+    runtime_state = bot.get_runtime_state()
+    snapshot = runtime_state.get("snapshot") if isinstance(runtime_state, dict) else {}
+    if not isinstance(snapshot, dict):
+        return ""
+    summary = snapshot.get("state_summary") or {}
+    if not isinstance(summary, dict):
+        return ""
+    return str(summary.get("year") or "").strip()
+
+
+def _allow_summer_lobby_shop_entry(year=None):
+    timeline_label = str(year or "").strip() or _runtime_timeline_label()
+    return timeline_label in _SUMMER_SHOP_ENTRY_WINDOWS, timeline_label
 
 
 def _trackblazer_inventory_controls_region():
@@ -3957,7 +3983,7 @@ def _resolve_trackblazer_shop_coins_ocr_task(task):
     return result
 
 
-def enter_shop(threshold=0.8, read_shop_coins=True):
+def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobby_entry=None):
     """Enter the Trackblazer shop using the best currently supported method.
 
     Supports refresh-dialog and lobby entry buttons when their templates are
@@ -3967,7 +3993,11 @@ def enter_shop(threshold=0.8, read_shop_coins=True):
     timing = {}
 
     t0 = _time()
-    shop_state = inspect_shop_entry_state(threshold=threshold)
+    shop_state = inspect_shop_entry_state(
+        threshold=threshold,
+        year=year,
+        allow_summer_lobby_entry=allow_summer_lobby_entry,
+    )
     timing["detect_entry"] = round(_time() - t0, 4)
 
     best_method = shop_state.get("best_method") or {}
@@ -4117,7 +4147,7 @@ def close_trackblazer_shop(threshold=0.8, verify_threshold=0.75):
     }
 
 
-def inspect_shop_entry_state(threshold=0.8):
+def inspect_shop_entry_state(threshold=0.8, year=None, allow_summer_lobby_entry=None):
     """Collect a debug-friendly summary of Trackblazer shop entry detection.
 
     This is intentionally method-oriented so the shop flow can support multiple
@@ -4328,6 +4358,9 @@ def inspect_shop_entry_state(threshold=0.8):
         }
 
     methods = {}
+    summer_lobby_allowed, timeline_label = _allow_summer_lobby_shop_entry(year=year)
+    if allow_summer_lobby_entry is not None:
+        summer_lobby_allowed = bool(allow_summer_lobby_entry)
 
     def _single_template_method(method_name, template_key):
         template_path = _entry_template(template_key)
@@ -4365,7 +4398,23 @@ def inspect_shop_entry_state(threshold=0.8):
 
     methods["refresh_dialog"] = _refresh_dialog_summary()
     methods["lobby_button"] = _single_template_method("lobby_button", "shop_enter_lobby")
-    methods["summer_lobby_button"] = _single_template_method("summer_lobby_button", "shop_enter_summer_lobby")
+    if summer_lobby_allowed:
+        methods["summer_lobby_button"] = _single_template_method("summer_lobby_button", "shop_enter_summer_lobby")
+    else:
+        methods["summer_lobby_button"] = {
+            "method": "summer_lobby_button",
+            "matched": False,
+            "ready": False,
+            "entry": None,
+            "dismiss": None,
+            "best_match": None,
+            "region_ltrb": [int(v) for v in _trackblazer_ui_region()],
+            "required_keys": ["shop_enter_summer_lobby"],
+            "missing_required": ["shop_enter_summer_lobby"],
+            "checks": {},
+            "reason": "out_of_summer_window",
+            "timeline_label": timeline_label,
+        }
 
     ready_methods = [entry for entry in methods.values() if entry.get("ready")]
     scored_methods = [entry for entry in methods.values() if (entry.get("best_match") or {}).get("score") is not None]
@@ -4383,6 +4432,8 @@ def inspect_shop_entry_state(threshold=0.8):
 
     return {
         "threshold": threshold,
+        "timeline_label": timeline_label,
+        "summer_lobby_allowed": bool(summer_lobby_allowed),
         "matched": bool(best_method and best_method.get("matched")),
         "entry_method": best_method.get("method") if best_method else None,
         "best_method": best_method,
@@ -4397,6 +4448,8 @@ def check_trackblazer_shop_inventory(
     max_reset_swipes=4,
     max_forward_swipes=8,
     trigger="manual_console",
+    year=None,
+    allow_summer_lobby_entry=None,
 ):
     """Enter the Trackblazer shop, scan all visible items, then back out."""
     clear_runtime_ocr_debug()
@@ -4416,6 +4469,7 @@ def check_trackblazer_shop_inventory(
         "all_items": [],
         "stop_reason": "",
         "reason": "",
+        "timeline_label": str(year or "").strip(),
     }
     result = {
         "trackblazer_shop_items": [],
@@ -4437,11 +4491,18 @@ def check_trackblazer_shop_inventory(
         entry_result = enter_shop(
             threshold=max(0.8, threshold),
             read_shop_coins=False,
+            year=year,
+            allow_summer_lobby_entry=allow_summer_lobby_entry,
         )
         flow["timing_open"] = round(_time() - t0, 3)
         flow["entry_result"] = entry_result
         flow["entered"] = bool(entry_result.get("entered"))
         flow["shop_coins"] = entry_result.get("shop_coins", -1)
+        flow["timeline_label"] = (
+            (entry_result.get("shop_check") or {}).get("timeline_label")
+            or flow.get("timeline_label")
+            or _runtime_timeline_label()
+        )
         bot.push_debug_history({
             "event": "trackblazer_shop_entry",
             "asset": entry_result.get("method") or "shop_entry",
