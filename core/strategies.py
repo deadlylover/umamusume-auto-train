@@ -98,6 +98,26 @@ class Strategy:
       info(f"Action: {action}")
       return action
 
+  def validate_state_details(self, state):
+    invalid_reasons = []
+    if not str(state.get("year") or "").strip():
+      invalid_reasons.append("year empty")
+    turn_value = state.get("turn")
+    if turn_value in ("", None, -1) or not str(turn_value).strip():
+      invalid_reasons.append("turn unreadable (-1)")
+
+    current_stats = state.get("current_stats") or {}
+    if not isinstance(current_stats, dict) or not current_stats or all(value == -1 for value in current_stats.values()):
+      invalid_reasons.append("current_stats unreadable (all -1)")
+
+    if not str(state.get("criteria") or "").strip():
+      invalid_reasons.append("criteria empty")
+
+    return {
+      "valid": not invalid_reasons,
+      "invalid_reasons": invalid_reasons,
+    }
+
   def get_training_template(self, state):
     if not self.first_decision_done:
       current_year = state["year"]
@@ -516,15 +536,8 @@ class Strategy:
     return action
 
   def validate_state(self, state):
-    invalid_reasons = []
-    if state["year"] == "":
-      invalid_reasons.append("year empty")
-    if state["turn"] == -1:
-      invalid_reasons.append("turn unreadable (-1)")
-    if all(value == -1 for value in state["current_stats"].values()):
-      invalid_reasons.append("current_stats unreadable (all -1)")
-    if state["criteria"] == "":
-      invalid_reasons.append("criteria empty")
+    validation = self.validate_state_details(state)
+    invalid_reasons = validation["invalid_reasons"]
 
     if invalid_reasons:
       warning(

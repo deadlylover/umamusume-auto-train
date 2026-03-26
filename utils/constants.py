@@ -297,6 +297,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "climax_race_button": "assets/trackblazer/climax_race_button.png",
   "climax_race_locked": "assets/trackblazer/race_locked_climax.png",
   "climax_race_result": "assets/trackblazer/climax_race_result.png",
+  "goal_complete": "assets/trackblazer/goal_complete.png",
   "complete_career": "assets/trackblazer/complete_career.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",

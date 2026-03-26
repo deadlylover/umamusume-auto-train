@@ -962,6 +962,64 @@ def _base_ocr_debug_entries(state_obj):
   return [_apply_runtime_ocr_debug(entry, state_obj) for entry in entries]
 
 
+def _state_validation_ocr_debug_entries(state_obj, validation_result=None):
+  entries = _base_ocr_debug_entries(state_obj)
+  scenario_name = constants.SCENARIO_NAME or "default"
+  stats_region_key = "MANT_CURRENT_STATS_REGION" if scenario_name in ("mant", "trackblazer") else "CURRENT_STATS_REGION"
+  current_stats = state_obj.get("current_stats") or {}
+  for stat_name in ("spd", "sta", "pwr", "guts", "wit", "sp"):
+    if stat_name in current_stats:
+      entries.append(
+        _region_debug_entry(
+          f"current_stat_{stat_name}",
+          stats_region_key,
+          parsed_value=current_stats.get(stat_name),
+          extra={"stat_name": stat_name},
+        )
+      )
+
+  if validation_result is not None:
+    entries.insert(
+      0,
+      {
+        "field": "state_validation",
+        "source_type": "ocr_summary",
+        "scenario_name": scenario_name,
+        "platform_profile": getattr(config, "PLATFORM_PROFILE", "auto"),
+        "parsed_value": "valid" if validation_result.get("valid") else "invalid_retry",
+        "year": state_obj.get("year"),
+        "turn": state_obj.get("turn"),
+        "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+        "reasons": list(validation_result.get("invalid_reasons") or []),
+        "same_turn_retry": True,
+        "before_phase": validation_result.get("before_phase"),
+        "context": validation_result.get("context"),
+      },
+    )
+
+  return _enrich_ocr_debug_entries(entries)
+
+
+def _push_turn_retry_debug(state_obj, *, reason, reasons=None, before_phase=None, context=None, event="turn_retry", result="retry", same_turn_retry=True, sub_phase=None, phase=None):
+  payload = {
+    "event": event,
+    "result": result,
+    "reason": reason,
+    "reasons": list(reasons or []),
+    "same_turn_retry": bool(same_turn_retry),
+    "before_phase": before_phase or bot.get_runtime_state().get("phase"),
+    "context": context,
+    "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+    "year": state_obj.get("year"),
+    "turn": state_obj.get("turn"),
+  }
+  if sub_phase is not None:
+    payload["sub_phase"] = sub_phase
+  if phase is not None:
+    payload["phase"] = phase
+  bot.push_debug_history(payload)
+
+
 def _action_value(action, key, default=None):
   if isinstance(action, dict):
     return action.get(key, default)
@@ -1915,6 +1973,90 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
   }
 
 
+def _handle_trackblazer_goal_complete_screen(state_obj, action):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "goal_complete",
+      "reason": "scenario_inactive",
+      "deferred_work": [],
+    }
+
+  template_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("goal_complete")
+  if not template_path:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "goal_complete",
+      "reason": "template_missing",
+      "deferred_work": [],
+    }
+
+  screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
+  matches = device_action.match_template(
+    template_path,
+    screenshot,
+    threshold=0.75,
+    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  )
+  if not matches:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "goal_complete",
+      "reason": "goal_complete_banner_not_found",
+      "deferred_work": [],
+    }
+
+  info("[TB_POST] Goal complete screen detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "goal_complete.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+
+  for label, template_path in (
+    ("next", "assets/buttons/next_btn.png"),
+    ("next2", "assets/buttons/next2_btn.png"),
+  ):
+    if device_action.locate_and_click(
+      template_path,
+      min_search_time=get_secs(0.6),
+      region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+      text=f"Clicked {label} on Trackblazer goal complete screen.",
+    ):
+      bot.push_debug_history({
+        "event": "click",
+        "asset": template_path,
+        "result": "clicked",
+        "context": "post_action_resolution",
+      })
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "goal_complete",
+        "reason": f"{label}_clicked",
+        "deferred_work": [],
+      }
+
+  warning("[TB_POST] Goal complete screen detected but no bottom-region Next button matched.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "next_btn_or_next2_btn",
+    "result": "not_found",
+    "context": "post_action_resolution",
+  })
+  return {
+    "detected": True,
+    "handled": False,
+    "popup_type": "goal_complete",
+    "reason": "next_button_not_found",
+    "deferred_work": [],
+  }
+
+
 def _detect_trackblazer_complete_career_banner(screenshot=None, threshold=0.75, log_result=False, context=""):
   if not _trackblazer_scenario_active():
     return {
@@ -2104,6 +2246,22 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
           reasoning_notes=climax_race_result.get("reason"),
         )
         if climax_race_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+      goal_complete_result = _handle_trackblazer_goal_complete_screen(state_obj, action)
+      if goal_complete_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer goal complete screen." if goal_complete_result.get("handled") else "Trackblazer goal complete screen detected but Next was not matched.",
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=goal_complete_result.get("popup_type"),
+          deferred_work=goal_complete_result.get("deferred_work"),
+          reasoning_notes=goal_complete_result.get("reason"),
+        )
+        if goal_complete_result.get("handled"):
           idle_loops = 0
           sleep(0.8)
           continue
@@ -2452,6 +2610,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "post_action_resolution": post_action_resolution,
     "pending_trackblazer_shop_check": bot.has_pending_trackblazer_shop_check(),
     "pending_trackblazer_shop_check_reason": bot.get_pending_trackblazer_shop_check_reason(),
+    "state_validation": state_obj.get("state_validation"),
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
@@ -2913,6 +3072,17 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
+    _push_turn_retry_debug(
+      state_obj,
+      reason="Trackblazer item use requested reassessment before committing the action.",
+      reasons=["trackblazer_item_use_reassess"],
+      before_phase="executing_action",
+      context="post_item_use_reassess",
+      event="turn_retry",
+      result="reassess",
+      sub_phase="reassess_after_item_use",
+      phase="executing_action",
+    )
     return "reassess"
   if pre_action_item_result.get("status") == "executed":
     # After item use the inventory should be closed and we should be back
@@ -3082,6 +3252,7 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       )
       return "failed"
 
+    execution_intent = bot.get_execution_intent()
     if execution_intent == "check_only":
       info("[REVIEW] Continue pressed in check_only mode; executing this turn as one-shot execute.")
       return "execute"
@@ -3297,6 +3468,49 @@ def career_lobby(dry_run_turn=False):
       action = Action()
       update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
       state_obj = collect_main_state()
+
+      state_validation = strategy.validate_state_details(state_obj)
+      if not state_validation.get("valid"):
+        validation_reasons = list(state_validation.get("invalid_reasons") or [])
+        state_validation = dict(state_validation)
+        state_validation.update(
+          {
+            "reason": "main_state_invalid_before_training_scan",
+            "context": "pre_training_scan",
+            "before_phase": "collecting_main_state",
+            "same_turn_retry": True,
+            "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+          }
+        )
+        state_obj["state_validation"] = state_validation
+        validation_ocr_debug = _state_validation_ocr_debug_entries(state_obj, state_validation)
+        invalid_reason_text = ", ".join(validation_reasons) if validation_reasons else "unknown"
+        update_operator_snapshot(
+          state_obj,
+          action,
+          phase="recovering",
+          status="error",
+          message="Main state invalid; retrying before training scan.",
+          error_text=f"Invalid main state before training scan: {invalid_reason_text}",
+          reasoning_notes=(
+            "Pre-training validation rejected the current turn state. "
+            "Retrying the same turn without opening training."
+          ),
+          sub_phase="pre_training_state_validation",
+          ocr_debug=validation_ocr_debug,
+        )
+        _push_turn_retry_debug(
+          state_obj,
+          reason="Invalid main state before training scan.",
+          reasons=validation_reasons,
+          before_phase="collecting_main_state",
+          context="pre_training_scan",
+          event="state_validation",
+          result="invalid_retry",
+          sub_phase="pre_training_state_validation",
+          phase="collecting_main_state",
+        )
+        continue
 
       trackblazer_pre_debut = (
         constants.SCENARIO_NAME in ("mant", "trackblazer")
@@ -3774,10 +3988,32 @@ def career_lobby(dry_run_turn=False):
         )
         error(f"Strategy returned an invalid action. Please report this line. Returned structure: {action}")
       elif action.func == "no_action":
+        _push_turn_retry_debug(
+          state_obj,
+          reason="Strategy returned no_action.",
+          reasons=(state_obj.get("state_validation") or {}).get("invalid_reasons") or ["strategy_validation_failed"],
+          before_phase="evaluating_strategy",
+          context="strategy_decision",
+          event="turn_retry",
+          result="no_action_retry",
+          sub_phase="evaluate_training_action",
+          phase="evaluating_strategy",
+        )
         update_operator_snapshot(state_obj, action, phase="recovering", status="error", error_text="State invalid, retrying.")
         info("State is invalid, retrying...")
         debug(f"State: {state_obj}")
       elif action.func == "skip_turn":
+        _push_turn_retry_debug(
+          state_obj,
+          reason="Strategy returned skip_turn.",
+          reasons=["no_actions_available"],
+          before_phase="evaluating_strategy",
+          context="strategy_decision",
+          event="turn_retry",
+          result="skip_turn_retry",
+          sub_phase="evaluate_training_action",
+          phase="evaluating_strategy",
+        )
         update_operator_snapshot(state_obj, action, phase="recovering", message="Skipping turn, retrying.")
         info("Skipping turn, retrying...")
       else:
@@ -3834,6 +4070,17 @@ def career_lobby(dry_run_turn=False):
         elif action_result == "reassess":
           continue
         elif action_result != "executed":
+          _push_turn_retry_debug(
+            state_obj,
+            reason="Initial action execution failed; trying fallback actions.",
+            reasons=[action.func or "unknown_action"],
+            before_phase="evaluating_strategy",
+            context="action_selection",
+            event="turn_retry",
+            result="fallback_retry",
+            sub_phase="evaluate_training_action",
+            phase="evaluating_strategy",
+          )
           if action.available_actions:  # Check if the list is not empty
             action.available_actions.pop(0)
 
