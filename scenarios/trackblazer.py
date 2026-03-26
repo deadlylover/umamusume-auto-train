@@ -3049,6 +3049,13 @@ def prepare_trackblazer_shop_item_selection(
             click_target,
             text=f"[TB_SHOP] Select '{requested_item}' once without confirm.",
         )
+        clicked = bool(click_result.get("clicked"))
+        bot.push_debug_history({
+            "event": "click",
+            "asset": f"shop_increment_{requested_item}",
+            "result": "clicked" if clicked else "click_failed",
+            "context": "trackblazer_shop_purchase",
+        })
         attempt["click_result"] = click_result
         verify_screenshot = _capture_live_trackblazer_ui_screenshot()
         # Direct match for verification too — same family resolution bypass.
@@ -3060,7 +3067,7 @@ def prepare_trackblazer_shop_item_selection(
         )
         attempt["verify_checkbox_state"] = verify_state
         flow["attempts"].append(attempt)
-        flow["selected"] = bool(click_result.get("clicked"))
+        flow["selected"] = clicked
         if verify_state.get("state") == "selected":
             flow["selected"] = True
         if flow["selected"]:
@@ -3486,6 +3493,12 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     }
                     if not target:
                         warning(f"{log_tag} No increment target for '{item_name}', skipping click.")
+                        bot.push_debug_history({
+                            "event": "click",
+                            "asset": f"inventory_increment_{item_name}",
+                            "result": "target_missing",
+                            "context": "trackblazer_item_use",
+                        })
                         flow["missing_increment_targets"].append(item_name)
                         flow["increment_attempts"].append(attempt)
                         continue
@@ -3494,6 +3507,12 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                             f"{log_tag} Would increment '{item_name}' at {attempt['increment_target']} "
                             f"(simulated, commit_mode={commit_mode})."
                         )
+                        bot.push_debug_history({
+                            "event": "click",
+                            "asset": f"inventory_increment_{item_name}",
+                            "result": "simulated",
+                            "context": "trackblazer_item_use",
+                        })
                     else:
                         info(f"{log_tag} Incrementing '{item_name}' once at {attempt['increment_target']}.")
                         click_metrics = device_action.click_with_metrics(
@@ -3502,6 +3521,12 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         )
                         attempt["click_metrics"] = click_metrics
                         attempt["clicked"] = bool(click_metrics.get("clicked"))
+                        bot.push_debug_history({
+                            "event": "click",
+                            "asset": f"inventory_increment_{item_name}",
+                            "result": "clicked" if attempt["clicked"] else "click_failed",
+                            "context": "trackblazer_item_use",
+                        })
                     flow["increment_attempts"].append(attempt)
                 flow["timing_increments"] = round(_time() - increment_t0, 3)
 
