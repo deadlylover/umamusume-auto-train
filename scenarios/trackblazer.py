@@ -4003,6 +4003,7 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
     best_method = shop_state.get("best_method") or {}
     method_name = best_method.get("method")
     entry = best_method.get("entry") or {}
+    method_sequence = [method_name] if method_name else []
 
     if not best_method.get("matched") or not entry.get("click_target"):
         timing["total"] = round(_time() - t_total, 4)
@@ -4031,6 +4032,36 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
         threshold=max(0.7, threshold - 0.1),
     ) if clicked else (False, None, [])
     timing["verify"] = round(_time() - t0, 4)
+
+    followup_shop_state = None
+    followup_click_metrics = None
+    if clicked and not shop_open and method_name in {"lobby_button", "summer_lobby_button"}:
+        t0 = _time()
+        followup_shop_state = inspect_shop_entry_state(
+            threshold=threshold,
+            year=year,
+            allow_summer_lobby_entry=allow_summer_lobby_entry,
+        )
+        timing["detect_followup_entry"] = round(_time() - t0, 4)
+        followup_method = followup_shop_state.get("best_method") or {}
+        followup_name = followup_method.get("method")
+        followup_entry = followup_method.get("entry") or {}
+        if followup_name == "refresh_dialog" and followup_method.get("matched") and followup_entry.get("click_target"):
+            method_sequence.append(followup_name)
+            t0 = _time()
+            followup_click_metrics = device_action.click_with_metrics(followup_entry["click_target"])
+            timing["followup_click_total"] = round(_time() - t0, 4)
+            timing["followup_click_breakdown"] = followup_click_metrics
+
+            t0 = _time()
+            sleep(0.35)
+            timing["followup_sleep"] = round(_time() - t0, 4)
+
+            t0 = _time()
+            shop_open, verification_entry, verification_checks = detect_shop_screen(
+                threshold=max(0.7, threshold - 0.1),
+            ) if followup_click_metrics.get("clicked") else (False, verification_entry, verification_checks)
+            timing["followup_verify"] = round(_time() - t0, 4)
     shop_coins = -1
     if shop_open and read_shop_coins:
         t0 = _time()
@@ -4043,8 +4074,11 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
         "entered": bool(clicked and shop_open),
         "clicked": bool(click_metrics.get("clicked")),
         "method": method_name,
+        "method_sequence": [step for step in method_sequence if step],
+        "followup_shop_check": followup_shop_state,
+        "followup_click_metrics": followup_click_metrics,
         "reason": (
-            f"clicked_{method_name}_shop"
+            f"clicked_{'_then_'.join(step for step in method_sequence if step)}_shop"
             if clicked and shop_open else
             ("shop_verification_failed" if clicked else "click_failed")
         ),
@@ -4398,23 +4432,11 @@ def inspect_shop_entry_state(threshold=0.8, year=None, allow_summer_lobby_entry=
 
     methods["refresh_dialog"] = _refresh_dialog_summary()
     methods["lobby_button"] = _single_template_method("lobby_button", "shop_enter_lobby")
-    if summer_lobby_allowed:
-        methods["summer_lobby_button"] = _single_template_method("summer_lobby_button", "shop_enter_summer_lobby")
-    else:
-        methods["summer_lobby_button"] = {
-            "method": "summer_lobby_button",
-            "matched": False,
-            "ready": False,
-            "entry": None,
-            "dismiss": None,
-            "best_match": None,
-            "region_ltrb": [int(v) for v in _trackblazer_ui_region()],
-            "required_keys": ["shop_enter_summer_lobby"],
-            "missing_required": ["shop_enter_summer_lobby"],
-            "checks": {},
-            "reason": "out_of_summer_window",
-            "timeline_label": timeline_label,
-        }
+    # The alternate lobby asset is reused outside summer in some layouts; treat
+    # it as a position variant instead of suppressing the match by timeline.
+    methods["summer_lobby_button"] = _single_template_method("summer_lobby_button", "shop_enter_summer_lobby")
+    methods["summer_lobby_button"]["timeline_hint_allowed"] = bool(summer_lobby_allowed)
+    methods["summer_lobby_button"]["timeline_label"] = timeline_label
 
     ready_methods = [entry for entry in methods.values() if entry.get("ready")]
     scored_methods = [entry for entry in methods.values() if (entry.get("best_match") or {}).get("score") is not None]
