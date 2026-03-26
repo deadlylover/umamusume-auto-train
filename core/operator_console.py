@@ -712,6 +712,30 @@ class OperatorConsole:
         line += f" -> {result}"
       if context:
         line += f"  ({context})"
+      details = []
+      note = entry.get("note", "")
+      backend = entry.get("backend", "")
+      target = entry.get("target")
+      resolved_click_point = entry.get("resolved_click_point")
+      clicks_requested = entry.get("clicks_requested")
+      clicks_completed = entry.get("clicks_completed")
+      total = entry.get("total")
+      if note:
+        details.append(str(note))
+      if backend:
+        details.append(f"backend={backend}")
+      if resolved_click_point is not None:
+        details.append(f"point={resolved_click_point}")
+      elif target is not None:
+        details.append(f"target={target}")
+      if clicks_completed is not None:
+        details.append(f"done={clicks_completed}")
+      elif clicks_requested is not None:
+        details.append(f"req={clicks_requested}")
+      if total is not None:
+        details.append(f"total={total}s")
+      if details:
+        line += " [" + " | ".join(details) + "]"
       metadata = []
       if turn_label:
         metadata.append(f"turn={turn_label}")

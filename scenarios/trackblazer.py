@@ -4442,6 +4442,18 @@ def check_trackblazer_shop_inventory(
         flow["entry_result"] = entry_result
         flow["entered"] = bool(entry_result.get("entered"))
         flow["shop_coins"] = entry_result.get("shop_coins", -1)
+        bot.push_debug_history({
+            "event": "trackblazer_shop_entry",
+            "asset": entry_result.get("method") or "shop_entry",
+            "result": (
+                "entered"
+                if flow["entered"] else
+                ("clicked_but_not_verified" if entry_result.get("clicked") else "not_entered")
+            ),
+            "context": "trackblazer_shop_inventory",
+            "reason": entry_result.get("reason") or flow.get("reason") or "",
+            "shop_coins": flow["shop_coins"],
+        })
         if not flow["entered"]:
             flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
             if entry_result.get("clicked"):
@@ -4499,6 +4511,13 @@ def check_trackblazer_shop_inventory(
         flow["timing_close"] = round(_time() - t0, 3)
         flow["close_result"] = close_result
         flow["closed"] = bool(close_result.get("closed"))
+        bot.push_debug_history({
+            "event": "trackblazer_shop_close",
+            "asset": (close_result.get("attempt") or {}).get("key") or "shop_close",
+            "result": "closed" if flow["closed"] else "close_failed",
+            "context": "trackblazer_shop_inventory",
+            "reason": close_result.get("reason") or flow.get("reason") or "",
+        })
         if not flow["closed"] and not flow["reason"]:
             flow["reason"] = "failed_to_close_shop"
 

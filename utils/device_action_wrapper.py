@@ -33,6 +33,30 @@ LAST_CLICK_METRICS = {}
 def get_last_click_metrics():
   return dict(LAST_CLICK_METRICS or {})
 
+def _push_click_history(metrics, note=""):
+  """Record a low-level click dispatch in the shared debug history."""
+  payload = {
+    "event": "input_click",
+    "asset": str(note or metrics.get("asset") or metrics.get("target") or "click"),
+    "result": "clicked" if metrics.get("clicked") else "click_failed",
+    "context": metrics.get("history_context") or "device_action_wrapper",
+    "backend": metrics.get("backend"),
+    "target": metrics.get("target"),
+    "resolved_click_point": metrics.get("resolved_click_point"),
+    "clicks_requested": metrics.get("clicks_requested"),
+    "clicks_completed": metrics.get("clicks_completed"),
+    "duration_requested": metrics.get("duration_requested"),
+    "interval_requested": metrics.get("interval_requested"),
+    "pre_click_delay": metrics.get("pre_click_delay"),
+    "dispatch_total": metrics.get("dispatch_total"),
+    "inter_click_wait_total": metrics.get("inter_click_wait_total"),
+    "post_click_settle": metrics.get("post_click_settle"),
+    "flush_cache": metrics.get("flush_cache"),
+    "total": metrics.get("total"),
+    "note": metrics.get("note") or "",
+  }
+  bot.push_debug_history(payload)
+
 def _resolve_click_point(target: Pos | Box):
   if target is None or len(target) == 0:
     return None, None, None
@@ -55,7 +79,7 @@ def _adb_pre_click_delay(duration: float):
   requested_duration = max(0.0, float(duration))
   return min(requested_duration, float(ADB_CLICK_PRE_DELAY_SECONDS))
 
-def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
+def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = "", history_label: str = "", history_context: str = ""):
   """Dispatch a click and return structured timing for the whole wrapper path.
 
   This intentionally measures more than the backend tap call itself. The
@@ -76,7 +100,10 @@ def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1
       "target_kind": "empty",
       "target": list(target) if target is not None else None,
       "backend": "adb" if bot.is_adb_input_active() else "host",
+      "history_context": history_context,
+      "note": text,
     }
+    _push_click_history(LAST_CLICK_METRICS, note=history_label or text or "click")
     return LAST_CLICK_METRICS
 
   backend_name = "adb" if bot.is_adb_input_active() else "host"
@@ -96,6 +123,8 @@ def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1
     "post_click_settle": 0.0,
     "flush_cache": 0.0,
     "backend_debug": None,
+    "history_context": history_context,
+    "note": text,
   }
 
   if bot.is_adb_input_active():
@@ -115,6 +144,7 @@ def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1
         metrics["backend_debug"] = adb_actions.get_last_input_debug()
         metrics["total"] = round(time() - t_total, 4)
         LAST_CLICK_METRICS = metrics
+        _push_click_history(metrics, note=history_label or text or str(target))
         error(f"[INPUT][ADB] Click dispatch failed at ({x}, {y}).")
         return metrics
       tap_dispatches.append(round(time() - t_tap, 4))
@@ -148,10 +178,21 @@ def click_with_metrics(target: Pos | Box, clicks: int = 1, interval: float = 0.1
   metrics["clicked"] = True
   metrics["total"] = round(time() - t_total, 4)
   LAST_CLICK_METRICS = metrics
+  _push_click_history(metrics, note=history_label or text or str(target))
   return metrics
 
-def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = ""):
-  return bool(click_with_metrics(target, clicks=clicks, interval=interval, duration=duration, text=text).get("clicked"))
+def click(target: Pos | Box, clicks: int = 1, interval: float = 0.1, duration: float = 0.225, text: str = "", history_label: str = "", history_context: str = ""):
+  return bool(
+    click_with_metrics(
+      target,
+      clicks=clicks,
+      interval=interval,
+      duration=duration,
+      text=text,
+      history_label=history_label,
+      history_context=history_context,
+    ).get("clicked")
+  )
 
 def swipe(start_x_y : tuple[int, int], end_x_y : tuple[int, int], duration=0.3, text: str = ""):
   if text and args.device_debug:
@@ -481,7 +522,13 @@ def locate_and_click(img_path : str, confidence=0.8, min_search_time=0.5, region
     debug(f"locate_and_click: {coordinates}")
 
   if coordinates:
-    click(coordinates, duration=duration)
+    click(
+      coordinates,
+      duration=duration,
+      text=text,
+      history_label=img_path,
+      history_context="locate_and_click",
+    )
     return True
   return False
 

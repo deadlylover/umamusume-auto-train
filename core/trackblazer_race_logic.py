@@ -22,6 +22,7 @@ _SUMMER_WINDOWS = (
 )
 
 _WEAK_TRAINING_THRESHOLD = 35
+_JUNIOR_THREE_SUPPORT_MIN_SUPPORTS = 3
 _MIN_RACE_ENERGY_PCT = 0.05
 _GRADE_ORDER = ("G1", "G2", "G3", "OP", "Pre-OP")
 
@@ -54,6 +55,13 @@ def _total_stat_gain(action):
     total += normalized
     found = True
   return total if found else None
+
+
+def _support_count(action):
+  training_data = action.get("training_data") if hasattr(action, "get") else None
+  if not isinstance(training_data, dict):
+    return None
+  return _safe_int(training_data.get("total_supports"))
 
 
 def _race_grade_rank(grade):
@@ -134,6 +142,7 @@ def _decision(**kwargs):
     "should_race": bool(kwargs.get("should_race", False)),
     "reason": str(kwargs.get("reason", "")),
     "training_total_stats": kwargs.get("training_total_stats"),
+    "training_supports": kwargs.get("training_supports"),
     "is_summer": bool(kwargs.get("is_summer", False)),
     "g1_forced": bool(kwargs.get("g1_forced", False)),
     "prefer_rival_race": bool(kwargs.get("prefer_rival_race", False)),
@@ -149,6 +158,7 @@ def _decision(**kwargs):
     f"{decision['reason']} "
     f"(summer={decision['is_summer']}, g1={decision['g1_forced']}, "
     f"rival={decision['rival_indicator']}, stats={decision['training_total_stats']}, "
+    f"supports={decision['training_supports']}, "
     f"race={decision['race_name'] or '-'})"
   )
   return decision
@@ -177,6 +187,7 @@ def evaluate_trackblazer_race(state_obj, action):
   turn = state_obj.get("turn", "")
   summer = _is_summer(year)
   training_stats = _total_stat_gain(action)
+  training_supports = _support_count(action)
   race_info = _detect_race_options(state_obj)
 
   if state_obj.get("trackblazer_climax_locked_race"):
@@ -184,6 +195,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=False,
       reason="Twinkle Star Climax training turn: race button is locked, so keep the normal inventory/shop/training flow",
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=summer,
       g1_forced=False,
       prefer_rival_race=False,
@@ -201,6 +213,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=True,
       reason="Race Day is mandatory",
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=summer,
       g1_forced=True,
       prefer_rival_race=False,
@@ -216,6 +229,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=True,
       reason="G1 is available on this date; Trackblazer policy is to always race G1",
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=summer,
       g1_forced=True,
       prefer_rival_race=False,
@@ -240,6 +254,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=False,
       reason="No rival race indicator on screen",
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=summer,
       g1_forced=False,
       prefer_rival_race=False,
@@ -260,12 +275,33 @@ def evaluate_trackblazer_race(state_obj, action):
         f"({energy_pct:.0%} < {_MIN_RACE_ENERGY_PCT:.0%})"
       ),
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=summer,
       g1_forced=False,
       prefer_rival_race=False,
       race_tier_target=None,
       race_name=None,
       race_available=False,
+      rival_indicator=True,
+      race_tier_info=race_info,
+    )
+
+  # Summer: only race the rival if training is weak.
+  if str(year or "").startswith("Junior") and training_supports is not None and training_supports >= _JUNIOR_THREE_SUPPORT_MIN_SUPPORTS:
+    return _decision(
+      should_race=False,
+      reason=(
+        f"Junior year with a 3-support reading ({training_supports} >= "
+        f"{_JUNIOR_THREE_SUPPORT_MIN_SUPPORTS}) — keep the training turn over an optional rival race"
+      ),
+      training_total_stats=training_stats,
+      training_supports=training_supports,
+      is_summer=summer,
+      g1_forced=False,
+      prefer_rival_race=False,
+      race_tier_target=None,
+      race_name=None,
+      race_available=True,
       rival_indicator=True,
       race_tier_info=race_info,
     )
@@ -280,6 +316,7 @@ def evaluate_trackblazer_race(state_obj, action):
           f"({training_stats} < {_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
         ),
         training_total_stats=training_stats,
+        training_supports=training_supports,
         is_summer=True,
         g1_forced=False,
         prefer_rival_race=True,
@@ -293,6 +330,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=False,
       reason="Summer window: prefer training over rival race",
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=True,
       g1_forced=False,
       prefer_rival_race=False,
@@ -312,6 +350,7 @@ def evaluate_trackblazer_race(state_obj, action):
         f"{_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
       ),
       training_total_stats=training_stats,
+      training_supports=training_supports,
       is_summer=False,
       g1_forced=False,
       prefer_rival_race=True,
@@ -330,6 +369,7 @@ def evaluate_trackblazer_race(state_obj, action):
       f"({training_stats} >= {_WEAK_TRAINING_THRESHOLD})"
     ),
     training_total_stats=training_stats,
+    training_supports=training_supports,
     is_summer=False,
     g1_forced=False,
     prefer_rival_race=False,

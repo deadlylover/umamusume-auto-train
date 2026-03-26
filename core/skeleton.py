@@ -2410,6 +2410,14 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
   shop_close_count = 0
   max_close_attempts = 3
   polls = 0
+  bot.push_debug_history({
+    "event": "trackblazer_shop_wait",
+    "asset": "lobby_after_shop_purchase",
+    "result": "started",
+    "context": "trackblazer_shop_inventory",
+    "max_wait": round(float(max_wait), 3),
+    "max_close_attempts": max_close_attempts,
+  })
 
   while _time_mod.time() < deadline:
     if bot.stop_event.is_set():
@@ -2422,6 +2430,14 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
     ready_state = _trackblazer_pre_action_ready_state(screenshot=screenshot)
     if ready_state.get("ready"):
       info(f"[TB_SHOP] Ready screen confirmed after shop via {ready_state.get('source')} (poll {polls}).")
+      bot.push_debug_history({
+        "event": "trackblazer_shop_wait",
+        "asset": "lobby_after_shop_purchase",
+        "result": "ready_detected",
+        "context": "trackblazer_shop_inventory",
+        "poll": polls,
+        "source": ready_state.get("source") or "",
+      })
       return True
     lobby_found = False
     for tpl in _LOBBY_ANCHOR_TEMPLATES:
@@ -2430,6 +2446,13 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
         break
     if lobby_found:
       info(f"[TB_SHOP] Lobby anchor confirmed after shop purchase (poll {polls}).")
+      bot.push_debug_history({
+        "event": "trackblazer_shop_wait",
+        "asset": "lobby_after_shop_purchase",
+        "result": "lobby_anchor_detected",
+        "context": "trackblazer_shop_inventory",
+        "poll": polls,
+      })
       return True
 
     # 2. Check if shop screen is still visible.
@@ -2442,11 +2465,36 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
           f"[TB_SHOP] Shop screen visible (poll {polls}, "
           f"close attempt {shop_close_count}/{max_close_attempts}); closing."
         )
+        bot.push_debug_history({
+          "event": "trackblazer_shop_wait",
+          "asset": "lobby_after_shop_purchase",
+          "result": "shop_still_open",
+          "context": "trackblazer_shop_inventory",
+          "poll": polls,
+          "shop_close_count": shop_close_count,
+          "max_close_attempts": max_close_attempts,
+        })
         close_result = close_trackblazer_shop()
         if close_result.get("closed"):
           info("[TB_SHOP] Shop closed via explicit close in lobby wait.")
+          bot.push_debug_history({
+            "event": "trackblazer_shop_wait",
+            "asset": "lobby_after_shop_purchase",
+            "result": "shop_closed_in_wait",
+            "context": "trackblazer_shop_inventory",
+            "poll": polls,
+            "shop_close_count": shop_close_count,
+          })
         else:
           warning("[TB_SHOP] Explicit shop close attempt did not succeed.")
+          bot.push_debug_history({
+            "event": "trackblazer_shop_wait",
+            "asset": "lobby_after_shop_purchase",
+            "result": "shop_close_failed_in_wait",
+            "context": "trackblazer_shop_inventory",
+            "poll": polls,
+            "shop_close_count": shop_close_count,
+          })
         sleep(0.3)
         continue
 
@@ -2460,20 +2508,60 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
           f"[TB_SHOP] Inventory screen visible (poll {polls}, "
           f"close attempt {inventory_close_count}/{max_close_attempts}); closing."
         )
+        bot.push_debug_history({
+          "event": "trackblazer_shop_wait",
+          "asset": "lobby_after_shop_purchase",
+          "result": "inventory_still_open",
+          "context": "trackblazer_shop_inventory",
+          "poll": polls,
+          "inventory_close_count": inventory_close_count,
+          "max_close_attempts": max_close_attempts,
+        })
         close_result = close_training_items_inventory()
         if close_result.get("closed"):
           info("[TB_SHOP] Inventory closed via explicit close in lobby wait.")
+          bot.push_debug_history({
+            "event": "trackblazer_shop_wait",
+            "asset": "lobby_after_shop_purchase",
+            "result": "inventory_closed_in_wait",
+            "context": "trackblazer_shop_inventory",
+            "poll": polls,
+            "inventory_close_count": inventory_close_count,
+          })
         else:
           warning("[TB_SHOP] Explicit inventory close attempt did not succeed.")
+          bot.push_debug_history({
+            "event": "trackblazer_shop_wait",
+            "asset": "lobby_after_shop_purchase",
+            "result": "inventory_close_failed_in_wait",
+            "context": "trackblazer_shop_inventory",
+            "poll": polls,
+            "inventory_close_count": inventory_close_count,
+          })
         sleep(0.3)
         continue
 
     # 4. Generic back/close fallback — one attempt only.
     if not generic_recovery_attempted:
       info(f"[TB_SHOP] Lobby not visible (poll {polls}); attempting generic recovery close.")
+      bot.push_debug_history({
+        "event": "trackblazer_shop_wait",
+        "asset": "lobby_after_shop_purchase",
+        "result": "generic_recovery_attempt",
+        "context": "trackblazer_shop_inventory",
+        "poll": polls,
+      })
       for close_tpl in ("assets/buttons/close_btn.png", "assets/buttons/back_btn.png"):
         if device_action.locate_and_click(close_tpl, min_search_time=get_secs(0.4), region_ltrb=constants.SCREEN_BOTTOM_BBOX):
           info(f"[TB_SHOP] Clicked {close_tpl} to dismiss leftover overlay.")
+          bot.push_debug_history({
+            "event": "trackblazer_shop_wait",
+            "asset": "lobby_after_shop_purchase",
+            "result": "generic_recovery_clicked",
+            "context": "trackblazer_shop_inventory",
+            "poll": polls,
+            "template": close_tpl,
+          })
           sleep(0.6)
           break
       generic_recovery_attempted = True
@@ -2481,6 +2569,16 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
     sleep(0.4)
 
   warning(f"[TB_SHOP] Timed out waiting for lobby after shop purchase ({polls} polls).")
+  bot.push_debug_history({
+    "event": "trackblazer_shop_wait",
+    "asset": "lobby_after_shop_purchase",
+    "result": "timeout",
+    "context": "trackblazer_shop_inventory",
+    "polls": polls,
+    "shop_close_count": shop_close_count,
+    "inventory_close_count": inventory_close_count,
+    "generic_recovery_attempted": generic_recovery_attempted,
+  })
   return False
 
 
@@ -3586,11 +3684,26 @@ def career_lobby(dry_run_turn=False):
         state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
 
         if shop_flow.get("entered") and shop_flow.get("closed"):
+          bot.push_debug_history({
+            "event": "trackblazer_shop_post_close",
+            "asset": "shop_flow",
+            "result": "closed",
+            "context": "trackblazer_shop_inventory",
+            "ready_after_shop_scan": bool(ready_after_shop_scan),
+            "climax_race_day": bool(state_obj.get("trackblazer_climax_race_day")),
+          })
           if state_obj.get("trackblazer_climax_race_day"):
             info("[TB_RACE] Forced Climax race day visible after shop; skipping post-shop inventory refresh.")
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
           elif ready_after_shop_scan:
+            bot.push_debug_history({
+              "event": "trackblazer_shop_post_close",
+              "asset": "inventory_refresh",
+              "result": "refreshing",
+              "context": "trackblazer_shop_inventory",
+              "trigger": "post_shop_refresh",
+            })
             update_operator_snapshot(
               phase="checking_inventory",
               message="Refreshing Trackblazer inventory after shop.",
@@ -3605,6 +3718,13 @@ def career_lobby(dry_run_turn=False):
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
           elif pending_shop_check:
+            bot.push_debug_history({
+              "event": "trackblazer_shop_post_close",
+              "asset": "inventory_refresh",
+              "result": "skipped_no_ready_screen",
+              "context": "trackblazer_shop_inventory",
+              "trigger": "post_shop_refresh",
+            })
             warning("[TB_SHOP] Skipping post-shop inventory refresh because the ready screen never settled.")
 
         # Detect "Scheduled Race" button on the lobby race button area.
@@ -3910,7 +4030,8 @@ def career_lobby(dry_run_turn=False):
               f"should_race={race_decision.get('should_race')} | "
               f"target={race_decision.get('race_tier_target') or '-'} | "
               f"race={race_decision.get('race_name') or '-'} | "
-              f"training_total={race_decision.get('training_total_stats')}"
+              f"training_total={race_decision.get('training_total_stats')} | "
+              f"supports={race_decision.get('training_supports')}"
             ),
           )
         elif race_decision.get("should_race") and action.func == "do_race":
@@ -3942,7 +4063,8 @@ def career_lobby(dry_run_turn=False):
               f"should_race={race_decision.get('should_race')} | "
               f"target={race_decision.get('race_tier_target') or '-'} | "
               f"race={race_decision.get('race_name') or '-'} | "
-              f"training_total={race_decision.get('training_total_stats')}"
+              f"training_total={race_decision.get('training_total_stats')} | "
+              f"supports={race_decision.get('training_supports')}"
             ),
           )
 
