@@ -2696,9 +2696,6 @@ def scan_all_trackblazer_shop_items(
     if pre_reset_scrollbar.get("detected") and pre_reset_scrollbar.get("scrollable"):
         if not pre_reset_scrollbar.get("is_at_top"):
             flow["reset_swipes"].append(_drag_trackblazer_shop_scrollbar(pre_reset_scrollbar, edge="top"))
-    else:
-        for _ in range(max_reset_swipes):
-            flow["reset_swipes"].append(scroll_trackblazer_shop(direction="up"))
 
     seen_items = set()
     ordered_items = []
@@ -2740,8 +2737,27 @@ def scan_all_trackblazer_shop_items(
     last_page = initial_signature
 
     if not initial_scrollbar.get("detected") or not initial_scrollbar.get("scrollable"):
-        flow["stop_reason"] = "no_scrollbar_detected_or_not_scrollable"
+        fallback_result = _scan_all_trackblazer_shop_items_paged(
+            threshold=threshold,
+            checkbox_threshold=checkbox_threshold,
+            confirm_threshold=confirm_threshold,
+            max_reset_swipes=0,
+            max_forward_swipes=max_forward_swipes,
+        )
+        fallback_flow = fallback_result.get("flow") or {}
+        flow["scan_mode"] = "paged_swipe_fallback"
+        flow["forward_swipes"] = list(fallback_flow.get("forward_swipes") or [])
+        fallback_pages = list(fallback_flow.get("pages") or [])
+        if fallback_pages:
+            fallback_pages = fallback_pages[1:]
+        flow["pages"] = list(flow.get("pages") or []) + fallback_pages
+        flow["stop_reason"] = (
+            fallback_flow.get("stop_reason")
+            or "paged_fallback_after_no_scrollbar_detection"
+        )
         flow["scrollbar_final"] = initial_scrollbar
+        ordered_items = list(dict.fromkeys(list(ordered_items) + list(fallback_result.get("all_items") or [])))
+        ordered_purchasable = list(dict.fromkeys(list(ordered_purchasable) + list(fallback_result.get("purchasable_items") or [])))
     else:
         drag_result = _capture_shop_frames_during_scrollbar_drag(
             threshold=threshold,
