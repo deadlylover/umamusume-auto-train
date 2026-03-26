@@ -661,6 +661,32 @@ def _affordable_shop_support_items(state_obj):
   return affordable
 
 
+def _energy_can_rescue_training(state_obj, candidate):
+  """Check if held energy items make a strong risky training worth committing
+  instead of burning a Reset Whistle.  The candidate must be genuinely strong
+  (high supports, score, or gains) — we only skip the reroll when using energy
+  on this specific training is clearly the better play."""
+  if not candidate:
+    return False
+  # Only rescue trainings that are actually strong — weak boards should reroll.
+  strong = (
+    candidate["supports"] >= 3
+    or candidate["score"] >= 35.0
+    or candidate["total_stat_gain"] >= 35
+    or (candidate["supports"] >= 2 and candidate["matching_stat_gain"] >= 20)
+  )
+  if not strong:
+    return False
+  inventory = state_obj.get("trackblazer_inventory") or {}
+  inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
+  held_quantities = dict(inventory_summary.get("held_quantities") or {})
+  for item_key in _ENERGY_ITEM_KEYS:
+    held = _current_held_quantity(item_key, inventory, held_quantities)
+    if held > 0 and _ENERGY_RESTORE_VALUES.get(item_key, 0) > 0:
+      return True
+  return False
+
+
 def _summer_reroll_signal(state_obj, current_context):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   if not current_context.get("summer_window"):
@@ -713,6 +739,19 @@ def _summer_reroll_signal(state_obj, current_context):
     reverse=True,
   )
   top_candidate = risky_candidates[0]
+
+  # If the top risky candidate is strong (high supports/score/gains), check
+  # whether held energy items could rescue it by reducing the failure rate.
+  # Using a Vita to commit a strong training is better than burning the whistle.
+  energy_rescuable = _energy_can_rescue_training(state_obj, top_candidate)
+  if energy_rescuable:
+    return {
+      "needs_reroll": False,
+      "risky_training_name": top_candidate["training_name"],
+      "risky_training_failure": top_candidate["failure"],
+      "energy_rescue": True,
+    }
+
   return {
     "needs_reroll": True,
     "risky_training_name": top_candidate["training_name"],
@@ -886,6 +925,7 @@ def _usage_context(state_obj, action):
     "strong_burst_training": strong_burst_training,
     "weak_summer_training": weak_summer_training or weak_climax_training or bool(reroll_signal.get("needs_reroll")),
     "weak_climax_training": weak_climax_training,
+    "energy_rescue": bool(reroll_signal.get("energy_rescue")),
     "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
     "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
     "commit_training_after_items": commit_training_after_items,
@@ -1452,6 +1492,26 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     }
 
   if usage_group == "energy":
+    # Energy rescue: a strong training is blocked only by high failure and we
+    # hold energy items that could fix it.  Allow energy items even when the
+    # current action is not training (e.g. race fallback) — the reassess pass
+    # after using the energy item will re-evaluate the board with lower fail.
+    if context.get("energy_rescue"):
+      reason_parts = [
+        f"energy deficit {context['energy_deficit']}",
+        "energy rescue: strong training blocked by failure rate",
+      ]
+      if context.get("summer_reroll_target_name"):
+        reason_parts.append(
+          f"rescue target: {_TRAINING_LABELS.get(context['summer_reroll_target_name'], context['summer_reroll_target_name'])} "
+          f"at {context.get('summer_reroll_target_failure', 0)}% fail"
+        )
+      return {
+        "candidate_score": 460 + priority_score + context["energy_deficit"],
+        "reason": "; ".join(reason_parts),
+        "reserved_quantity": reserve_quantity,
+        "use_now": True,
+      }
     if context["action_func"] != "do_training":
       return None
     if (
@@ -1600,6 +1660,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "failure_bypassed_by_items": context.get("failure_bypassed_by_items"),
       "held_support_item_names": context.get("held_support_item_names"),
       "affordable_shop_support_item_names": context.get("affordable_shop_support_item_names"),
+      "energy_rescue": context.get("energy_rescue"),
       "summer_reroll_target_name": context.get("summer_reroll_target_name"),
       "summer_reroll_target_failure": context.get("summer_reroll_target_failure"),
       "commit_training_after_items": context.get("commit_training_after_items"),

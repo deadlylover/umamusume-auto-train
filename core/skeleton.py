@@ -1193,7 +1193,7 @@ def _planned_clicks_for_action(action):
         _planned_click(
           "Rescan trainings after item use",
           region_key="GAME_WINDOW_BBOX",
-          note="Reset Whistle changes the board, so the follow-up action must be re-evaluated",
+          note="Item use changes board state (whistle reroll or energy reducing failure), so the follow-up action must be re-evaluated",
         )
       )
   if not action_func:
@@ -1642,9 +1642,15 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     # where they'll be re-planned against the new training state.
     candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
   candidates = _order_trackblazer_pre_action_items(candidates)
+  item_context = item_use_plan.get("context") or {}
+  energy_rescue = bool(item_context.get("energy_rescue"))
   action["trackblazer_pre_action_items"] = candidates
-  action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
-  action["trackblazer_reassess_after_item_use"] = has_whistle
+  action["trackblazer_item_use_context"] = item_context
+  # Reassess after item use when the board will change (whistle) or when
+  # energy items were used to rescue a strong training from high failure —
+  # the reassess pass re-collects training state with updated energy so the
+  # previously-filtered training can be picked.
+  action["trackblazer_reassess_after_item_use"] = has_whistle or energy_rescue
   return action
 
 
@@ -4065,6 +4071,7 @@ def career_lobby(dry_run_turn=False):
       action = strategy.check_scheduled_races(state_obj, action)
       if "race_name" in action.options:
         action.func = "do_race"
+        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
         info(f"Taking action: {action.func}")
         update_pre_action_phase(
           state_obj,
@@ -4113,6 +4120,7 @@ def career_lobby(dry_run_turn=False):
         action["race_name"] = "any"
         action["trackblazer_lobby_scheduled_race"] = True
         action["hammer_spendable"] = total_spendable
+        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
         update_pre_action_phase(
           state_obj,
           action,
