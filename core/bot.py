@@ -74,6 +74,37 @@ skill_dry_run_enabled = False
 post_action_resolution = default_post_action_resolution_state()
 
 
+def _coerce_debug_turn_label(value):
+  if value is None:
+    return ""
+  text = str(value).strip()
+  return text
+
+
+def _extract_debug_context_from_snapshot(snapshot):
+  if not isinstance(snapshot, dict):
+    return {}
+
+  summary = snapshot.get("state_summary") or {}
+  selected_action = snapshot.get("selected_action") or {}
+  context = {}
+
+  year = _coerce_debug_turn_label(summary.get("year"))
+  turn = _coerce_debug_turn_label(summary.get("turn"))
+  if year:
+    context["year"] = year
+  if turn:
+    context["turn"] = turn
+  if year or turn:
+    context["turn_label"] = " / ".join(part for part in (year, turn) if part)
+
+  action_name = _coerce_debug_turn_label(selected_action.get("action"))
+  if action_name:
+    context["action"] = action_name
+
+  return context
+
+
 def set_phase(phase, status="active", message="", error="", sub_phase=None):
   global runtime_phase, runtime_sub_phase, runtime_phase_status, runtime_phase_message, runtime_error, runtime_updated_at
   with runtime_lock:
@@ -121,8 +152,16 @@ def set_snapshot(snapshot):
 def push_debug_history(entry):
   """Append an event to the debug history ring buffer (thread-safe)."""
   with runtime_lock:
-    entry["_ts"] = time.time()
-    debug_history.append(entry)
+    payload = dict(entry or {})
+    payload["_ts"] = time.time()
+
+    snapshot_context = _extract_debug_context_from_snapshot(latest_snapshot)
+    for key, value in snapshot_context.items():
+      payload.setdefault(key, value)
+
+    payload.setdefault("phase", runtime_phase)
+    payload.setdefault("sub_phase", runtime_sub_phase)
+    debug_history.append(payload)
     if len(debug_history) > DEBUG_HISTORY_MAX:
       del debug_history[:len(debug_history) - DEBUG_HISTORY_MAX]
 

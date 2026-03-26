@@ -199,6 +199,10 @@ MANT_SHOP_CONTROLS_REGION = convert_xyxy_to_xywh(MANT_SHOP_CONTROLS_BBOX)
 # Placeholder offsets; tune with the region adjuster once the screen is accessible.
 MANT_INVENTORY_ITEMS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (50, 250, -50, -200))
 MANT_INVENTORY_ITEMS_REGION = convert_xyxy_to_xywh(MANT_INVENTORY_ITEMS_BBOX)
+# Trackblazer inventory scrollbar — narrow strip on the right of the item list.
+# Placeholder offsets; tune with the region adjuster once the screen is accessible.
+MANT_INVENTORY_SCROLLBAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (705, 280, -18, -250))
+MANT_INVENTORY_SCROLLBAR_REGION = convert_xyxy_to_xywh(MANT_INVENTORY_SCROLLBAR_BBOX)
 
 # Trackblazer item icon templates — used for inventory and shop recognition.
 TRACKBLAZER_ITEM_TEMPLATES = {
@@ -709,6 +713,8 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_SHOP_CONTROLS_REGION",
   "MANT_INVENTORY_ITEMS_BBOX",
   "MANT_INVENTORY_ITEMS_REGION",
+  "MANT_INVENTORY_SCROLLBAR_BBOX",
+  "MANT_INVENTORY_SCROLLBAR_REGION",
   "SKILL_SCROLLBAR_BBOX",
   "SKILL_SCROLLBAR_REGION",
   "SKILL_NAME_BAND_BBOX",

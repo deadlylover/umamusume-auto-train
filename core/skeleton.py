@@ -1202,7 +1202,10 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
   detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
   held_quantities = held_quantities or {}
   shop_coins = int((shop_summary or {}).get("shop_coins") or 0)
-  remaining_coins = shop_coins if shop_coins > 0 else 0
+  if shop_coins == 0:
+    return []
+  budget_known = shop_coins > 0
+  remaining_coins = shop_coins if budget_known else 0
   would_buy = []
   for item in effective_shop_items:
     item_key = item.get("key")
@@ -1216,7 +1219,7 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
     if max_quantity > 0 and remaining_capacity <= 0:
       continue
     cost = int(item.get("cost") or 0)
-    if remaining_coins > 0 and cost > remaining_coins:
+    if budget_known and cost > remaining_coins:
       continue
     reason_parts = [f"policy={item.get('effective_priority')}"]
     timing_rules = item.get("active_timing_rules") or []
@@ -1241,7 +1244,7 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
         "reason": "; ".join(part for part in reason_parts if part),
       }
     )
-    if remaining_coins > 0:
+    if budget_known:
       remaining_coins -= cost
   return would_buy[: max(0, int(limit))]
 

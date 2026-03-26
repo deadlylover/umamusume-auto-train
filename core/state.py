@@ -1027,38 +1027,46 @@ def get_trackblazer_shop_coins():
     return -1
 
   region_xywh = constants.MANT_SHOP_COIN_REGION
-  screenshot = device_action.screenshot(region_xywh=region_xywh)
-  record_runtime_ocr_debug(
-    "trackblazer_shop_coins",
-    image=screenshot,
-    extra={
-      "region_key": "MANT_SHOP_COIN_REGION",
-      "region_xywh": list(region_xywh),
-    },
-  )
+  max_attempts = 2
+  for attempt in range(max_attempts):
+    screenshot = device_action.screenshot(region_xywh=region_xywh)
+    record_runtime_ocr_debug(
+      "trackblazer_shop_coins",
+      image=screenshot,
+      extra={
+        "region_key": "MANT_SHOP_COIN_REGION",
+        "region_xywh": list(region_xywh),
+        "attempt": attempt + 1,
+      },
+    )
 
-  pil = Image.fromarray(screenshot)
-  thresholds = [None, 220, 200, 180]
-  best_text = ""
-  best_digits = ""
-  for binarize_threshold in thresholds:
-    enhanced = enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold)
-    text = extract_text(enhanced, allowlist="0123456789,", threshold=0.6)
-    digits = re.sub(r"[^\d]", "", text or "")
-    if len(digits) > len(best_digits):
-      best_text = text or ""
-      best_digits = digits
-    if digits:
-      break
+    pil = Image.fromarray(screenshot)
+    thresholds = [None, 220, 200, 180]
+    best_text = ""
+    best_digits = ""
+    for binarize_threshold in thresholds:
+      enhanced = enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold)
+      text = extract_text(enhanced, allowlist="0123456789,", threshold=0.6)
+      digits = re.sub(r"[^\d]", "", text or "")
+      if len(digits) > len(best_digits):
+        best_text = text or ""
+        best_digits = digits
+      if digits:
+        break
 
-  coins = int(best_digits) if best_digits else -1
-  record_runtime_ocr_debug(
-    "trackblazer_shop_coins",
-    extra={
-      "raw_text": best_text,
-      "parsed_value": coins,
-    },
-  )
+    coins = int(best_digits) if best_digits else -1
+    record_runtime_ocr_debug(
+      "trackblazer_shop_coins",
+      extra={
+        "raw_text": best_text,
+        "parsed_value": coins,
+        "attempt": attempt + 1,
+      },
+    )
+    if coins >= 0:
+      return coins
+    if attempt < max_attempts - 1:
+      warning(f"[STATE] Shop coin OCR failed (attempt {attempt + 1}), retrying...")
   return coins
 
 

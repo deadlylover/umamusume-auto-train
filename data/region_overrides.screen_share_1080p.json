@@ -623,6 +623,18 @@
     723,
     1053
   ],
+  "MANT_INVENTORY_SCROLLBAR_BBOX": [
+    736,
+    248,
+    750,
+    1282
+  ],
+  "MANT_INVENTORY_SCROLLBAR_REGION": [
+    736,
+    248,
+    14,
+    1034
+  ],
   "SKILL_SCROLLBAR_BBOX": [
     745,
     634,

@@ -644,12 +644,9 @@ def _usage_context(state_obj, action):
   strong_burst_training = bool(
     getattr(action, "func", None) == "do_training"
     and (
-      rainbow_count > 0
-      and (
-        matching_stat_gain >= 30
-        or total_stat_gain >= 30
-        or score_value >= 6.0
-      )
+      matching_stat_gain >= 30
+      or total_stat_gain >= 30
+      or (rainbow_count > 0 and score_value >= 6.0)
     )
   )
   weak_summer_training = bool(
@@ -711,17 +708,11 @@ def _usage_context(state_obj, action):
   info(f"[ITEM_USE_CTX] failure_bypassed={failure_bypassed_by_items} failure_rate={failure_rate} committed_value={committed_value_training} score={score_value} matching={matching_stat_gain} total={total_stat_gain} training_data_keys={list(training_data.keys())[:10]}")
   commit_training_after_items = bool(
     strong_burst_training
+    or committed_value_training
     or (
       getattr(action, "func", None) == "do_training"
       and (failure_rate <= 0 or failure_bypassed_by_items)
-      and (
-        (
-          timeline_label in _SUMMER_WINDOWS
-          and very_high_value_training
-          and committed_value_training
-        )
-        or committed_value_training
-      )
+      and very_high_value_training
     )
   )
   return {

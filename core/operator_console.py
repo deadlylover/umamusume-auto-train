@@ -701,11 +701,26 @@ class OperatorConsole:
       asset = entry.get("asset", "")
       result = entry.get("result", "")
       context = entry.get("context", "")
+      turn_label = entry.get("turn_label", "")
+      action = entry.get("action", "")
+      phase = entry.get("phase", "")
+      sub_phase = entry.get("sub_phase", "")
       line = f"[{ts_str}] {event}: {asset}"
       if result:
         line += f" -> {result}"
       if context:
         line += f"  ({context})"
+      metadata = []
+      if turn_label:
+        metadata.append(f"turn={turn_label}")
+      if action:
+        metadata.append(f"action={action}")
+      if phase:
+        metadata.append(f"phase={phase}")
+      if sub_phase and sub_phase != phase:
+        metadata.append(f"sub={sub_phase}")
+      if metadata:
+        line += " [" + " | ".join(metadata) + "]"
       line += "\n"
       self._debug_history_text.insert(tk.END, line)
     self._debug_history_text.see(tk.END)

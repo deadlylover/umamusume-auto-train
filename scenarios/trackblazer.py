@@ -69,10 +69,36 @@ _SHOP_SCROLLBAR_DRAG_END_PADDING = 10
 _SHOP_SCROLLBAR_RESET_DURATION_SECONDS = 1.4
 _SHOP_SCROLLBAR_ANALYSIS_WORKERS = 3
 _SHOP_SCROLLBAR_SEEK_DURATION_SECONDS = 0.8
+# Inventory scrollbar tuning — mirrors shop defaults; adjust if needed.
+_INV_SCROLLBAR_WINDOW_HALF_WIDTH = 3
+_INV_SCROLLBAR_DARKNESS_DELTA = 18.0
+_INV_SCROLLBAR_MIN_SEGMENT_HEIGHT = 8
+_INV_SCROLLBAR_MIN_CONTRAST = 18.0
+_INV_SCROLLBAR_EDGE_TOLERANCE = 12
+_INV_SCROLLBAR_NON_SCROLLABLE_HEIGHT_RATIO = 0.9
+_INV_SCROLLBAR_RESET_DURATION_SECONDS = 1.4
+_INV_SCROLLBAR_DRAG_END_PADDING = 10
+_INV_SCROLLBAR_SEEK_DURATION_SECONDS = 0.8
+_INV_SCROLLBAR_SETTLE_SECONDS = 0.35
 _RIVAL_RACE_MATCH_THRESHOLD = 0.75
 # When two family-variant scores are within this margin, use color
 # disambiguation instead of trusting the raw template score.
 _FAMILY_COLOR_TIEBREAK_MARGIN = 0.025
+_CLEAT_HAMMER_HEAD_ROI = (0.48, 0.24, 0.24, 0.24)
+_CLEAT_HAMMER_GOLD_HUE_RANGE = (12, 38)
+_CLEAT_HAMMER_COLOR_MIN_DELTA = 0.04
+# Megaphone spark disambiguation — the three megaphones differ in the number
+# of yellow lightning-bolt sparks radiating from the horn.
+# ROI covers the left half and top 80% of the icon (where sparks cluster).
+_MEGAPHONE_SPARK_ROI = (0.0, 0.0, 0.50, 0.80)
+# Expected white-spark-pixel ratios (sat<50, val>220) in the spark ROI.
+_MEGAPHONE_SPARK_CENTERS = {
+    "coaching_megaphone":   0.044,
+    "motivating_megaphone": 0.060,
+    "empowering_megaphone": 0.075,
+}
+# If the observed ratio is farther than this from all centres, abstain.
+_MEGAPHONE_SPARK_MAX_DIST = 0.018
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -103,6 +129,11 @@ _ITEM_VARIANT_FAMILIES = (
         "vita_65",
     )),
 )
+_ITEM_VARIANT_FAMILY_MAP = {
+    item_name: family_items
+    for _, family_items in _ITEM_VARIANT_FAMILIES
+    for item_name in family_items
+}
 
 
 def _trackblazer_ui_region():
@@ -458,6 +489,184 @@ def _drag_trackblazer_shop_scrollbar_to_ratio(scrollbar_state, position_ratio, d
 
 
 
+def inspect_trackblazer_inventory_scrollbar(screenshot=None):
+    """Detect the Trackblazer inventory scrollbar thumb and current scroll position.
+
+    Mirrors :func:`inspect_trackblazer_shop_scrollbar` but uses
+    ``MANT_INVENTORY_SCROLLBAR_BBOX`` as the crop region.
+    """
+    ui_region = _trackblazer_ui_region()
+    screenshot = screenshot if screenshot is not None else _capture_live_trackblazer_ui_screenshot()
+    crop = _crop_absolute_bbox_from_screenshot(
+        screenshot,
+        constants.MANT_INVENTORY_SCROLLBAR_BBOX,
+        base_region_ltrb=ui_region,
+    )
+    result = {
+        "detected": False,
+        "scrollable": False,
+        "is_at_top": False,
+        "is_at_bottom": False,
+        "bbox": [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX],
+        "track_center_x": None,
+        "thumb_rect": None,
+        "thumb_center": None,
+        "thumb_height": 0,
+        "travel_pixels": 0,
+        "position_ratio": None,
+        "contrast": 0.0,
+    }
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return result
+
+    if len(crop.shape) == 3:
+        gray = np.asarray(Image.fromarray(crop).convert("L"))
+    else:
+        gray = np.asarray(crop)
+    if gray.size == 0 or gray.shape[0] <= 0 or gray.shape[1] <= 0:
+        return result
+
+    col_mean = gray.mean(axis=0)
+    best_col = None
+    for center in range(2, gray.shape[1] - 2):
+        left = max(0, center - 2)
+        right = min(gray.shape[1], center + 3)
+        score = float(col_mean[left:right].mean())
+        if best_col is None or score < best_col[0]:
+            best_col = (score, center)
+    track_center_x = int(best_col[1]) if best_col else int(gray.shape[1] // 2)
+    left = max(0, track_center_x - _INV_SCROLLBAR_WINDOW_HALF_WIDTH)
+    right = min(gray.shape[1], track_center_x + _INV_SCROLLBAR_WINDOW_HALF_WIDTH + 1)
+    track = gray[:, left:right]
+    row_mean = track.mean(axis=1)
+    baseline = float(np.percentile(row_mean, 70))
+    threshold = baseline - _INV_SCROLLBAR_DARKNESS_DELTA
+    mask = row_mean < threshold
+
+    segments = []
+    start = None
+    for idx, is_dark in enumerate(mask):
+        if is_dark and start is None:
+            start = idx
+        elif not is_dark and start is not None:
+            if idx - start >= _INV_SCROLLBAR_MIN_SEGMENT_HEIGHT:
+                segments.append((start, idx - 1, float(row_mean[start:idx].mean())))
+            start = None
+    if start is not None and len(mask) - start >= _INV_SCROLLBAR_MIN_SEGMENT_HEIGHT:
+        segments.append((start, len(mask) - 1, float(row_mean[start:].mean())))
+    if not segments:
+        return result
+
+    thumb_top, thumb_bottom, thumb_darkness = min(segments, key=lambda entry: entry[2])
+    thumb_height = int(thumb_bottom - thumb_top + 1)
+    contrast = float(max(0.0, baseline - thumb_darkness))
+    if contrast < _INV_SCROLLBAR_MIN_CONTRAST:
+        return result
+
+    track_height = int(gray.shape[0])
+    travel_pixels = max(0, track_height - thumb_height)
+    denominator = float(max(1, travel_pixels))
+    position_ratio = min(1.0, max(0.0, float(thumb_top) / denominator))
+    bbox_left, bbox_top, _bbox_right, _bbox_bottom = [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX]
+    thumb_center_y = int(bbox_top + thumb_top + thumb_height // 2)
+    track_center_abs_x = int(bbox_left + track_center_x)
+
+    result.update({
+        "detected": True,
+        "scrollable": bool(thumb_height < int(track_height * _INV_SCROLLBAR_NON_SCROLLABLE_HEIGHT_RATIO)),
+        "is_at_top": bool(thumb_top <= _INV_SCROLLBAR_EDGE_TOLERANCE),
+        "is_at_bottom": bool((track_height - 1 - thumb_bottom) <= _INV_SCROLLBAR_EDGE_TOLERANCE),
+        "track_center_x": track_center_abs_x,
+        "thumb_rect": [
+            int(bbox_left + left),
+            int(bbox_top + thumb_top),
+            int(max(1, right - left)),
+            int(thumb_height),
+        ],
+        "thumb_center": [int(track_center_abs_x), int(thumb_center_y)],
+        "thumb_height": int(thumb_height),
+        "travel_pixels": int(travel_pixels),
+        "position_ratio": round(position_ratio, 4),
+        "contrast": round(contrast, 2),
+    })
+    return result
+
+
+def _drag_trackblazer_inventory_scrollbar(scrollbar_state, edge="top", duration=_INV_SCROLLBAR_RESET_DURATION_SECONDS):
+    """Drag the inventory scrollbar thumb to the requested edge."""
+    edge_name = str(edge or "top").strip().lower()
+    if edge_name not in ("top", "bottom"):
+        raise ValueError(f"Unsupported inventory scrollbar edge: {edge}")
+    thumb_center = (scrollbar_state or {}).get("thumb_center")
+    bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX]
+    track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
+    if not thumb_center or track_center_x <= 0:
+        return {
+            "direction": f"scrollbar_{edge_name}",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+        }
+    start = (int(thumb_center[0]), int(thumb_center[1]))
+    end_y = int(bbox[1] + 10) if edge_name == "top" else int(bbox[3] - _INV_SCROLLBAR_DRAG_END_PADDING)
+    end = (track_center_x, end_y)
+    swiped = bool(device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Trackblazer inventory scrollbar drag to {edge_name}",
+    ))
+    return {
+        "direction": f"scrollbar_{edge_name}",
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": 0.0,
+        "swiped": swiped,
+    }
+
+
+def _drag_trackblazer_inventory_scrollbar_to_ratio(scrollbar_state, position_ratio, duration=_INV_SCROLLBAR_SEEK_DURATION_SECONDS):
+    """Drag the inventory scrollbar thumb to an approximate position ratio."""
+    thumb_center = (scrollbar_state or {}).get("thumb_center")
+    bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX]
+    track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
+    thumb_height = int((scrollbar_state or {}).get("thumb_height") or 0)
+    travel_pixels = int((scrollbar_state or {}).get("travel_pixels") or 0)
+    if not thumb_center or track_center_x <= 0 or thumb_height <= 0:
+        return {
+            "direction": "scrollbar_ratio",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+            "target_ratio": None,
+        }
+    clamped_ratio = min(1.0, max(0.0, float(position_ratio or 0.0)))
+    thumb_top_target = int(round(clamped_ratio * max(0, travel_pixels)))
+    end_y = int(bbox[1] + thumb_top_target + max(1, thumb_height // 2))
+    start = (int(thumb_center[0]), int(thumb_center[1]))
+    end = (track_center_x, end_y)
+    swiped = bool(device_action.swipe(
+        start,
+        end,
+        duration=duration,
+        text=f"Trackblazer inventory scrollbar seek ratio={clamped_ratio:.3f}",
+    ))
+    return {
+        "direction": "scrollbar_ratio",
+        "start": [int(start[0]), int(start[1])],
+        "end": [int(end[0]), int(end[1])],
+        "duration": float(duration),
+        "settle_seconds": 0.0,
+        "swiped": swiped,
+        "target_ratio": round(clamped_ratio, 4),
+    }
+
+
 def _held_label_search_crop(screenshot):
     """Return the narrow vertical slice where the inventory 'Held' labels live."""
     if screenshot is None or getattr(screenshot, "size", 0) == 0:
@@ -571,6 +780,115 @@ def _ankle_weight_color_vote(bgr_crop, candidates):
     return best_candidate
 
 
+def _relative_crop(image, rel_x, rel_y, rel_w, rel_h):
+    if image is None or getattr(image, "size", 0) == 0:
+        return None
+    height, width = image.shape[:2]
+    if height <= 0 or width <= 0:
+        return None
+    left = max(0, min(width - 1, int(round(width * rel_x))))
+    top = max(0, min(height - 1, int(round(height * rel_y))))
+    crop_w = max(1, int(round(width * rel_w)))
+    crop_h = max(1, int(round(height * rel_h)))
+    right = max(left + 1, min(width, left + crop_w))
+    bottom = max(top + 1, min(height, top + crop_h))
+    return image[top:bottom, left:right].copy()
+
+
+def _cleat_hammer_color_vote(bgr_crop, candidates):
+    """Pick artisan/master cleat by the hammer-head colour.
+
+    Artisan has a silver/grey head; master has a gold/yellow head.
+    """
+    head_crop = _relative_crop(bgr_crop, *_CLEAT_HAMMER_HEAD_ROI)
+    if head_crop is None or getattr(head_crop, "size", 0) == 0:
+        return None
+    hsv = cv2.cvtColor(head_crop, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0]
+    s = hsv[:, :, 1]
+    v = hsv[:, :, 2]
+
+    gold_mask = (
+        (s >= 50)
+        & (v >= 80)
+        & (h >= _CLEAT_HAMMER_GOLD_HUE_RANGE[0])
+        & (h <= _CLEAT_HAMMER_GOLD_HUE_RANGE[1])
+    )
+    silver_mask = (s <= 45) & (v >= 90)
+
+    gold_ratio = float(gold_mask.mean())
+    silver_ratio = float(silver_mask.mean())
+    scores = {
+        "artisan_cleat_hammer": silver_ratio - gold_ratio,
+        "master_cleat_hammer": gold_ratio - silver_ratio,
+    }
+
+    best_candidate = None
+    best_score = float("-inf")
+    for candidate in candidates:
+        score = float(scores.get(candidate["item_name"], 0.0))
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+
+    debug(
+        f"[TB_COLOR] cleat_hammer ratios: gold={gold_ratio:.3f} silver={silver_ratio:.3f} "
+        f"delta={gold_ratio - silver_ratio:.3f} "
+        f"→ {best_candidate['item_name'] if best_candidate else '?'}"
+    )
+    if best_score < _CLEAT_HAMMER_COLOR_MIN_DELTA:
+        return None
+    return best_candidate
+
+
+def _megaphone_spark_vote(icon_crop, candidates):
+    """Pick megaphone variant by spark density in the upper-left region.
+
+    The three megaphones share an identical body shape but differ in the
+    number/density of yellow lightning-bolt sparks radiating from the horn:
+        coaching    → fewest sparks  (lowest white-pixel ratio)
+        motivating  → medium sparks
+        empowering  → most sparks   (highest white-pixel ratio)
+
+    *icon_crop* must be the matched icon region (not the padded cluster
+    crop), so that surrounding inventory content does not pollute the
+    measurement.
+
+    Returns the candidate whose expected spark density best matches the
+    observation, or ``None`` if the signal is too ambiguous.
+    """
+    spark_crop = _relative_crop(icon_crop, *_MEGAPHONE_SPARK_ROI)
+    if spark_crop is None or getattr(spark_crop, "size", 0) == 0:
+        return None
+    hsv = cv2.cvtColor(spark_crop, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+
+    # Spark highlights: low saturation + high value (white / near-white)
+    spark_mask = (sat < 50) & (val > 220)
+    spark_ratio = float(spark_mask.mean())
+
+    best_candidate = None
+    best_dist = float("inf")
+    for cand in candidates:
+        center = _MEGAPHONE_SPARK_CENTERS.get(cand["item_name"])
+        if center is None:
+            continue
+        dist = abs(spark_ratio - center)
+        if dist < best_dist:
+            best_dist = dist
+            best_candidate = cand
+
+    debug(
+        f"[TB_COLOR] megaphone spark_ratio={spark_ratio:.4f} "
+        f"→ {best_candidate['item_name'] if best_candidate else '?'} "
+        f"(dist={best_dist:.4f})"
+    )
+    if best_dist > _MEGAPHONE_SPARK_MAX_DIST:
+        return None
+    return best_candidate
+
+
 def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
     left, top, right, bottom = _cluster_bounds(cluster, screenshot.shape)
     cluster_crop = screenshot[top:bottom, left:right].copy()
@@ -617,7 +935,84 @@ def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
                 f"margin={best['score'] - color_winner['score']:.4f}"
             )
             best = color_winner
+    if any(c["item_name"].endswith("_cleat_hammer") for c in passing_candidates):
+        color_winner = _cleat_hammer_color_vote(cluster_crop, passing_candidates)
+        if color_winner is not None and color_winner["item_name"] != best["item_name"]:
+            debug(
+                f"[TB_FAMILY] Cleat color tiebreak: {best['item_name']}({best['score']:.4f}) "
+                f"→ {color_winner['item_name']}({color_winner['score']:.4f}) "
+                f"margin={best['score'] - color_winner['score']:.4f}"
+            )
+            best = color_winner
+    if any(c["item_name"].endswith("_megaphone") for c in passing_candidates):
+        # Extract the precise icon region from the screenshot (not the padded
+        # cluster crop) so surrounding inventory content doesn't pollute the
+        # spark-density measurement.
+        bx, by, bw, bh = best["match"]
+        icon_crop = screenshot[by:by + bh, bx:bx + bw].copy()
+        spark_winner = _megaphone_spark_vote(icon_crop, passing_candidates)
+        if spark_winner is not None and spark_winner["item_name"] != best["item_name"]:
+            debug(
+                f"[TB_FAMILY] Megaphone spark tiebreak: {best['item_name']}({best['score']:.4f}) "
+                f"→ {spark_winner['item_name']}({spark_winner['score']:.4f}) "
+                f"margin={best['score'] - spark_winner['score']:.4f}"
+            )
+            best = spark_winner
     return best
+
+
+def _resolve_shop_family_rows(screenshot, family_items, threshold):
+    if screenshot is None or not family_items:
+        return []
+    icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
+    if icon_screenshot is None or getattr(icon_screenshot, "size", 0) == 0:
+        return []
+
+    raw_matches = {}
+    for item_name in family_items:
+        template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+        if not template_path:
+            raw_matches[item_name] = []
+            continue
+        item_threshold = _item_threshold(item_name, threshold)
+        matches = device_action.match_template(
+            template_path,
+            icon_screenshot,
+            item_threshold,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+        )
+        raw_matches[item_name] = [
+            (int(x), int(y + icon_offset_y), int(w), int(h))
+            for (x, y, w, h) in matches
+        ]
+
+    family_candidates = []
+    for item_name in family_items:
+        for match in raw_matches.get(item_name, []):
+            family_candidates.append(
+                {
+                    "item_name": item_name,
+                    "match": match,
+                    "row_center_y": int(_match_center_y(match)),
+                }
+            )
+    if not family_candidates:
+        return []
+
+    resolved_rows = []
+    for cluster in _cluster_matches_by_row(family_candidates):
+        winner = _resolve_family_cluster(cluster, family_items, screenshot, threshold)
+        if winner is None:
+            continue
+        resolved_rows.append(
+            {
+                "item_name": winner["item_name"],
+                "match": list(winner["match"]),
+                "row_center_y": int(winner["row_center_y"]),
+            }
+        )
+    resolved_rows.sort(key=lambda row: row["row_center_y"])
+    return resolved_rows
 
 
 def _extract_inventory_quantity_from_crop(crop):
@@ -1396,25 +1791,17 @@ def _wait_for_post_shop_close_button(max_wait_seconds=4.0, poll_seconds=0.3, thr
     }
 
 
-def scan_training_items_inventory(threshold=0.8):
-    """Scan the current screen for owned training item icons.
+def _scan_inventory_page(threshold=0.8):
+    """Scan a single visible page of the inventory for item icons.
 
-    This is a read-only sub-routine: it takes a screenshot of the inventory
-    region and template-matches each known Trackblazer item icon.  It does
-    NOT open any menus or click anything.
+    This is the low-level single-screenshot scan.  It does NOT scroll or
+    interact with the screen — the caller is responsible for ensuring the
+    desired scroll position is already settled.
 
-    For each detected item, the function also locates the increment (+)
-    button on the same row by Y-coordinate proximity and records an
-    absolute click target for it.
-
-    Returns a dict keyed by item name with:
-      - "detected": bool — whether the item icon was found
-      - "category": str — item category from TRACKBLAZER_ITEM_CATEGORIES
-      - "match_count": int — number of template matches (proxy for quantity rows)
-      - "matches": list — raw match rectangles for debug
-      - "increment_target": (abs_x, abs_y) | None — click target for the
-        row's increment button, in absolute screen coordinates
-      - "increment_match": [x, y, w, h] | None — raw region-relative match
+    Returns ``(inventory_page, page_timing)`` where *inventory_page* is a
+    :class:`CleanDefaultDict` keyed by item name (same structure as the
+    public :func:`scan_training_items_inventory`) and *page_timing* is a
+    dict of timing metrics for this single page.
     """
     t_total = _time()
     region_xywh = constants.MANT_INVENTORY_ITEMS_REGION
@@ -1568,7 +1955,7 @@ def scan_training_items_inventory(threshold=0.8):
         }
 
     t_total_elapsed = _time() - t_total
-    scan_timing = {
+    page_timing = {
         "total": round(t_total_elapsed, 4),
         "held_ocr": round(t_held, 4),
         "templates": round(t_templates, 4),
@@ -1578,11 +1965,156 @@ def scan_training_items_inventory(threshold=0.8):
         "items_detected": len(detected_items_for_pairing),
         "quantity_reads": len(held_quantities),
     }
+    return inventory, page_timing
+
+
+def _merge_inventory_pages(base, overlay):
+    """Merge two single-page inventory dicts.
+
+    *overlay* wins for increment targets (since it reflects the current
+    scroll position).  Detection and held-quantity are unioned — if either
+    page saw the item, it counts as detected, and the higher held_quantity
+    is kept (they should agree, but max is safer).
+
+    Each merged entry gets a ``scroll_page`` field: ``"top"`` if the item
+    was only on *base*, ``"bottom"`` if only on *overlay*, or ``"both"``
+    if visible on both pages.
+    """
+    merged = CleanDefaultDict()
+    all_keys = set(base.keys()) | set(overlay.keys())
+    for item_name in all_keys:
+        if item_name.startswith("_"):
+            continue
+        b = base.get(item_name) or {}
+        o = overlay.get(item_name) or {}
+        b_detected = b.get("detected", False)
+        o_detected = o.get("detected", False)
+
+        if o_detected:
+            # Overlay (bottom page) is current view — prefer its targets.
+            entry = dict(o)
+            if b_detected and not o_detected:
+                pass  # won't reach here
+            if b_detected:
+                entry["scroll_page"] = "both"
+            else:
+                entry["scroll_page"] = "bottom"
+            # Take the higher held quantity in case OCR disagreed.
+            b_qty = b.get("held_quantity")
+            o_qty = o.get("held_quantity")
+            if b_qty is not None and o_qty is not None:
+                entry["held_quantity"] = max(b_qty, o_qty)
+            elif b_qty is not None:
+                entry["held_quantity"] = b_qty
+        elif b_detected:
+            # Only on top page — keep detection + quantity but mark targets
+            # as stale (current scroll is at bottom).
+            entry = dict(b)
+            entry["scroll_page"] = "top"
+            entry["increment_target_stale"] = True
+        else:
+            # Not detected on either page.
+            entry = dict(o if o else b)
+            entry["scroll_page"] = None
+        merged[item_name] = entry
+    return merged
+
+
+def scan_training_items_inventory(threshold=0.8):
+    """Scan the inventory for owned training item icons, scrolling if needed.
+
+    Checks the inventory scrollbar after the first page scan.  If the list
+    is scrollable, resets to the top, scans the top page, scrolls to the
+    bottom, scans again, and merges the results.
+
+    Returns a dict keyed by item name (see :func:`_scan_inventory_page`
+    for per-item fields).  Items only visible on a non-current scroll page
+    have ``scroll_page`` set to ``"top"`` and ``increment_target_stale``
+    set to ``True``.
+    """
+    t_total = _time()
+
+    # Check scrollbar before scanning to decide on multi-page.
+    scrollbar_pre = inspect_trackblazer_inventory_scrollbar()
+    needs_scroll = scrollbar_pre.get("detected") and scrollbar_pre.get("scrollable")
+
+    scroll_flow = {
+        "scrollbar_detected": scrollbar_pre.get("detected", False),
+        "scrollable": needs_scroll,
+        "pages_scanned": 1,
+        "reset_swipe": None,
+        "forward_swipe": None,
+        "scrollbar_pre": scrollbar_pre,
+        "scrollbar_post": None,
+    }
+
+    if needs_scroll and not scrollbar_pre.get("is_at_top"):
+        scroll_flow["reset_swipe"] = _drag_trackblazer_inventory_scrollbar(
+            scrollbar_pre, edge="top",
+        )
+        sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
+        device_action.flush_screenshot_cache()
+
+    # -- Page 1 (top / only page) --
+    page1, page1_timing = _scan_inventory_page(threshold=threshold)
+
+    if not needs_scroll:
+        # Single-page inventory — no scrolling needed.
+        t_total_elapsed = _time() - t_total
+        page1_timing["total"] = round(t_total_elapsed, 4)
+        page1_timing["scroll"] = scroll_flow
+        info(
+            f"[TB_INV] scan timing: total={t_total_elapsed:.2f}s "
+            f"held_ocr={page1_timing.get('held_ocr', 0):.2f}s "
+            f"templates={page1_timing.get('templates', 0):.2f}s "
+            f"families={page1_timing.get('families', 0):.2f}s "
+            f"(resolved={page1_timing.get('families_resolved', 0)} "
+            f"skipped={page1_timing.get('families_skipped', 0)}) "
+            f"items_detected={page1_timing.get('items_detected', 0)} "
+            f"quantity_reads={page1_timing.get('quantity_reads', 0)}"
+        )
+        page1["_timing"] = page1_timing
+        return page1
+
+    # -- Scroll to bottom for page 2 --
+    scrollbar_mid = inspect_trackblazer_inventory_scrollbar()
+    scroll_flow["forward_swipe"] = _drag_trackblazer_inventory_scrollbar(
+        scrollbar_mid, edge="bottom",
+    )
+    sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
+    device_action.flush_screenshot_cache()
+
+    page2, page2_timing = _scan_inventory_page(threshold=threshold)
+    scroll_flow["pages_scanned"] = 2
+
+    scrollbar_post = inspect_trackblazer_inventory_scrollbar()
+    scroll_flow["scrollbar_post"] = scrollbar_post
+
+    # -- Merge pages --
+    inventory = _merge_inventory_pages(page1, page2)
+
+    t_total_elapsed = _time() - t_total
+    scan_timing = {
+        "total": round(t_total_elapsed, 4),
+        "held_ocr": round(page1_timing.get("held_ocr", 0) + page2_timing.get("held_ocr", 0), 4),
+        "templates": round(page1_timing.get("templates", 0) + page2_timing.get("templates", 0), 4),
+        "families": round(page1_timing.get("families", 0) + page2_timing.get("families", 0), 4),
+        "families_resolved": page1_timing.get("families_resolved", 0) + page2_timing.get("families_resolved", 0),
+        "families_skipped": page1_timing.get("families_skipped", 0) + page2_timing.get("families_skipped", 0),
+        "items_detected": sum(
+            1 for k, v in inventory.items()
+            if not k.startswith("_") and v.get("detected")
+        ),
+        "quantity_reads": page1_timing.get("quantity_reads", 0) + page2_timing.get("quantity_reads", 0),
+        "page1_timing": page1_timing,
+        "page2_timing": page2_timing,
+        "scroll": scroll_flow,
+    }
     info(
-        f"[TB_INV] scan timing: total={t_total_elapsed:.2f}s "
-        f"held_ocr={t_held:.2f}s templates={t_templates:.2f}s "
-        f"families={t_families:.2f}s (resolved={families_resolved} skipped={families_skipped}) "
-        f"items_detected={len(detected_items_for_pairing)} quantity_reads={len(held_quantities)}"
+        f"[TB_INV] scan timing (scrolled): total={t_total_elapsed:.2f}s "
+        f"pages=2 items_detected={scan_timing['items_detected']} "
+        f"held_ocr={scan_timing['held_ocr']:.2f}s "
+        f"templates={scan_timing['templates']:.2f}s"
     )
     inventory["_timing"] = scan_timing
     return inventory
@@ -2310,15 +2842,23 @@ def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
 
 
 def _match_single_shop_item(screenshot, item_name, threshold=0.7):
-    """Match a single item template against a shop screenshot, bypassing family resolution.
+    """Match a single item template against a shop screenshot.
 
     Returns a row dict compatible with scan_trackblazer_shop_inventory rows,
-    or None if the item is not found.  This avoids the family variant
-    resolution that can suppress an item when its sibling is visible on the
-    same page.
+    or None if the item is not found.  For family-variant items (megaphones,
+    ankle weights, cleat hammers, etc.) delegates to
+    ``_resolve_shop_family_rows`` so that colour/spark disambiguation is
+    applied and siblings visible on the same page don't confuse the result.
     """
     template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
     if not template_path or screenshot is None:
+        return None
+    family_items = _ITEM_VARIANT_FAMILY_MAP.get(item_name)
+    if family_items and len(family_items) > 1:
+        family_rows = _resolve_shop_family_rows(screenshot, family_items, threshold)
+        for row in family_rows:
+            if row.get("item_name") == item_name:
+                return row
         return None
     icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
     if icon_screenshot is None:
@@ -2833,25 +3373,62 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                 if not item_data.get("detected"):
                     flow["missing_items"].append(item_name)
                 elif not item_data.get("increment_target"):
-                    flow["missing_increment_targets"].append(item_name)
+                    # Item detected but increment target missing or stale
+                    # (on a different scroll page).  Not a hard failure yet
+                    # — the increment loop below will scroll to find it.
+                    if not item_data.get("increment_target_stale"):
+                        flow["missing_increment_targets"].append(item_name)
 
-            if flow["missing_items"] or flow["missing_increment_targets"]:
-                missing_parts = []
-                if flow["missing_items"]:
-                    missing_parts.append(f"missing_items={flow['missing_items']}")
+            if flow["missing_items"]:
+                missing_parts = [f"missing_items={flow['missing_items']}"]
                 if flow["missing_increment_targets"]:
                     missing_parts.append(f"missing_increment_targets={flow['missing_increment_targets']}")
                 flow["reason"] = "required_items_not_actionable"
                 warning(f"{log_tag} Cannot continue item flow: {' '.join(missing_parts)}")
+            elif flow["missing_increment_targets"]:
+                flow["reason"] = "required_items_not_actionable"
+                warning(
+                    f"{log_tag} Cannot continue item flow: "
+                    f"missing_increment_targets={flow['missing_increment_targets']}"
+                )
             else:
                 # -- Increment each requested item once --
                 # In dry_run mode, record each item as planned but do NOT
                 # click the increment controls — clicking them stages item
                 # use, which is a destructive action.
+                #
+                # When the inventory is scrollable, items on a non-visible
+                # page have ``increment_target_stale=True``.  Before
+                # clicking, scroll to that page and re-scan to obtain a
+                # fresh increment target.
                 increment_t0 = _time()
+                current_scroll = None  # track last scroll edge we moved to
                 for item_name in requested_items:
                     item_data = inventory.get(item_name) or {}
                     target = item_data.get("increment_target")
+
+                    # Scroll to the item's page if its target is stale.
+                    if item_data.get("increment_target_stale") or (not target and item_data.get("detected")):
+                        desired_edge = "top" if item_data.get("scroll_page") == "top" else "bottom"
+                        if current_scroll != desired_edge:
+                            info(f"{log_tag} Scrolling inventory to {desired_edge} for '{item_name}'.")
+                            sb = inspect_trackblazer_inventory_scrollbar()
+                            if sb.get("detected") and sb.get("scrollable"):
+                                _drag_trackblazer_inventory_scrollbar(sb, edge=desired_edge)
+                                sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
+                                device_action.flush_screenshot_cache()
+                                current_scroll = desired_edge
+                        # Re-scan single page for fresh increment targets.
+                        rescan, _ = _scan_inventory_page()
+                        rescan_data = rescan.get(item_name) or {}
+                        if rescan_data.get("increment_target"):
+                            target = rescan_data["increment_target"]
+                            item_data = rescan_data
+                            inventory[item_name] = rescan_data
+                            info(f"{log_tag} Re-scanned '{item_name}' after scroll: target={target}")
+                        else:
+                            warning(f"{log_tag} Re-scan after scroll did not find increment for '{item_name}'.")
+
                     attempt = {
                         "item_name": item_name,
                         "detected": bool(item_data.get("detected")),
@@ -2859,10 +3436,17 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         "increment_match": item_data.get("increment_match"),
                         "row_center_y": item_data.get("row_center_y"),
                         "held_quantity": item_data.get("held_quantity"),
+                        "scroll_page": item_data.get("scroll_page"),
+                        "scrolled_to_find": bool(item_data.get("increment_target_stale")),
                         "click_metrics": None,
                         "clicked": False,
                         "simulated": commit_mode == "dry_run",
                     }
+                    if not target:
+                        warning(f"{log_tag} No increment target for '{item_name}', skipping click.")
+                        flow["missing_increment_targets"].append(item_name)
+                        flow["increment_attempts"].append(attempt)
+                        continue
                     if commit_mode == "dry_run":
                         info(
                             f"{log_tag} Would increment '{item_name}' at {attempt['increment_target']} "
