@@ -807,7 +807,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   # redundant — the only reason to use energy at low HP is to reduce fail
   # chance, and charm already handles that.
   charm_planned = any(
-    entry.get("key") == "good_luck_charm" and entry.get("use_now")
+    entry.get("key") == "good_luck_charm"
     for entry in candidates
   )
   energy_level = _safe_int(context.get("energy_level"), 0)
@@ -846,6 +846,37 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
         continue
       planned_energy_restored += restore
       kept_energy.append(entry)
+
+    # Permit a second Vita 20 on the same pass when one copy is already
+    # planned, another copy is held, and total energy would still be at or
+    # below 60 % after the first restore. This is intentionally a narrow rule:
+    # no mid-flow reassess, just stage a second increment for the same item.
+    target_energy_floor = max_energy * 0.60
+    planned_counts = {}
+    for entry in kept_energy:
+      item_key = entry.get("key")
+      planned_counts[item_key] = planned_counts.get(item_key, 0) + 1
+    for entry in kept_energy:
+      if entry.get("key") != "vita_20":
+        continue
+      remaining_vita_20 = _safe_int(entry.get("held_quantity"), 0) - planned_counts.get("vita_20", 0)
+      projected_energy = energy_level + planned_energy_restored
+      if remaining_vita_20 <= 0:
+        break
+      if projected_energy > target_energy_floor:
+        break
+      second_restore = _ENERGY_RESTORE_VALUES.get("vita_20", 20)
+      if projected_energy + second_restore > max_energy:
+        break
+      duplicate_entry = dict(entry)
+      duplicate_entry["reason"] = (
+        f"{entry.get('reason')}; second copy to push energy above 60% "
+        f"({projected_energy}->{projected_energy + second_restore}/{max_energy})"
+      )
+      kept_energy.append(duplicate_entry)
+      planned_energy_restored += second_restore
+      planned_counts["vita_20"] = planned_counts.get("vita_20", 0) + 1
+      break
     candidates = non_energy + kept_energy
 
   return candidates, deferred, kept_energy
