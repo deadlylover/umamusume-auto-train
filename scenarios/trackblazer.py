@@ -717,11 +717,58 @@ def _held_quantity_crop_fixed_fallback(screenshot, row_center_y):
     return crop, region
 
 
-def _ankle_weight_color_vote(bgr_crop, candidates):
+def _ankle_weight_accent_score(bgr_crop, item_name):
+    """Return the colour-accent score for a specific ankle-weight variant."""
+    if bgr_crop is None or getattr(bgr_crop, "size", 0) == 0:
+        return None
+    # Focus on the core icon body so row/background noise does not dilute the
+    # accent signal, especially for power which is mostly defined by the
+    # absence of the other accent colours.
+    icon_crop = _relative_crop(bgr_crop, 0.12, 0.12, 0.76, 0.76)
+    if icon_crop is None or getattr(icon_crop, "size", 0) == 0:
+        return None
+    hsv = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2HSV)
+    h = hsv[:, :, 0]
+    s = hsv[:, :, 1]
+    sat_mask = s >= 50
+    sat_count = int(sat_mask.sum())
+    if sat_count < 20:
+        return None
+    h_sat = h[sat_mask].astype(int)
+    bins = np.bincount(h_sat.flatten(), minlength=180)
+
+    red_px = int(bins[0:12].sum() + bins[170:180].sum())
+    orange_px = int(bins[12:22].sum())
+    blue_px = int(bins[88:125].sum())
+    pink_px = int(bins[148:170].sum())
+
+    red_r = red_px / sat_count
+    orange_r = orange_px / sat_count
+    blue_r = blue_px / sat_count
+    pink_r = pink_px / sat_count
+
+    accent = {
+        "speed_ankle_weights": blue_r,
+        "guts_ankle_weights": pink_r,
+        "stamina_ankle_weights": red_r,
+        "power_ankle_weights": orange_r if (blue_r < 0.08 and pink_r < 0.12 and red_r < 0.08) else 0.0,
+    }
+    return {
+        "score": float(accent.get(item_name, 0.0)),
+        "ratios": {
+            "red": float(red_r),
+            "orange": float(orange_r),
+            "blue": float(blue_r),
+            "pink": float(pink_r),
+        },
+    }
+
+
+def _ankle_weight_color_vote(screenshot, candidates):
     """Pick the best ankle-weight variant by accent-color ratios.
 
-    *bgr_crop* is the BGR icon region from the screenshot (OpenCV order).
-    *candidates* is a list of dicts with at least "item_name" and "score".
+    *screenshot* is the full BGR screenshot (OpenCV order).
+    *candidates* is a list of dicts with at least "item_name", "score", and "match".
 
     All four ankle-weight templates share the same orange/yellow background.
     The distinguishing accent colours (from template hue analysis) are:
@@ -732,48 +779,33 @@ def _ankle_weight_color_vote(bgr_crop, candidates):
 
     Returns the matching candidate, or None if no accent is clear enough.
     """
-    if bgr_crop is None or getattr(bgr_crop, "size", 0) == 0:
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2HSV)
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    sat_mask = s >= 50
-    sat_count = int(sat_mask.sum())
-    if sat_count < 20:
-        return None
-    h_sat = h[sat_mask].astype(int)
-    bins = np.bincount(h_sat.flatten(), minlength=180)
-
-    red_px    = int(bins[0:12].sum() + bins[170:180].sum())
-    orange_px = int(bins[12:22].sum())
-    blue_px   = int(bins[88:125].sum())
-    pink_px   = int(bins[148:170].sum())
-
-    red_r    = red_px / sat_count
-    orange_r = orange_px / sat_count
-    blue_r   = blue_px / sat_count
-    pink_r   = pink_px / sat_count
-
-    # Map each variant to its accent ratio
-    accent = {
-        "speed_ankle_weights":   blue_r,
-        "guts_ankle_weights":    pink_r,
-        "stamina_ankle_weights": red_r,
-        # Power has no unique accent — it wins only when all others are low
-        "power_ankle_weights":   orange_r if (blue_r < 0.08 and pink_r < 0.12 and red_r < 0.08) else 0.0,
-    }
-
     best_candidate = None
     best_accent = -1.0
+    best_ratios = None
     for cand in candidates:
-        a = accent.get(cand["item_name"], 0.0)
+        match = cand.get("match")
+        if not match:
+            continue
+        x, y, w, h = [int(v) for v in match]
+        icon_crop = screenshot[y:y + h, x:x + w].copy()
+        accent_result = _ankle_weight_accent_score(icon_crop, cand["item_name"])
+        if accent_result is None:
+            continue
+        a = float(accent_result["score"])
         if a > best_accent:
             best_accent = a
             best_candidate = cand
+            best_ratios = accent_result["ratios"]
 
     debug(
-        f"[TB_COLOR] ankle_weight ratios: red={red_r:.3f} orange={orange_r:.3f} "
-        f"blue={blue_r:.3f} pink={pink_r:.3f} → {best_candidate['item_name'] if best_candidate else '?'}"
+        "[TB_COLOR] ankle_weight ratios: "
+        f"red={(best_ratios or {}).get('red', 0.0):.3f} "
+        f"orange={(best_ratios or {}).get('orange', 0.0):.3f} "
+        f"blue={(best_ratios or {}).get('blue', 0.0):.3f} "
+        f"pink={(best_ratios or {}).get('pink', 0.0):.3f} "
+        f"→ {best_candidate['item_name'] if best_candidate else '?'}"
     )
     if best_accent < 0.05:
         return None
@@ -927,7 +959,7 @@ def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
     # alone are unreliable.  Always use accent-color voting when any
     # candidate is an ankle weight, regardless of score margin.
     if any(c["item_name"].endswith("_ankle_weights") for c in passing_candidates):
-        color_winner = _ankle_weight_color_vote(cluster_crop, passing_candidates)
+        color_winner = _ankle_weight_color_vote(screenshot, passing_candidates)
         if color_winner is not None and color_winner["item_name"] != best["item_name"]:
             debug(
                 f"[TB_FAMILY] Color tiebreak: {best['item_name']}({best['score']:.4f}) "
