@@ -727,7 +727,7 @@ def _ankle_weight_accent_score(bgr_crop, item_name):
     icon_crop = _relative_crop(bgr_crop, 0.12, 0.12, 0.76, 0.76)
     if icon_crop is None or getattr(icon_crop, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(icon_crop, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(icon_crop, cv2.COLOR_RGB2HSV)
     h = hsv[:, :, 0]
     s = hsv[:, :, 1]
     sat_mask = s >= 50
@@ -835,7 +835,7 @@ def _cleat_hammer_color_vote(bgr_crop, candidates):
     head_crop = _relative_crop(bgr_crop, *_CLEAT_HAMMER_HEAD_ROI)
     if head_crop is None or getattr(head_crop, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(head_crop, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(head_crop, cv2.COLOR_RGB2HSV)
     h = hsv[:, :, 0]
     s = hsv[:, :, 1]
     v = hsv[:, :, 2]
@@ -892,7 +892,7 @@ def _megaphone_spark_vote(icon_crop, candidates):
     spark_crop = _relative_crop(icon_crop, *_MEGAPHONE_SPARK_ROI)
     if spark_crop is None or getattr(spark_crop, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(spark_crop, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(spark_crop, cv2.COLOR_RGB2HSV)
     sat = hsv[:, :, 1]
     val = hsv[:, :, 2]
 
