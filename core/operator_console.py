@@ -139,13 +139,15 @@ class OperatorConsole:
     self._shop_policy_body = None
     self._item_policy_window = None
     self._item_policy_rows = []
-    self._item_policy_setting_vars = {}
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
     self._stat_weights_window = None
     self._stat_weights_entries = {}
     self._bond_boost_var = None
+    self._wit_gate_supports_var = None
+    self._wit_gate_rainbows_var = None
+    self._wit_gate_energy_var = None
     self._start_bot_button = None
     self._stop_bot_button = None
     self._pause_button = None
@@ -2239,7 +2241,6 @@ class OperatorConsole:
   def _clear_trackblazer_item_policy_window(self):
     self._item_policy_window = None
     self._item_policy_rows = []
-    self._item_policy_setting_vars = {}
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
@@ -2383,85 +2384,13 @@ class OperatorConsole:
     for child in self._item_policy_body.winfo_children():
       child.destroy()
     self._item_policy_rows = []
-    self._item_policy_setting_vars = {}
 
     normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
-    training_behavior = get_training_behavior_settings(normalized_policy)
 
     settings_frame = tk.Frame(self._item_policy_body, bg="#101418")
     settings_frame.grid(row=0, column=0, columnspan=8, sticky="ew", padx=1, pady=(0, 8))
     for column in range(8):
       settings_frame.columnconfigure(column, weight=1 if column in (1, 3, 5, 7) else 0)
-
-    burst_mode_var = tk.StringVar(value=training_behavior.get("burst_commit_mode", "blast_now"))
-    promote_charm_var = tk.BooleanVar(value=bool(training_behavior.get("promote_charm_training_to_burst", True)))
-    future_reserve_enabled_var = tk.BooleanVar(value=bool(training_behavior.get("enforce_future_summer_good_luck_charm_reserve", False)))
-    future_reserve_var = tk.StringVar(value=str(training_behavior.get("future_summer_good_luck_charm_min_reserve", 0)))
-    self._item_policy_setting_vars = {
-      "burst_commit_mode_var": burst_mode_var,
-      "promote_charm_var": promote_charm_var,
-      "future_reserve_enabled_var": future_reserve_enabled_var,
-      "future_reserve_var": future_reserve_var,
-    }
-
-    tk.Label(
-      settings_frame,
-      text="Training behavior",
-      fg="white",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, sticky="w", padx=(0, 8))
-    mode_menu = tk.OptionMenu(settings_frame, burst_mode_var, *ITEM_USE_BEHAVIOR_MODES)
-    mode_menu.configure(width=18, bg="#192028", fg="white", highlightthickness=0, activebackground="#1f6feb")
-    mode_menu["menu"].configure(bg="#192028", fg="white")
-    mode_menu.grid(row=0, column=1, sticky="w")
-    tk.Checkbutton(
-      settings_frame,
-      text="Charm promotes burst turn",
-      variable=promote_charm_var,
-      fg="white",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-    ).grid(row=0, column=2, columnspan=2, sticky="w", padx=(12, 0))
-    tk.Checkbutton(
-      settings_frame,
-      text="Enforce future summer charm reserve",
-      variable=future_reserve_enabled_var,
-      fg="white",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-    ).grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
-    tk.Label(
-      settings_frame,
-      text="Min charm reserve",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=0, column=6, sticky="e", padx=(12, 4))
-    tk.Spinbox(
-      settings_frame,
-      from_=0,
-      to=9,
-      width=4,
-      textvariable=future_reserve_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=0, column=7, sticky="w")
-    tk.Label(
-      settings_frame,
-      text="`blast_now` is live now. Future-summer reserve controls are scaffolded in config/operator console for later policy work.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=860,
-    ).grid(row=1, column=0, columnspan=8, sticky="ew", pady=(6, 0))
 
     headers = [
       ("#", 0),
@@ -2647,34 +2576,9 @@ class OperatorConsole:
       item_policy["reserve_quantity"] = reserve_quantity
       items[key] = item_policy
 
-    setting_vars = self._item_policy_setting_vars or {}
-    training_behavior = get_default_training_behavior_settings()
-    if setting_vars:
-      training_behavior["burst_commit_mode"] = str(
-        setting_vars.get("burst_commit_mode_var").get() or training_behavior["burst_commit_mode"]
-      ).strip() or training_behavior["burst_commit_mode"]
-      if training_behavior["burst_commit_mode"] not in ITEM_USE_BEHAVIOR_MODES:
-        training_behavior["burst_commit_mode"] = get_default_training_behavior_settings()["burst_commit_mode"]
-      training_behavior["promote_charm_training_to_burst"] = bool(
-        setting_vars.get("promote_charm_var").get()
-      )
-      training_behavior["enforce_future_summer_good_luck_charm_reserve"] = bool(
-        setting_vars.get("future_reserve_enabled_var").get()
-      )
-      reserve_text = str(setting_vars.get("future_reserve_var").get() or "").strip()
-      try:
-        training_behavior["future_summer_good_luck_charm_min_reserve"] = max(0, int(reserve_text))
-      except ValueError:
-        training_behavior["future_summer_good_luck_charm_min_reserve"] = current_policy.get("settings", {}).get("training_behavior", {}).get(
-          "future_summer_good_luck_charm_min_reserve",
-          training_behavior["future_summer_good_luck_charm_min_reserve"],
-        )
-
     policy = {
       "version": int(current_policy.get("version", 1)),
-      "settings": {
-        "training_behavior": training_behavior,
-      },
+      "settings": current_policy.get("settings", {}),
       "items": items,
     }
     if not self._persist_config_value("trackblazer.item_use_policy", policy):
@@ -2692,7 +2596,15 @@ class OperatorConsole:
     self.publish()
 
   def _reset_trackblazer_item_policy_defaults(self):
-    if not self._persist_config_value("trackblazer.item_use_policy", get_default_item_use_policy()):
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    if not self._persist_config_value(
+      "trackblazer.item_use_policy",
+      {
+        "version": int(current_policy.get("version", 1)),
+        "settings": current_policy.get("settings", {}),
+        "items": get_default_item_use_policy()["items"],
+      },
+    ):
       self._message_value.set("Failed to reset Trackblazer item-use policy.")
       return
 
@@ -2717,6 +2629,10 @@ class OperatorConsole:
       return weights
     return dict(self._DEFAULT_STAT_WEIGHTS)
 
+  def _get_active_training_behavior(self):
+    normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    return get_training_behavior_settings(normalized_policy)
+
   def _open_stat_weights_window(self):
     if self._root is None:
       return
@@ -2732,9 +2648,9 @@ class OperatorConsole:
         pass
 
     window = tk.Toplevel(self._root)
-    window.title("Training Behaviour")
+    window.title("Training Behavior")
     window.configure(bg="#101418")
-    window.geometry("400x380")
+    window.geometry("500x500")
     window.resizable(False, False)
     window.bind(
       "<Destroy>",
@@ -2745,7 +2661,7 @@ class OperatorConsole:
     header.pack(fill=tk.X)
     tk.Label(
       header,
-      text="Stat weights for stat_focused scoring (gain × weight)",
+      text="Training behavior settings",
       fg="#9aa4ad",
       bg="#101418",
     ).pack(side=tk.LEFT)
@@ -2755,15 +2671,98 @@ class OperatorConsole:
 
     active = self._get_active_stat_weights()
     self._stat_weights_entries = {}
+    tk.Label(
+      body,
+      text="Stat weights for stat_focused scoring (gain × weight)",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
     for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
       label = self._STAT_LABELS.get(stat, stat)
       tk.Label(
         body, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
-      ).grid(row=row_idx, column=0, sticky="w", pady=2)
+      ).grid(row=row_idx + 1, column=0, sticky="w", pady=2)
       var = tk.StringVar(value=str(active.get(stat, 1.0)))
       entry = tk.Entry(body, textvariable=var, width=8, bg="#192028", fg="white", insertbackground="white")
-      entry.grid(row=row_idx, column=1, sticky="w", padx=(8, 0), pady=2)
+      entry.grid(row=row_idx + 1, column=1, sticky="w", padx=(8, 0), pady=2)
       self._stat_weights_entries[stat] = var
+
+    training_behavior = self._get_active_training_behavior()
+    behavior_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    behavior_frame.pack(fill=tk.X)
+    tk.Label(
+      behavior_frame,
+      text="Wit failure gate",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    tk.Label(
+      behavior_frame,
+      text="Wit gate supports",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=0, sticky="e", padx=(0, 4), pady=2)
+    self._wit_gate_supports_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_supports", 2)))
+    tk.Spinbox(
+      behavior_frame,
+      from_=0,
+      to=2,
+      width=4,
+      textvariable=self._wit_gate_supports_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=1, sticky="w", pady=2)
+    tk.Label(
+      behavior_frame,
+      text="Wit gate rainbows",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
+    self._wit_gate_rainbows_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_rainbows", 1)))
+    tk.Spinbox(
+      behavior_frame,
+      from_=0,
+      to=2,
+      width=4,
+      textvariable=self._wit_gate_rainbows_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=3, sticky="w", pady=2)
+    tk.Label(
+      behavior_frame,
+      text="Wit energy bypass %",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=4, sticky="e", padx=(12, 4), pady=2)
+    self._wit_gate_energy_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_high_energy_pct", 80)))
+    tk.Spinbox(
+      behavior_frame,
+      from_=0,
+      to=100,
+      width=5,
+      textvariable=self._wit_gate_energy_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=5, sticky="w", pady=2)
+    tk.Label(
+      behavior_frame,
+      text="Below the bypass, wit only stays eligible when it has enough supports or rainbows. Above the bypass, wit is always allowed.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=300,
+    ).grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 0))
 
     bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     bond_frame.pack(fill=tk.X)
@@ -2845,6 +2844,13 @@ class OperatorConsole:
     active = self._get_active_stat_weights()
     for stat, var in self._stat_weights_entries.items():
       var.set(str(active.get(stat, 1.0)))
+    behavior = self._get_active_training_behavior()
+    if self._wit_gate_supports_var is not None:
+      self._wit_gate_supports_var.set(str(behavior.get("wit_failure_gate_min_supports", 2)))
+    if self._wit_gate_rainbows_var is not None:
+      self._wit_gate_rainbows_var.set(str(behavior.get("wit_failure_gate_min_rainbows", 1)))
+    if self._wit_gate_energy_var is not None:
+      self._wit_gate_energy_var.set(str(behavior.get("wit_failure_gate_high_energy_pct", 80)))
 
   def _save_stat_weights(self):
     weights = {}
@@ -2865,12 +2871,65 @@ class OperatorConsole:
       self._message_value.set(f"Saved stat weights, but reload failed: {exc}")
       return
 
-    self._message_value.set(f"Saved stat weights: {weights}")
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    training_behavior = get_default_training_behavior_settings()
+    settings = current_policy.get("settings", {}) if isinstance(current_policy.get("settings"), dict) else {}
+    behavior_settings = settings.get("training_behavior", {}) if isinstance(settings.get("training_behavior"), dict) else {}
+    training_behavior.update(behavior_settings)
+    if self._wit_gate_supports_var is not None:
+      supports_text = str(self._wit_gate_supports_var.get() or "").strip()
+      try:
+        training_behavior["wit_failure_gate_min_supports"] = min(2, max(0, int(supports_text)))
+      except ValueError:
+        pass
+    if self._wit_gate_rainbows_var is not None:
+      rainbows_text = str(self._wit_gate_rainbows_var.get() or "").strip()
+      try:
+        training_behavior["wit_failure_gate_min_rainbows"] = min(2, max(0, int(rainbows_text)))
+      except ValueError:
+        pass
+    if self._wit_gate_energy_var is not None:
+      energy_text = str(self._wit_gate_energy_var.get() or "").strip()
+      try:
+        training_behavior["wit_failure_gate_high_energy_pct"] = min(100, max(0, int(energy_text)))
+      except ValueError:
+        pass
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "settings": {
+        "training_behavior": training_behavior,
+      },
+      "items": current_policy.get("items", {}),
+    }
+    if not self._persist_config_value("trackblazer.item_use_policy", policy):
+      self._message_value.set("Failed to save training behavior.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved stat weights, but reload failed: {exc}")
+      return
+
+    self._message_value.set(f"Saved stat weights and training behavior: {weights}")
     self.publish()
 
   def _reset_stat_weights_defaults(self):
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
     if not self._persist_config_value("trackblazer.stat_weights", dict(self._DEFAULT_STAT_WEIGHTS)):
       self._message_value.set("Failed to reset stat weights.")
+      return
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "settings": {
+        "training_behavior": get_default_training_behavior_settings(),
+      },
+      "items": current_policy.get("items", {}),
+    }
+    if not self._persist_config_value("trackblazer.item_use_policy", policy):
+      self._message_value.set("Failed to reset training behavior.")
       return
 
     try:

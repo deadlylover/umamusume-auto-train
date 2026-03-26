@@ -1,7 +1,11 @@
 import core.state as state
 from core.state import check_current_year, stat_state, check_energy_level, check_aptitudes
+import core.config as config
 from utils.log import info, warning, error, debug
 import utils.constants as constants
+from core.trackblazer_item_use import should_allow_wit_training
+
+LAST_WIT_FAILURE_GATE_BLOCKED = False
 
 # Get priority stat from config
 def get_stat_priority(stat_key: str) -> int:
@@ -10,6 +14,21 @@ def get_stat_priority(stat_key: str) -> int:
 def check_all_elements_are_same(d):
     sections = list(d.values())
     return all(section == sections[0] for section in sections[1:])
+
+
+def _wit_gate_allows(training_data):
+  global LAST_WIT_FAILURE_GATE_BLOCKED
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    LAST_WIT_FAILURE_GATE_BLOCKED = False
+    return True, ""
+  energy_level, max_energy = check_energy_level()
+  allowed, reason = should_allow_wit_training(
+    {"energy_level": energy_level, "max_energy": max_energy},
+    training_data,
+    getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+  )
+  LAST_WIT_FAILURE_GATE_BLOCKED = not allowed
+  return allowed, reason
 
 # Will do train with the most support card
 # Used in the first year (aim for rainbow)
@@ -26,16 +45,22 @@ def most_support_card(results):
   # Check if train is bad
   all_others_bad = len(non_wit_results) == 0
   energy_level, max_energy = check_energy_level()
+  wit_gate_allowed = True
+  if wit_data:
+    wit_gate_allowed, wit_gate_reason = _wit_gate_allows(wit_data)
+    if not wit_gate_allowed:
+      info(f"Skipping WIT training: {wit_gate_reason}")
   if energy_level < state.SKIP_TRAINING_ENERGY:
     info("All trainings are unsafe and WIT training won't help go back up to safe levels, resting instead.")
     return None
 
-  if all_others_bad and wit_data and int(wit_data["failure"]) <= state.MAX_FAILURE and wit_data["total_supports"] >= 2:
+  if all_others_bad and wit_data and wit_gate_allowed and int(wit_data["failure"]) <= state.MAX_FAILURE and wit_data["total_supports"] >= 2:
     info("All trainings are unsafe, but WIT is safe and has enough support cards.")
     return "wit"
 
   filtered_results = {
-    k: v for k, v in results.items() if int(v["failure"]) <= state.MAX_FAILURE
+    k: v for k, v in results.items()
+    if int(v["failure"]) <= state.MAX_FAILURE and (k != "wit" or wit_gate_allowed)
   }
 
   if not filtered_results:
@@ -101,6 +126,7 @@ def focus_max_friendships(results):
   filtered_results = {
       stat: data for stat, data in results.items()
       if int(data["failure"]) <= state.MAX_FAILURE
+      and (stat != "wit" or _wit_gate_allows(data)[0])
   }
 
   if not filtered_results:
@@ -161,7 +187,13 @@ def rainbow_training(results):
     stat: data for stat, data in results.items()
     if int(data["failure"]) <= state.MAX_FAILURE
        and data["rainbow_points"] >= 2
-       and not (stat == "wit" and data["total_rainbow_friends"] < 1)
+       and not (
+         stat == "wit"
+         and (
+           data["total_rainbow_friends"] < 1
+           or not _wit_gate_allows(data)[0]
+         )
+       )
   }
 
   if not rainbow_candidates:
@@ -199,6 +231,8 @@ def all_values_equal(dictionary):
 
 # Decide training
 def do_something(results):
+  global LAST_WIT_FAILURE_GATE_BLOCKED
+  LAST_WIT_FAILURE_GATE_BLOCKED = False
   year = check_current_year()
   current_stats = stat_state()
   info(f"Current stats: {current_stats}")

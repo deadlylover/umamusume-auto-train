@@ -5,6 +5,7 @@ import core.config as config
 from utils.shared import CleanDefaultDict
 import utils.constants as constants
 import core.bot as bot
+from core.trackblazer_item_use import should_allow_wit_training
 
 # Training function names:
 # max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
@@ -379,6 +380,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
   # Trackblazer: check if held energy items / good luck charm would clear failure
   _tb_items_bypass_failure = False
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    state["wit_failure_gate_blocked"] = False
     inv_summary = state.get("trackblazer_inventory_summary") or {}
     held_quantities = dict(inv_summary.get("held_quantities") or {})
     if not held_quantities:
@@ -424,6 +426,14 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
               break
 
   for training_name, training_data in training_results.items():
+    if constants.SCENARIO_NAME in ("mant", "trackblazer") and training_name == "wit":
+      wit_allowed, wit_gate_reason = should_allow_wit_training(state, training_data, getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+      if not wit_allowed:
+        _tb_wit_failure_gate_blocked = True
+        state["wit_failure_gate_blocked"] = True
+        info(f"Skipping WIT training: {wit_gate_reason}")
+        continue
+
     # Check if primary stat is at cap
     stat_cap = config.STAT_CAPS[training_name]
     current_stat = current_stats[training_name]

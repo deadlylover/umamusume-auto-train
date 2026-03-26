@@ -1394,8 +1394,15 @@ def get_current_stats(turn, enable_debug=True):
 
   h, w = image.shape[:2]
   current_stats={}
+  trackblazer_left_expand_px = max(0, int(round(w * 0.009))) if constants.SCENARIO_NAME == "trackblazer" else 0
+  trackblazer_right_trim_px = trackblazer_left_expand_px
   for key, (xr, yr, wr, hr) in boxes.items():
     x, y, ww, hh = int(xr*w), int(yr*h), int(wr*w), int(hr*h)
+    if trackblazer_left_expand_px:
+      x = max(0, x - trackblazer_left_expand_px)
+      ww = min(w - x, ww + trackblazer_left_expand_px)
+    if trackblazer_right_trim_px:
+      ww = max(1, ww - trackblazer_right_trim_px)
     cropped_image = np.array(image[y:y+hh, x:x+ww])
     final_stat_value = -1
     if enable_debug:

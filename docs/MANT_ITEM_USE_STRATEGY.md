@@ -67,14 +67,6 @@ Draft config shape (in `config.json` under a `trackblazer` or `item_strategy` ke
   "trackblazer": {
     "item_use_policy": {
       "version": 1,
-      "settings": {
-        "training_behavior": {
-          "burst_commit_mode": "blast_now",
-          "promote_charm_training_to_burst": true,
-          "enforce_future_summer_good_luck_charm_reserve": false,
-          "future_summer_good_luck_charm_min_reserve": 0
-        }
-      },
       "items": {
         "good_luck_charm": {
           "priority": "MED",
@@ -88,7 +80,7 @@ Draft config shape (in `config.json` under a `trackblazer` or `item_strategy` ke
 
 Current live behavior uses `promote_charm_training_to_burst=true` with `burst_commit_mode="blast_now"`.
 
-The future-summer reserve fields are scaffolding for later policy work. They are intentionally surfaced in config/operator console now so conservation rules can be added without another schema change.
+The burst/charm/future-reserve controls and the wit failure gate now live in the Training button window. The item policy pane is item-only again.
 
 ---
 

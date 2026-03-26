@@ -8,6 +8,7 @@ pyautogui.useImageNotFoundException(False)
 import re
 import core.state as state
 from core.state import check_support_card, check_failure, check_turn, check_mood, check_current_year, check_criteria, check_skill_pts, check_energy_level, get_race_type, check_status_effects, check_aptitudes
+import core.logic as logic
 from core.logic import do_something, decide_race_for_goal
 
 from utils.log import info, warning, error, debug
@@ -770,10 +771,13 @@ def career_lobby():
           if date_event:
             debug(f"Matched recreation template: {template} at {date_event}.")
             break
-      if date_event:
+      if date_event and not logic.LAST_WIT_FAILURE_GATE_BLOCKED:
         info("Recreation event found; taking a date.")
         do_recreation()
       else:
-        info("No recreation partner found; resting instead.")
+        if logic.LAST_WIT_FAILURE_GATE_BLOCKED and date_event:
+          info("Wit failure gate blocked recreation fallback; resting instead.")
+        else:
+          info("No recreation partner found; resting instead.")
         do_rest(energy_level)
     sleep(1)

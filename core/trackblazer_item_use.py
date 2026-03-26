@@ -89,6 +89,9 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "promote_charm_training_to_burst": True,
   "enforce_future_summer_good_luck_charm_reserve": False,
   "future_summer_good_luck_charm_min_reserve": 0,
+  "wit_failure_gate_min_supports": 2,
+  "wit_failure_gate_min_rainbows": 1,
+  "wit_failure_gate_high_energy_pct": 80,
 }
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -291,6 +294,27 @@ def _normalize_training_behavior_settings(raw_settings=None):
       raw_settings.get("future_summer_good_luck_charm_min_reserve"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["future_summer_good_luck_charm_min_reserve"],
     ),
+    "wit_failure_gate_min_supports": min(
+      2,
+      _normalize_quantity(
+        raw_settings.get("wit_failure_gate_min_supports"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_min_supports"],
+      ),
+    ),
+    "wit_failure_gate_min_rainbows": min(
+      2,
+      _normalize_quantity(
+        raw_settings.get("wit_failure_gate_min_rainbows"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_min_rainbows"],
+      ),
+    ),
+    "wit_failure_gate_high_energy_pct": min(
+      100,
+      _normalize_quantity(
+        raw_settings.get("wit_failure_gate_high_energy_pct"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_high_energy_pct"],
+      ),
+    ),
   }
 
 
@@ -303,6 +327,48 @@ def get_training_behavior_settings(policy=None):
   return deepcopy(
     (policy.get("settings") or {}).get("training_behavior")
     or _DEFAULT_TRAINING_BEHAVIOR_SETTINGS
+  )
+
+
+def should_allow_wit_training(state, training_data, policy=None):
+  training_behavior = get_training_behavior_settings(policy)
+  max_energy = _safe_float(state.get("max_energy"), 0.0)
+  current_energy = _safe_float(state.get("energy_level"), 0.0)
+
+  if max_energy <= 0:
+    return True, "max energy unknown"
+
+  energy_pct = (current_energy / max_energy) * 100.0
+  high_energy_pct = _safe_int(
+    training_behavior.get("wit_failure_gate_high_energy_pct"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_high_energy_pct"],
+  )
+  if energy_pct > high_energy_pct:
+    return True, f"energy {energy_pct:.0f}% > {high_energy_pct}% override"
+
+  min_supports = _safe_int(
+    training_behavior.get("wit_failure_gate_min_supports"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_min_supports"],
+  )
+  min_rainbows = _safe_int(
+    training_behavior.get("wit_failure_gate_min_rainbows"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_min_rainbows"],
+  )
+  support_count = _safe_int(training_data.get("total_supports"), 0)
+  rainbow_count = _safe_int(training_data.get("total_rainbow_friends"), 0)
+  if rainbow_count <= 0 and isinstance(training_data.get("total_friendship_levels"), dict):
+    friendship_levels = training_data.get("total_friendship_levels") or {}
+    rainbow_count = _safe_int(friendship_levels.get("yellow"), 0) + _safe_int(friendship_levels.get("max"), 0)
+
+  if support_count >= min_supports or rainbow_count >= min_rainbows:
+    return True, (
+      f"wit gate satisfied (supports {support_count}/{min_supports}, "
+      f"rainbows {rainbow_count}/{min_rainbows})"
+    )
+
+  return False, (
+    f"wit gate blocked (supports {support_count}/{min_supports}, "
+    f"rainbows {rainbow_count}/{min_rainbows}, energy {energy_pct:.0f}% <= {high_energy_pct}% override)"
   )
 
 

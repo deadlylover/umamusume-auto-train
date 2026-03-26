@@ -224,6 +224,18 @@ class Strategy:
 
   def check_recreation(self, state, action):
     action["can_mood_increase"] = False
+    if (
+      constants.SCENARIO_NAME in ("mant", "trackblazer")
+      and state.get("wit_failure_gate_blocked")
+    ):
+      current_energy = state.get("energy_level", 0)
+      max_energy = state.get("max_energy", 0) or 0
+      if max_energy > 0 and (current_energy / max_energy) < 0.5:
+        debug(
+          f"Skipping recreation because the wit failure gate is active and energy is below half "
+          f"({current_energy}/{max_energy})."
+        )
+        return action
     if "Junior Year" in state["year"]:
       mood_difference = state["mood_difference_junior_year"]
     else:
