@@ -31,6 +31,7 @@ from core.runtime_flow import (
   SUB_PHASE_RETURN_TO_LOBBY,
 )
 from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items, get_priority_preview, policy_context
+from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 pyautogui.useImageNotFoundException(False)
@@ -1042,6 +1043,23 @@ def _trackblazer_pre_action_items(action):
   return []
 
 
+def _trackblazer_training_score(action):
+  training_data = _action_value(action, "training_data")
+  if not isinstance(training_data, dict):
+    return None
+  score_tuple = training_data.get("score_tuple")
+  if not isinstance(score_tuple, (tuple, list)) or not score_tuple:
+    return None
+  try:
+    return float(score_tuple[0])
+  except (TypeError, ValueError):
+    return None
+
+
+def _trackblazer_training_score_threshold():
+  return get_training_behavior_strong_training_score_threshold()
+
+
 def _order_trackblazer_pre_action_items(items):
   ordered_items = list(items or [])
   if not ordered_items:
@@ -1386,6 +1404,7 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "should_race": race_decision.get("should_race"),
       "reason": race_decision.get("reason"),
       "training_total_stats": race_decision.get("training_total_stats"),
+      "training_score": race_decision.get("training_score"),
       "is_summer": race_decision.get("is_summer"),
       "g1_forced": race_decision.get("g1_forced"),
       "prefer_rival_race": race_decision.get("prefer_rival_race"),
@@ -4064,6 +4083,35 @@ def career_lobby(dry_run_turn=False):
       update_operator_snapshot(phase="evaluating_strategy", message="Evaluating strategy.")
       action = strategy.decide(state_obj, action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
+
+      if (
+        constants.SCENARIO_NAME in ("mant", "trackblazer")
+      and action.func == "do_rest"
+      and bot.get_trackblazer_scoring_mode() == "stat_focused"
+      ):
+        strong_training_score = _trackblazer_training_score(action)
+        strong_training_score_threshold = _trackblazer_training_score_threshold()
+        if (
+          strong_training_score is not None
+          and strong_training_score >= strong_training_score_threshold
+          and action.get("training_name")
+        ):
+          action.func = "do_training"
+          info(
+            f"[TB_RACE] Promoting rest to training because stat-focused score is strong "
+            f"({strong_training_score:.1f} >= {strong_training_score_threshold})."
+          )
+          update_operator_snapshot(
+            state_obj,
+            action,
+            phase="evaluating_strategy",
+            message=(
+              "Trackblazer strong training score detected. "
+              "Keeping the training turn instead of resting."
+            ),
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes=f"training_score={strong_training_score:.1f} | threshold={strong_training_score_threshold}",
+          )
 
       # Trackblazer race-vs-training gate: evaluate race-vs-training using the
       # rival indicator collected earlier (no game interaction here).  The

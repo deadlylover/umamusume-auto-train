@@ -63,12 +63,13 @@ training further.
 
 ## Interaction with Race Gate
 
-`core/trackblazer_race_logic.py` uses `_WEAK_TRAINING_THRESHOLD = 35` total
-raw stat gain. If the best training's total stat gain falls below this threshold,
-the gate biases toward racing instead (unless summer window or no race available).
+`core/trackblazer_race_logic.py` still uses `_WEAK_TRAINING_THRESHOLD = 35`
+total raw stat gain as the weak-training fallback. In `stat_focused` mode it
+also checks the actual training score. If the selected training score is
+`>= 40`, the gate keeps the training turn even when a rival race is visible.
 
-The scoring mode does not affect the race gate — the gate uses raw total stat
-gains regardless of scoring mode.
+That means the support-bond boost from `stat_weight_training()` can now keep a
+good turn on training instead of sending it into a marginal rival race.
 
 ## Interaction with Energy Management
 
@@ -89,6 +90,7 @@ These are the values that can be adjusted to refine behavior:
 |--------|----------|---------|---------|
 | `stat_weight_set` | `config.json` templates | spd:1 sta:1 pwr:1 guts:1 wit:1 | Per-stat multiplier for gains |
 | `_WEAK_TRAINING_THRESHOLD` | `trackblazer_race_logic.py` | 35 | Total raw stats below which racing is preferred |
+| `_STRONG_TRAINING_SCORE_THRESHOLD` | `trackblazer_race_logic.py` | 40 | Stat-focused score at or above which training is preferred |
 | `bond_boost_enabled` | `bot.py` runtime toggle | True | +10/+15 per blue/green friend on training |
 
 ### Bond Boost

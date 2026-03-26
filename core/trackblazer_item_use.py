@@ -92,6 +92,7 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "wit_failure_gate_min_supports": 2,
   "wit_failure_gate_min_rainbows": 1,
   "wit_failure_gate_high_energy_pct": 80,
+  "strong_training_score_threshold": 40,
 }
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -315,6 +316,10 @@ def _normalize_training_behavior_settings(raw_settings=None):
         _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["wit_failure_gate_high_energy_pct"],
       ),
     ),
+    "strong_training_score_threshold": _normalize_quantity(
+      raw_settings.get("strong_training_score_threshold"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
+    ),
   }
 
 
@@ -327,6 +332,14 @@ def get_training_behavior_settings(policy=None):
   return deepcopy(
     (policy.get("settings") or {}).get("training_behavior")
     or _DEFAULT_TRAINING_BEHAVIOR_SETTINGS
+  )
+
+
+def get_training_behavior_strong_training_score_threshold(policy=None):
+  training_behavior = get_training_behavior_settings(policy)
+  return _normalize_quantity(
+    training_behavior.get("strong_training_score_threshold"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
   )
 
 

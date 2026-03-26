@@ -88,6 +88,7 @@ class OperatorConsole:
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._trackblazer_scoring_mode_var = None
+    self._strong_training_score_threshold_var = None
     self._phase_labels = {}
     self._details_notebook = None
     self._planned_actions_text = None
@@ -1311,6 +1312,9 @@ class OperatorConsole:
     training_total = decision.get("training_total_stats")
     if training_total is not None:
       parts.append(f"training_total {training_total}")
+    training_score = decision.get("training_score")
+    if training_score is not None:
+      parts.append(f"training_score {training_score}")
     if decision.get("rival_indicator"):
       parts.append("rival yes")
     if decision.get("is_summer"):
@@ -2780,13 +2784,33 @@ class OperatorConsole:
     ).grid(row=1, column=5, sticky="w", pady=2)
     tk.Label(
       behavior_frame,
-      text="Below the bypass, wit only stays eligible when it has enough supports or rainbows. Above the bypass, wit is always allowed.",
+      text="Strong score gate",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=6, sticky="e", padx=(12, 4), pady=2)
+    self._strong_training_score_threshold_var = tk.StringVar(
+      value=str(training_behavior.get("strong_training_score_threshold", 40))
+    )
+    tk.Spinbox(
+      behavior_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._strong_training_score_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=7, sticky="w", pady=2)
+    tk.Label(
+      behavior_frame,
+      text="Below the bypass, wit only stays eligible when it has enough supports or rainbows. Above the bypass, wit is always allowed. Training scores at or above the strong score gate keep the turn on training.",
       fg="#8b949e",
       bg="#101418",
       justify="left",
       anchor="w",
-      wraplength=300,
-    ).grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+      wraplength=640,
+    ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
     bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     bond_frame.pack(fill=tk.X)
@@ -2875,6 +2899,8 @@ class OperatorConsole:
       self._wit_gate_rainbows_var.set(str(behavior.get("wit_failure_gate_min_rainbows", 1)))
     if self._wit_gate_energy_var is not None:
       self._wit_gate_energy_var.set(str(behavior.get("wit_failure_gate_high_energy_pct", 80)))
+    if self._strong_training_score_threshold_var is not None:
+      self._strong_training_score_threshold_var.set(str(behavior.get("strong_training_score_threshold", 40)))
 
   def _save_stat_weights(self):
     weights = {}
@@ -2916,6 +2942,12 @@ class OperatorConsole:
       energy_text = str(self._wit_gate_energy_var.get() or "").strip()
       try:
         training_behavior["wit_failure_gate_high_energy_pct"] = min(100, max(0, int(energy_text)))
+      except ValueError:
+        pass
+    if self._strong_training_score_threshold_var is not None:
+      threshold_text = str(self._strong_training_score_threshold_var.get() or "").strip()
+      try:
+        training_behavior["strong_training_score_threshold"] = max(0, int(threshold_text))
       except ValueError:
         pass
 

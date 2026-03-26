@@ -29,9 +29,10 @@ Current rule order:
 3. Check for the rival race indicator on the lobby race button (`SCREEN_BOTTOM_BBOX`).
 4. If no rival indicator is visible, do not race.
 5. If rival is visible but energy < 5%, do not race.
-6. In summer with rival visible: only race if training is weak (< `35` total stats).
-7. Outside summer with rival visible and weak training: race.
-8. Outside summer with rival visible and adequate training: still race (rival bonus stats).
+6. In `stat_focused` mode, if the selected training score is `>= 40`, keep training instead of taking the optional rival race.
+7. In summer with rival visible: only race if training is weak (< `35` total stats).
+8. Outside summer with rival visible and weak training: race.
+9. Outside summer with rival visible and adequate training: still race unless the score check above already kept the training turn.
 
 The rival indicator check is deferred until after mandatory checks, so Race Day / G1 dates skip the screenshot cost.
 
@@ -49,6 +50,9 @@ The current scaffold uses only signals that already exist or are cheap to read:
 
 - `selected training total stats`
   - summed from `action["training_data"]["stat_gains"]`
+- `selected training score`
+  - taken from `action["training_data"]["score_tuple"][0]`
+  - in `stat_focused` mode this includes the Trackblazer bond boost
 - `summer window`
   - based on the timeline label
 - `energy level`
@@ -220,6 +224,7 @@ Twinkle Star Climax should eventually become its own branch or sub-phase. Right 
 Current tuneables live at module scope in `core/trackblazer_race_logic.py`:
 
 - `_WEAK_TRAINING_THRESHOLD = 35`
+- `_STRONG_TRAINING_SCORE_THRESHOLD = 40`
 - `_MIN_RACE_ENERGY_PCT = 0.05` (5% minimum energy to consider racing)
 - `_SUMMER_WINDOWS`
 
@@ -232,9 +237,10 @@ After `strategy.decide(...)`:
 1. `core/skeleton.py` runs the Trackblazer race gate.
 2. The decision is stored on the action for review/debug output.
 3. If the gate says race and the current action is training, the action is converted to `do_race`.
-4. If the gate provides a concrete race name, it is attached to the action.
-5. If the gate prefers a rival race, the later rival scout still runs and can fall back cleanly if no rival race is actually found.
-6. If the gate says train and the current race action was only a fallback, the action is reverted to the original training choice.
+4. If the selected training score is strong enough in `stat_focused` mode and the current action is rest, the action is promoted back to `do_training`.
+5. If the gate provides a concrete race name, it is attached to the action.
+6. If the gate prefers a rival race, the later rival scout still runs and can fall back cleanly if no rival race is actually found.
+7. If the gate says train and the current race action was only a fallback, the action is reverted to the original training choice.
 
 ## Review / Debug Visibility
 
@@ -244,6 +250,7 @@ The operator console now shows:
 - target tier when present
 - selected race name when present
 - training total stat gain
+- training score when present
 - rival and summer flags
 - the human-readable decision reason
 
