@@ -53,6 +53,11 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max": 5,       # mainly raises max energy (+4), only +5 direct
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
+_VITA_ITEM_KEYS = (
+  "vita_65",
+  "vita_40",
+  "vita_20",
+)
 _FAILSAFE_ITEM_KEYS = _ENERGY_ITEM_KEYS + ("good_luck_charm",)
 ITEM_USE_BEHAVIOR_MODES = (
   "blast_now",
@@ -641,6 +646,13 @@ def _usage_context(state_obj, action):
   failure_rate = _safe_int(training_data.get("failure"), 0)
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
+  safe_energy_target = max_energy * 0.60
+  total_held_vita_restore = 0
+  for item_key in _VITA_ITEM_KEYS:
+    held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
+    if held_quantity <= 0:
+      continue
+    total_held_vita_restore += _ENERGY_RESTORE_VALUES.get(item_key, 0) * held_quantity
   strong_burst_training = bool(
     getattr(action, "func", None) == "do_training"
     and (
@@ -723,6 +735,9 @@ def _usage_context(state_obj, action):
     "energy_level": energy_level,
     "max_energy": max_energy,
     "energy_deficit": max(0, max_energy - energy_level),
+    "safe_energy_target": safe_energy_target,
+    "held_vita_restore_total": total_held_vita_restore,
+    "held_vita_reaches_safe_energy": (energy_level + total_held_vita_restore) >= safe_energy_target,
     "action_func": getattr(action, "func", None),
     "training_name": training_name,
     "training_score": score_value,
@@ -816,11 +831,24 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   kept_energy = []
   if energy_candidates and charm_planned:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
-    for entry in energy_candidates:
-      entry.pop("candidate_score", None)
-      entry["reason"] = "charm zeroes failure; energy item not needed this turn"
-      deferred.append(entry)
-    candidates = non_energy
+    if context.get("held_vita_reaches_safe_energy"):
+      kept_non_energy = []
+      for entry in non_energy:
+        if entry.get("key") == "good_luck_charm":
+          entry.pop("candidate_score", None)
+          entry["reason"] = (
+            "held Vita can lift energy to the 60% safe zone; prefer energy over charm"
+          )
+          deferred.append(entry)
+          continue
+        kept_non_energy.append(entry)
+      candidates = kept_non_energy + energy_candidates
+    else:
+      for entry in energy_candidates:
+        entry.pop("candidate_score", None)
+        entry["reason"] = "charm zeroes failure; energy item not needed this turn"
+        deferred.append(entry)
+      candidates = non_energy
   elif energy_candidates:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
     energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
@@ -1137,6 +1165,14 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       if context["failure_rate"] <= 5:
         return {
           "defer_reason": f"no fail risk (fail {context['failure_rate']}% <= 5%); charm would be greyed out",
+        }
+      if context.get("held_vita_reaches_safe_energy"):
+        return {
+          "defer_reason": (
+            f"held Vita can raise energy to at least 60% "
+            f"({context['energy_level']}+{context.get('held_vita_restore_total', 0)}"
+            f" >= {int(context.get('safe_energy_target', 0))}); prefer energy over charm"
+          ),
         }
       return {
         "candidate_score": 220 + priority_score + context["rainbow_count"] * 10,
