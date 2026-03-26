@@ -319,6 +319,30 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_info=race_info,
     )
 
+  # If the strategy already chose rest (all trainings blocked by failure
+  # chance or energy), racing is strictly better than resting — it gains
+  # fans, grade points, and VP at no training cost.
+  action_func = getattr(action, "func", None)
+  if action_func == "do_rest":
+    return _decision(
+      should_race=True,
+      reason=(
+        "Rival present and action is rest — racing is better than resting "
+        "(all trainings likely blocked by failure chance)"
+      ),
+      training_total_stats=training_stats,
+      training_score=_training_score(action),
+      training_supports=training_supports,
+      is_summer=summer,
+      g1_forced=False,
+      prefer_rival_race=True,
+      race_tier_target="any",
+      race_name=None,
+      race_available=True,
+      rival_indicator=True,
+      race_tier_info=race_info,
+    )
+
   scoring_mode = bot.get_trackblazer_scoring_mode()
   strong_training_score_threshold = _strong_training_score_threshold()
   training_score = _training_score(action)
@@ -369,7 +393,7 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # Summer: only race the rival if training is weak.
   if summer:
-    if training_stats is not None and training_stats < _WEAK_TRAINING_THRESHOLD:
+    if training_stats is None or training_stats < _WEAK_TRAINING_THRESHOLD:
       return _decision(
         should_race=True,
         reason=(
@@ -404,7 +428,8 @@ def evaluate_trackblazer_race(state_obj, action):
     )
 
   # Non-summer: weak training → rival race is better than a bad turn.
-  if training_stats is not None and training_stats < _WEAK_TRAINING_THRESHOLD:
+  # Also treat None stats as weak (no usable training data available).
+  if training_stats is None or training_stats < _WEAK_TRAINING_THRESHOLD:
     return _decision(
       should_race=True,
       reason=(

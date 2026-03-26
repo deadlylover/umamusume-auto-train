@@ -3189,8 +3189,9 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     # the same open→scan→control-detect→close flow as execute mode.
     _run_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
     return "previewed"
-  if pre_run_hook is not None:
-    pre_run_hook()
+  # Pre-action items (energy rescue, whistle, etc.) must run before the
+  # pre_run_hook (rival scout) because they may trigger a reassess that
+  # re-evaluates the action entirely.  Defer the hook until after items.
   shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
   if shop_purchase_result.get("status") == "failed":
     shop_result = shop_purchase_result.get("result") or {}
@@ -3290,6 +3291,11 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         planned_clicks=planned_clicks,
       )
       return "failed"
+  # Run pre_run_hook (e.g. rival scout) now — after items are consumed and
+  # any reassess has already returned.  This ensures energy rescue → reassess
+  # completes before we open the race list.
+  if pre_run_hook is not None:
+    pre_run_hook()
   result = action.run()
   if not result:
     update_operator_snapshot(
