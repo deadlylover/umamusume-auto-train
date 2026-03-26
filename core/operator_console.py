@@ -721,8 +721,23 @@ class OperatorConsole:
       clicks_requested = entry.get("clicks_requested")
       clicks_completed = entry.get("clicks_completed")
       total = entry.get("total")
+      reason = entry.get("reason", "")
+      reasons = entry.get("reasons") or []
+      trigger = entry.get("trigger", "")
+      before_phase = entry.get("before_phase", "")
+      same_turn_retry = entry.get("same_turn_retry")
       if note:
         details.append(str(note))
+      elif reason:
+        details.append(f"reason={reason}")
+      if reasons:
+        details.append(f"reasons={','.join(str(value) for value in reasons)}")
+      if trigger:
+        details.append(f"trigger={trigger}")
+      if before_phase:
+        details.append(f"before={before_phase}")
+      if same_turn_retry is not None:
+        details.append(f"same_turn_retry={bool(same_turn_retry)}")
       if backend:
         details.append(f"backend={backend}")
       if resolved_click_point is not None:

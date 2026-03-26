@@ -1021,6 +1021,27 @@ def _push_turn_retry_debug(state_obj, *, reason, reasons=None, before_phase=None
   bot.push_debug_history(payload)
 
 
+def _push_flow_decision_debug(state_obj=None, *, asset, result, note="", context="flow_decision", phase=None, sub_phase=None, **extra):
+  payload = {
+    "event": "flow_decision",
+    "asset": asset,
+    "result": result,
+    "context": context,
+  }
+  if note:
+    payload["note"] = str(note)
+  if isinstance(state_obj, dict):
+    payload["year"] = state_obj.get("year")
+    payload["turn"] = state_obj.get("turn")
+    payload["turn_label"] = f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}"
+  if phase is not None:
+    payload["phase"] = phase
+  if sub_phase is not None:
+    payload["sub_phase"] = sub_phase
+  payload.update(extra)
+  bot.push_debug_history(payload)
+
+
 def _action_value(action, key, default=None):
   if isinstance(action, dict):
     return action.get(key, default)
@@ -1033,6 +1054,24 @@ def _action_func(action):
   if isinstance(action, dict):
     return action.get("func")
   return getattr(action, "func", None)
+
+
+def _strategy_decision_note(state_obj, action):
+  if not hasattr(action, "get"):
+    return ""
+  func_name = _action_func(action) or "none"
+  if func_name == "do_training":
+    training_name = action.get("training_name") or "unknown"
+    score_tuple = ((action.get("training_data") or {}).get("score_tuple") or [])
+    score_value = score_tuple[0] if score_tuple else None
+    return f"training={training_name}; score={score_value if score_value is not None else '?'}"
+  if func_name == "do_race":
+    race_name = action.get("race_name") or "any"
+    race_reason = ((action.get("trackblazer_race_decision") or {}).get("reason") or "")
+    return f"race={race_name}; reason={race_reason or 'strategy_selected_race'}"
+  if func_name == "buy_skill":
+    return "skill_review_requested"
+  return func_name
 
 
 def _trackblazer_pre_action_items(action):
@@ -3681,7 +3720,25 @@ def career_lobby(dry_run_turn=False):
             "skipped": True,
             "reason": "using_cached_inventory",
           }
+          _push_flow_decision_debug(
+            state_obj,
+            asset="trackblazer_inventory",
+            result="using_cached",
+            note="reason=using_cached_inventory",
+            context="pre_training_gate",
+            phase="checking_inventory",
+            sub_phase="scan_items",
+          )
         else:
+          _push_flow_decision_debug(
+            state_obj,
+            asset="trackblazer_inventory",
+            result="scan_required",
+            note="reason=cache_miss_or_expired",
+            context="pre_training_gate",
+            phase="checking_inventory",
+            sub_phase="scan_items",
+          )
           update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
           state_obj = collect_trackblazer_inventory(
             state_obj,
@@ -3700,6 +3757,21 @@ def career_lobby(dry_run_turn=False):
         shop_flow = {}
         ready_after_shop_scan = True
         if pending_shop_check or automatic_turn_scan:
+          _push_flow_decision_debug(
+            state_obj,
+            asset="trackblazer_shop_gate",
+            result="scan_required",
+            note=(
+              f"pending={bool(pending_shop_check)}; "
+              f"pending_reason={pending_shop_reason or '-'}; "
+              f"automatic={bool(automatic_turn_scan)}; "
+              f"current_turn={current_trackblazer_turn}; "
+              f"last_refresh_turn={last_trackblazer_shop_refresh_turn}"
+            ),
+            context="pre_training_gate",
+            phase="checking_shop",
+            sub_phase="scan_shop",
+          )
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
           trigger = pending_shop_reason or ("first_scan" if never_scanned else "automatic" if automatic_turn_scan else "pending_shop_check")
@@ -3707,9 +3779,23 @@ def career_lobby(dry_run_turn=False):
             trigger=trigger,
             year=state_obj.get("year"),
           )
-          _merge_trackblazer_shop_result(state_obj, shop_result)
           shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
           shop_entry_result = shop_flow.get("entry_result") or {}
+          shop_entry_check = (shop_entry_result.get("shop_check") or {})
+          shop_best_method = shop_entry_check.get("best_method") or {}
+          shop_best_method_name = (
+            shop_best_method.get("method")
+            or shop_entry_result.get("method")
+            or "unknown"
+          )
+          shop_entry_reason = (
+            shop_entry_result.get("reason")
+            or shop_flow.get("reason")
+            or "failed_to_enter_shop"
+          )
+          shop_missing_required = list(shop_best_method.get("missing_required") or [])
+          if shop_flow.get("entered") or shop_flow.get("scan_result") or shop_flow.get("closed"):
+            _merge_trackblazer_shop_result(state_obj, shop_result)
           if shop_entry_result.get("clicked") and not shop_flow.get("entered"):
             warning(
               "[TB_SHOP] Shop entry clicked but was not verified; "
@@ -3743,6 +3829,57 @@ def career_lobby(dry_run_turn=False):
               phase="checking_shop",
             )
             continue
+          if pending_shop_check and not shop_flow.get("entered"):
+            _push_flow_decision_debug(
+              state_obj,
+              asset="trackblazer_shop_gate",
+              result="retry_before_training",
+              note=(
+                f"pending shop check failed; reason={shop_entry_reason}; "
+                f"best_method={shop_best_method_name}; "
+                f"missing_required={','.join(shop_missing_required) or 'none'}"
+              ),
+              context="pre_training_gate",
+              phase="checking_shop",
+              sub_phase="scan_shop",
+            )
+            warning(
+              "[TB_SHOP] Pending shop check did not enter the shop; "
+              "retrying the same turn before training scan. "
+              f"reason={shop_entry_reason}; best_method={shop_best_method_name}; "
+              f"missing_required={shop_missing_required or ['unknown']}."
+            )
+            update_operator_snapshot(
+              state_obj,
+              action,
+              phase="recovering",
+              status="error",
+              message="Pending Trackblazer shop check failed; retrying before training scan.",
+              error_text="Trackblazer pending shop check could not enter the shop.",
+              reasoning_notes=(
+                "A pending Trackblazer shop refresh was queued, but the shop entry "
+                "flow did not verify a shop screen. Retrying the same turn instead "
+                "of scanning trainings with stale/empty shop state."
+              ),
+              sub_phase="scan_shop",
+            )
+            _push_turn_retry_debug(
+              state_obj,
+              reason="Pending Trackblazer shop check could not enter the shop.",
+              reasons=[
+                shop_entry_reason,
+                f"best_method={shop_best_method_name}",
+                f"missing_required={','.join(shop_missing_required) or 'none'}",
+                f"pending_reason={pending_shop_reason or 'pending_shop_check'}",
+              ],
+              before_phase="checking_shop",
+              context="scan_shop",
+              event="trackblazer_shop_entry",
+              result="invalid_retry",
+              sub_phase="scan_shop",
+              phase="checking_shop",
+            )
+            continue
           if shop_flow.get("entered") and shop_flow.get("closed"):
             ready_after_shop_scan = _wait_for_lobby_after_shop_purchase()
             if not ready_after_shop_scan:
@@ -3756,6 +3893,20 @@ def career_lobby(dry_run_turn=False):
           info(
             "[TB_SHOP] Skipping automatic shop recheck for this turn; "
             f"already refreshed inventory after shop for {current_trackblazer_turn}."
+          )
+        else:
+          _push_flow_decision_debug(
+            state_obj,
+            asset="trackblazer_shop_gate",
+            result="skip_scan",
+            note=(
+              f"pending={bool(pending_shop_check)}; automatic={bool(automatic_turn_scan)}; "
+              f"execution_intent={execution_intent}; current_turn={current_trackblazer_turn}; "
+              f"last_refresh_turn={last_trackblazer_shop_refresh_turn}"
+            ),
+            context="pre_training_gate",
+            phase="checking_shop",
+            sub_phase="scan_shop",
           )
 
         from scenarios.trackblazer import inspect_climax_race_day_detection
@@ -3830,6 +3981,14 @@ def career_lobby(dry_run_turn=False):
       if state_obj.get("trackblazer_climax_race_day"):
         forced_reason = "Forced Climax race-day indicator detected on lobby screen"
         info("[TB_RACE] Taking early forced-race branch before training scan.")
+        _push_flow_decision_debug(
+          state_obj,
+          asset="pre_training_branch",
+          result="forced_race",
+          note=forced_reason,
+          context="pre_training_gate",
+          phase="collecting_race_state",
+        )
         action.func = "do_race"
         action["is_race_day"] = True
         action["year"] = state_obj["year"]
@@ -4047,6 +4206,19 @@ def career_lobby(dry_run_turn=False):
         if scoring_mode == "stat_focused":
           training_function_name = "stat_weight_training"
 
+      _push_flow_decision_debug(
+        state_obj,
+        asset="training_scan",
+        result="start",
+        note=(
+          f"training_function={training_function_name}; "
+          f"pending_shop_check={bot.has_pending_trackblazer_shop_check()}; "
+          f"shop_items={len(state_obj.get('trackblazer_shop_items') or [])}; "
+          f"inventory_items={len(((state_obj.get('trackblazer_inventory_summary') or {}).get('items_detected') or []))}"
+        ),
+        context="pre_training_gate",
+        phase="collecting_training_state",
+      )
       update_operator_snapshot(phase="collecting_training_state", message="Scanning all trainings.")
       state_obj = collect_training_state(state_obj, training_function_name)
       update_pre_action_phase(
@@ -4083,6 +4255,14 @@ def career_lobby(dry_run_turn=False):
       update_operator_snapshot(phase="evaluating_strategy", message="Evaluating strategy.")
       action = strategy.decide(state_obj, action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
+      _push_flow_decision_debug(
+        state_obj,
+        asset="strategy_decision",
+        result=_action_func(action) or "none",
+        note=_strategy_decision_note(state_obj, action),
+        context="strategy",
+        phase="evaluating_strategy",
+      )
 
       if (
         constants.SCENARIO_NAME in ("mant", "trackblazer")
