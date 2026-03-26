@@ -3134,6 +3134,16 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
         result["trackblazer_shop_summary"]["shop_coins"] = entry_result.get("shop_coins", -1)
         if not flow["entered"]:
             flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
+            if entry_result.get("clicked"):
+                warning(
+                    "[TB_SHOP] Shop entry button was clicked but verification failed; "
+                    "attempting recovery close in case shop is actually open."
+                )
+                t0 = _time()
+                close_result = close_trackblazer_shop()
+                flow["timing_recovery_close"] = round(_time() - t0, 3)
+                flow["recovery_close_result"] = close_result
+                flow["closed"] = bool(close_result.get("closed"))
             return result
 
         select_t0 = _time()
@@ -4334,6 +4344,16 @@ def check_trackblazer_shop_inventory(
         flow["shop_coins"] = entry_result.get("shop_coins", -1)
         if not flow["entered"]:
             flow["reason"] = entry_result.get("reason") or "failed_to_enter_shop"
+            if entry_result.get("clicked"):
+                warning(
+                    "[TB_SHOP] Shop entry button was clicked but verification failed; "
+                    "attempting recovery close in case shop is actually open."
+                )
+                t0 = _time()
+                close_result = close_trackblazer_shop()
+                flow["timing_recovery_close"] = round(_time() - t0, 3)
+                flow["recovery_close_result"] = close_result
+                flow["closed"] = bool(close_result.get("closed"))
             return result
 
         coin_ocr_task = _start_trackblazer_shop_coins_ocr_task()

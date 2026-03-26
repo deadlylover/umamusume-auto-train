@@ -380,7 +380,25 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
   _tb_items_bypass_failure = False
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
     inv_summary = state.get("trackblazer_inventory_summary") or {}
-    held_quantities = inv_summary.get("held_quantities") or {}
+    held_quantities = dict(inv_summary.get("held_quantities") or {})
+    if not held_quantities:
+      inventory = state.get("trackblazer_inventory") or {}
+      if isinstance(inventory, dict):
+        for item_key, item_data in inventory.items():
+          if not isinstance(item_data, dict):
+            continue
+          held_quantity = item_data.get("held_quantity")
+          try:
+            held_quantity = int(held_quantity)
+          except (TypeError, ValueError):
+            held_quantity = 0
+          if held_quantity > 0:
+            held_quantities[item_key] = held_quantity
+      if held_quantities:
+        info(
+          "[TB_INV] Derived held quantities from inventory entries for training "
+          f"failure bypass: {sorted(held_quantities.keys())}"
+        )
     if held_quantities:
       has_charm = held_quantities.get("good_luck_charm", 0) > 0
       if has_charm:

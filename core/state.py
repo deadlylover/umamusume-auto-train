@@ -23,6 +23,7 @@ import core.config as config
 import utils.constants as constants
 from collections import defaultdict
 from math import floor
+from statistics import median
 
 aptitudes_cache = {}
 _last_turn = None  # Best-effort fallback when OCR intermittently fails.
@@ -591,11 +592,14 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     state_object["trackblazer_inventory_summary"] = summary
   else:
     prior_summary = state_object.get("trackblazer_inventory_summary")
-    if prior_summary and prior_summary.get("items_detected"):
+    prior_detected = list((prior_summary or {}).get("items_detected") or [])
+    prior_held = dict((prior_summary or {}).get("held_quantities") or {})
+    if prior_summary and (prior_detected or prior_held):
       warning(
         f"[STATE] Trackblazer inventory scan skipped (trigger={trigger}, "
         f"reason={flow.get('reason') or 'unknown'}); "
-        f"preserving prior scan with {len(prior_summary.get('items_detected', []))} items."
+        f"preserving prior scan with {len(prior_detected)} detected items "
+        f"and {len(prior_held)} held-quantity entries."
       )
     else:
       # First scan on this turn — write the empty defaults so keys exist.
@@ -630,6 +634,51 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
   state_object["inventory_ocr_debug_entries"] = _build_trackblazer_inventory_debug_entries(flow, controls, inventory)
 
   return state_object
+
+
+_ENERGY_TRAINING_NAMES = ("spd", "sta", "pwr", "guts")
+_FAILURE_OUTLIER_THRESHOLD = 20  # percentage-point gap from median to flag
+
+
+def _correct_failure_outliers(training_results):
+  """Replace failure-rate outliers among energy-consuming trainings.
+
+  The four energy trainings (spd/sta/pwr/guts) normally have similar failure
+  rates.  Wit is excluded because it legitimately reads much lower.  When
+  exactly one of the four reads drastically lower than the median of the
+  others it is almost certainly an OCR misread, so we replace it with the
+  median and log a warning.
+  """
+  rates = {}
+  for name in _ENERGY_TRAINING_NAMES:
+    if name in training_results:
+      val = training_results[name].get("failure", -1)
+      if isinstance(val, (int, float)) and val >= 0:
+        rates[name] = int(val)
+
+  if len(rates) < 3:
+    return training_results
+
+  med = median(rates.values())
+  if med < _FAILURE_OUTLIER_THRESHOLD:
+    # All rates are low — nothing to correct (early-game or low-energy usage).
+    return training_results
+
+  outliers = {
+    name: val for name, val in rates.items()
+    if med - val >= _FAILURE_OUTLIER_THRESHOLD
+  }
+  if len(outliers) == 1:
+    name, bad_val = next(iter(outliers.items()))
+    corrected = int(med)
+    warning(
+      f"[STATE] Failure OCR outlier corrected: {name} {bad_val}% → {corrected}% "
+      f"(median of energy trainings: {corrected}%, rates: {rates})"
+    )
+    training_results[name]["failure"] = corrected
+    training_results[name]["failure_corrected_from"] = bad_val
+
+  return training_results
 
 
 def collect_training_state(state_object, training_function_name):
@@ -715,7 +764,8 @@ def collect_training_state(state_object, training_function_name):
       pyautogui_actions.release()
 
     debug(f"Training results: {training_results}")
-    
+
+    training_results = _correct_failure_outliers(training_results)
     training_results = filter_training_lock(training_results)
     if config.VERBOSE_ACTIONS:
       info(f"[STATE] Training scan complete. Options: {list(training_results.keys())}")

@@ -1386,8 +1386,12 @@ class OperatorConsole:
       status_line += f" | button visible: {button_visible}"
     lines.append(status_line)
 
-    detected = inventory_scan.get("items_detected") or []
+    detected = list(inventory_scan.get("items_detected") or [])
     held = self._collect_held_quantities(planned)
+    if not held:
+      held = dict(inventory_scan.get("held_quantities") or {})
+    if not detected and held:
+      detected = list(held.keys())
     if detected:
       lines.append(f"  Held: {self._format_inventory_items(detected, held)}")
 
@@ -1565,7 +1569,9 @@ class OperatorConsole:
       item_key = entry.get("key")
       if item_key and entry.get("held_quantity") is not None:
         held[item_key] = entry.get("held_quantity")
-    return held
+    if held:
+      return held
+    return dict((planned.get("inventory_scan") or {}).get("held_quantities") or {})
 
   def _format_inventory_items(self, item_keys, held_quantities):
     rendered = []

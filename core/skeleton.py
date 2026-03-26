@@ -116,11 +116,65 @@ def _canonicalize_scenario_name(name):
   return SCENARIO_NAME_ALIASES.get(name, name)
 
 
+def _normalize_trackblazer_inventory_summary(state_obj, context_label=""):
+  """Backfill summary fields from inventory entries when cache data is partial."""
+  if not isinstance(state_obj, dict):
+    return
+  inventory = state_obj.get("trackblazer_inventory")
+  if not isinstance(inventory, dict) or not inventory:
+    return
+
+  summary = copy.deepcopy(state_obj.get("trackblazer_inventory_summary") or {})
+  items_detected = list(summary.get("items_detected") or [])
+  held_quantities = dict(summary.get("held_quantities") or {})
+  actionable_items = list(summary.get("actionable_items") or [])
+  by_category = copy.deepcopy(summary.get("by_category") or {})
+  changed = False
+
+  for item_key, item_data in inventory.items():
+    if not isinstance(item_data, dict):
+      continue
+    detected = bool(item_data.get("detected"))
+    held_quantity = item_data.get("held_quantity")
+    increment_target = item_data.get("increment_target")
+    category_name = item_data.get("category", "unknown")
+    try:
+      held_quantity = int(held_quantity)
+    except (TypeError, ValueError):
+      held_quantity = None
+
+    if detected and item_key not in items_detected:
+      items_detected.append(item_key)
+      changed = True
+    if held_quantity is not None and held_quantity > 0 and held_quantities.get(item_key) != held_quantity:
+      held_quantities[item_key] = held_quantity
+      changed = True
+    if detected and increment_target and item_key not in actionable_items:
+      actionable_items.append(item_key)
+      changed = True
+    if detected and item_key not in (by_category.get(category_name) or []):
+      by_category.setdefault(category_name, []).append(item_key)
+      changed = True
+
+  if not changed:
+    return
+
+  summary["items_detected"] = items_detected
+  summary["held_quantities"] = held_quantities
+  summary["actionable_items"] = actionable_items
+  summary["by_category"] = by_category
+  summary["total_detected"] = len(items_detected)
+  state_obj["trackblazer_inventory_summary"] = summary
+  if context_label:
+    info(f"[TB_INV] Normalized inventory summary from inventory entries ({context_label}).")
+
+
 def _cache_trackblazer_inventory(state_obj, turn_key=None):
   """Store the current inventory state keys so we can skip re-scanning next turn."""
   global _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   if not isinstance(state_obj, dict):
     return
+  _normalize_trackblazer_inventory_summary(state_obj, context_label="cache_write")
   _cached_trackblazer_inventory = {
     key: copy.deepcopy(state_obj.get(key)) for key in TRACKBLAZER_INVENTORY_STATE_KEYS
   }
@@ -146,6 +200,7 @@ def _restore_cached_trackblazer_inventory(state_obj, current_turn_number=None):
       return False
   for key, value in _cached_trackblazer_inventory.items():
     state_obj[key] = copy.deepcopy(value)
+  _normalize_trackblazer_inventory_summary(state_obj, context_label="cache_restore")
   return True
 
 
@@ -218,6 +273,90 @@ def _copy_trackblazer_inventory_snapshot(state_obj, prefix="trackblazer_inventor
   for key in TRACKBLAZER_INVENTORY_STATE_KEYS:
     suffix = key.replace("trackblazer_inventory", "", 1)
     state_obj[f"{prefix}{suffix}"] = copy.deepcopy(state_obj.get(key))
+
+
+def _project_trackblazer_inventory_for_planned_buys(state_obj, planned_buys):
+  """Return a copied state with held quantities incremented by planned buys."""
+  projected_state = dict(state_obj or {})
+  inventory = copy.deepcopy(projected_state.get("trackblazer_inventory") or {})
+  summary = copy.deepcopy(projected_state.get("trackblazer_inventory_summary") or {})
+  held_quantities = dict(summary.get("held_quantities") or {})
+  items_detected = list(summary.get("items_detected") or [])
+  actionable_items = list(summary.get("actionable_items") or [])
+
+  for buy_entry in list(planned_buys or []):
+    item_key = buy_entry.get("key") if isinstance(buy_entry, dict) else None
+    if not item_key:
+      continue
+    next_quantity = int(held_quantities.get(item_key) or 0) + 1
+    held_quantities[item_key] = next_quantity
+    if item_key not in items_detected:
+      items_detected.append(item_key)
+    if item_key not in actionable_items:
+      actionable_items.append(item_key)
+    item_entry = dict(inventory.get(item_key) or {})
+    item_entry["detected"] = True
+    item_entry["held_quantity"] = next_quantity
+    inventory[item_key] = item_entry
+
+  summary["held_quantities"] = held_quantities
+  summary["items_detected"] = items_detected
+  summary["actionable_items"] = actionable_items
+  summary["total_detected"] = len(items_detected)
+  projected_state["trackblazer_inventory"] = inventory
+  projected_state["trackblazer_inventory_summary"] = summary
+  return projected_state
+
+
+def _merge_post_shop_inventory_with_preserved_snapshot(state_obj):
+  if not isinstance(state_obj, dict):
+    return
+
+  refreshed_inventory = copy.deepcopy(state_obj.get("trackblazer_inventory") or {})
+  refreshed_summary = copy.deepcopy(state_obj.get("trackblazer_inventory_summary") or {})
+  preserved_inventory = copy.deepcopy(state_obj.get("trackblazer_inventory_pre_shop") or {})
+  preserved_summary = copy.deepcopy(state_obj.get("trackblazer_inventory_pre_shop_summary") or {})
+  if not refreshed_inventory or not preserved_inventory:
+    return
+
+  refreshed_detected = set(refreshed_summary.get("items_detected") or [])
+  preserved_detected = set(preserved_summary.get("items_detected") or [])
+  if not preserved_detected - refreshed_detected:
+    return
+
+  merged_inventory = copy.deepcopy(refreshed_inventory)
+  restored_items = []
+  for item_key in preserved_detected:
+    preserved_entry = preserved_inventory.get(item_key) or {}
+    refreshed_entry = merged_inventory.get(item_key) or {}
+    if refreshed_entry.get("detected"):
+      if refreshed_entry.get("held_quantity") is None and preserved_entry.get("held_quantity") is not None:
+        refreshed_entry["held_quantity"] = preserved_entry.get("held_quantity")
+        merged_inventory[item_key] = refreshed_entry
+      continue
+    restored_entry = copy.deepcopy(preserved_entry)
+    restored_entry["increment_target"] = None
+    restored_entry["increment_match"] = None
+    restored_entry["increment_target_stale"] = True
+    merged_inventory[item_key] = restored_entry
+    restored_items.append(item_key)
+
+  if not restored_items:
+    return
+
+  from scenarios.trackblazer import build_inventory_summary
+
+  merged_summary = build_inventory_summary(merged_inventory)
+  merged_summary["inventory_button_visible"] = refreshed_summary.get(
+    "inventory_button_visible",
+    preserved_summary.get("inventory_button_visible"),
+  )
+  state_obj["trackblazer_inventory"] = merged_inventory
+  state_obj["trackblazer_inventory_summary"] = merged_summary
+  info(
+    "[TB_INV] Post-shop refresh missed previously detected items; "
+    f"preserved pre-shop entries for re-plan: {sorted(restored_items)}"
+  )
 
 
 def _merge_trackblazer_shop_result(state_obj, shop_result):
@@ -1048,16 +1187,43 @@ def _build_trackblazer_planned_actions(state_obj, action):
   plan_state = dict(state_obj)
   plan_state["trackblazer_inventory"] = pre_shop_inventory
   plan_state["trackblazer_inventory_summary"] = pre_shop_inventory_summary
+  inventory_items_detected = list(pre_shop_inventory_summary.get("items_detected") or [])
+  if not inventory_items_detected and isinstance(pre_shop_inventory, dict):
+    for item_key, item_entry in pre_shop_inventory.items():
+      if not isinstance(item_entry, dict):
+        continue
+      held_quantity = item_entry.get("held_quantity")
+      detected = bool(item_entry.get("detected"))
+      try:
+        held_quantity = int(held_quantity)
+      except (TypeError, ValueError):
+        held_quantity = 0
+      if detected or held_quantity > 0:
+        inventory_items_detected.append(item_key)
+  effective_shop_items = get_effective_shop_items(
+    policy=config.TRACKBLAZER_SHOP_POLICY,
+    year=state_obj.get("year"),
+    turn=state_obj.get("turn"),
+  )
+  action_shop_buy_plan = list(action.get("trackblazer_shop_buy_plan") or []) if hasattr(action, "get") else []
+  if action_shop_buy_plan:
+    would_buy = action_shop_buy_plan
+  else:
+    would_buy = _trackblazer_shop_buy_candidates(
+      effective_shop_items,
+      shop_items=shop_items,
+      shop_summary=shop_summary,
+      held_quantities=held_quantities,
+      limit=8,
+    )
+  if would_buy:
+    plan_state = _project_trackblazer_inventory_for_planned_buys(plan_state, would_buy)
+
   item_use_plan = plan_item_usage(
     policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
     state_obj=plan_state,
     action=action,
     limit=8,
-  )
-  effective_shop_items = get_effective_shop_items(
-    policy=config.TRACKBLAZER_SHOP_POLICY,
-    year=state_obj.get("year"),
-    turn=state_obj.get("turn"),
   )
 
   would_use = list(item_use_plan.get("candidates") or [])
@@ -1081,14 +1247,6 @@ def _build_trackblazer_planned_actions(state_obj, action):
         deferred_use.append(deferred_entry)
     would_use = list(planned_pre_action_items)
   actionable_items = list(pre_shop_inventory_summary.get("actionable_items") or [])
-
-  would_buy = _trackblazer_shop_buy_candidates(
-    effective_shop_items,
-    shop_items=shop_items,
-    shop_summary=shop_summary,
-    held_quantities=held_quantities,
-    limit=8,
-  )
 
   inventory_status = "unknown"
   if pre_shop_inventory_flow.get("opened") or pre_shop_inventory_flow.get("already_open"):
@@ -1178,7 +1336,8 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "status": inventory_status,
       "reason": pre_shop_inventory_flow.get("reason") or "",
       "button_visible": pre_shop_inventory_flow.get("use_training_items_button_visible"),
-      "items_detected": pre_shop_inventory_summary.get("items_detected") or [],
+      "items_detected": inventory_items_detected,
+      "held_quantities": held_quantities,
       "actionable_items": actionable_items,
     },
     "would_use": would_use,
@@ -1255,9 +1414,29 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
     return action
 
+  effective_shop_items = get_effective_shop_items(
+    policy=config.TRACKBLAZER_SHOP_POLICY,
+    year=state_obj.get("year"),
+    turn=state_obj.get("turn"),
+  )
+  held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
+  shop_buy_plan = _trackblazer_shop_buy_candidates(
+    effective_shop_items,
+    shop_items=state_obj.get("trackblazer_shop_items"),
+    shop_summary=state_obj.get("trackblazer_shop_summary"),
+    held_quantities=held_quantities,
+    limit=8,
+  )
+  action["trackblazer_shop_buy_plan"] = shop_buy_plan
+
+  planning_state = (
+    _project_trackblazer_inventory_for_planned_buys(state_obj, shop_buy_plan)
+    if shop_buy_plan else
+    state_obj
+  )
   item_use_plan = plan_item_usage(
     policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=state_obj,
+    state_obj=planning_state,
     action=action,
     limit=8,
   )
@@ -1271,19 +1450,6 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   action["trackblazer_pre_action_items"] = candidates
   action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
   action["trackblazer_reassess_after_item_use"] = has_whistle
-  effective_shop_items = get_effective_shop_items(
-    policy=config.TRACKBLAZER_SHOP_POLICY,
-    year=state_obj.get("year"),
-    turn=state_obj.get("turn"),
-  )
-  held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
-  action["trackblazer_shop_buy_plan"] = _trackblazer_shop_buy_candidates(
-    effective_shop_items,
-    shop_items=state_obj.get("trackblazer_shop_items"),
-    shop_summary=state_obj.get("trackblazer_shop_summary"),
-    held_quantities=held_quantities,
-    limit=8,
-  )
   return action
 
 
@@ -1906,6 +2072,7 @@ def _run_trackblazer_shop_purchases(state_obj, action):
     trigger="post_shop_purchase_refresh",
   )
   state_obj.update(refreshed_state)
+  _merge_post_shop_inventory_with_preserved_snapshot(state_obj)
   _cache_trackblazer_inventory(state_obj, turn_key=action_count)
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
   return {

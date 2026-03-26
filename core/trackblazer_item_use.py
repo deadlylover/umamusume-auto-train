@@ -22,12 +22,28 @@ _SUMMER_WINDOWS = (
   "Senior Year Early Aug",
   "Senior Year Late Aug",
 )
+_FINAL_SUMMER_LABEL = "Senior Year Late Aug"
+_FINAL_SUMMER_INDEX = (
+  constants.TIMELINE.index(_FINAL_SUMMER_LABEL)
+  if _FINAL_SUMMER_LABEL in constants.TIMELINE else None
+)
 _TRAINING_LABELS = {
   "spd": "speed",
   "sta": "stamina",
   "pwr": "power",
   "guts": "guts",
   "wit": "wit",
+}
+_MOOD_LEVEL_INDEX = {
+  "AWFUL": 0,
+  "BAD": 1,
+  "NORMAL": 2,
+  "GOOD": 3,
+  "GREAT": 4,
+}
+_MOOD_ITEM_BOOST = {
+  "plain_cupcake": 1,
+  "berry_sweet_cupcake": 2,
 }
 _HAMMER_TIERS = (
   "master_cleat_hammer",
@@ -246,6 +262,12 @@ def _safe_bool(value, default=False):
   return bool(default)
 
 
+def _past_final_summer(timeline_index):
+  if _FINAL_SUMMER_INDEX is None or timeline_index is None:
+    return False
+  return timeline_index > _FINAL_SUMMER_INDEX
+
+
 def _normalize_training_behavior_settings(raw_settings=None):
   raw_settings = raw_settings if isinstance(raw_settings, dict) else {}
   mode = str(raw_settings.get("burst_commit_mode", _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["burst_commit_mode"]) or "").strip()
@@ -313,7 +335,7 @@ def _infer_usage_group(item_key, entry):
     return "stat_auto"
   if target_training and "ankle_weights" in item_key:
     return "training_burst_specific"
-  if category == "mood":
+  if category in ("mood", "motivation"):
     return "mood"
   if category == "energy":
     return "energy"
@@ -640,7 +662,13 @@ def _usage_context(state_obj, action):
   score_tuple = training_data.get("score_tuple") or (0.0, 0)
   timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
   timeline_label = timeline.get("timeline_label") or ""
+  timeline_index = timeline.get("timeline_index")
   score_value = _safe_float(score_tuple[0], 0.0)
+  past_final_summer = _past_final_summer(timeline_index)
+  score_over_50 = score_value > 50.0
+  # Stop hoarding "save for summer" items when no summer windows remain, or
+  # when the current board is already a high-value (>50) commitment.
+  summer_conservation_bypass = past_final_summer or score_over_50
   rainbow_count = _safe_int(training_data.get("total_rainbow_friends"), 0)
   support_count = _safe_int(training_data.get("total_supports"), 0)
   failure_rate = _safe_int(training_data.get("failure"), 0)
@@ -729,6 +757,10 @@ def _usage_context(state_obj, action):
   )
   return {
     "timeline_label": timeline_label,
+    "timeline_index": timeline_index,
+    "past_final_summer": past_final_summer,
+    "summer_conservation_bypass": summer_conservation_bypass,
+    "score_over_50": score_over_50,
     "summer_window": timeline_label in _SUMMER_WINDOWS,
     "current_mood": str(state_obj.get("current_mood") or "").upper(),
     "status_effect_names": list(state_obj.get("status_effect_names") or []),
@@ -910,22 +942,112 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   return candidates, deferred, kept_energy
 
 
+def _mood_steps_to_great(current_mood):
+  current_index = _MOOD_LEVEL_INDEX.get(str(current_mood or "").upper())
+  target_index = _MOOD_LEVEL_INDEX["GREAT"]
+  if current_index is None:
+    return 0
+  return max(0, target_index - current_index)
+
+
+def _apply_mood_candidate_selection(candidates, deferred, context):
+  """Keep a single mood item per turn and prefer the smallest boost that
+  reaches GREAT."""
+  candidates = list(candidates or [])
+  deferred = list(deferred or [])
+  context = context if isinstance(context, dict) else {}
+  mood_candidates = [entry for entry in candidates if entry.get("usage_group") == "mood"]
+  if len(mood_candidates) <= 1:
+    return candidates, deferred
+
+  steps_needed = _mood_steps_to_great(context.get("current_mood"))
+  selected = None
+  known_boost_entries = []
+  for entry in mood_candidates:
+    boost = _MOOD_ITEM_BOOST.get(entry.get("key"), 0)
+    if boost > 0:
+      known_boost_entries.append((entry, boost))
+
+  if known_boost_entries and steps_needed > 0:
+    sufficient = [(entry, boost) for entry, boost in known_boost_entries if boost >= steps_needed]
+    if sufficient:
+      selected = min(
+        sufficient,
+        key=lambda item: (
+          item[1],
+          -_safe_int(item[0].get("candidate_score"), 0),
+          -_safe_int(item[0].get("effective_sort_score"), 0),
+        ),
+      )[0]
+    else:
+      selected = max(
+        known_boost_entries,
+        key=lambda item: (
+          item[1],
+          _safe_int(item[0].get("candidate_score"), 0),
+          _safe_int(item[0].get("effective_sort_score"), 0),
+        ),
+      )[0]
+
+  if selected is None:
+    selected = max(
+      mood_candidates,
+      key=lambda entry: (
+        _safe_int(entry.get("candidate_score"), 0),
+        _safe_int(entry.get("effective_sort_score"), 0),
+      ),
+    )
+
+  selected_name = selected.get("name", selected.get("key", "mood item"))
+  non_mood = [entry for entry in candidates if entry.get("usage_group") != "mood"]
+  for entry in mood_candidates:
+    if entry is selected:
+      continue
+    entry.pop("candidate_score", None)
+    entry["reason"] = f"single mood item per turn; {selected_name} preferred"
+    deferred.append(entry)
+  candidates = non_mood + [selected]
+  return candidates, deferred
+
+
 _MEGAPHONE_KEYS = frozenset({"motivating_megaphone", "empowering_megaphone", "coaching_megaphone"})
+_MEGAPHONE_STRENGTH_ORDER = {
+  "empowering_megaphone": 3,
+  "motivating_megaphone": 2,
+  "coaching_megaphone": 1,
+}
 
 
-def _apply_megaphone_mutual_exclusion(candidates, deferred):
+def _apply_megaphone_mutual_exclusion(candidates, deferred, context=None):
   """Only one megaphone buff can be active per turn. Keep the highest-scored
   megaphone candidate and defer the rest."""
   candidates = list(candidates or [])
   deferred = list(deferred or [])
+  context = context if isinstance(context, dict) else {}
   megaphone_candidates = [e for e in candidates if e.get("key") in _MEGAPHONE_KEYS]
   if len(megaphone_candidates) <= 1:
     return candidates, deferred
-  # Already sorted by candidate_score descending from _evaluate_item_candidates
-  kept = megaphone_candidates[0]
+
+  non_summer = not bool(context.get("summer_window"))
+  if non_summer:
+    # Outside summer, spend the strongest available megaphone first.
+    kept = max(
+      megaphone_candidates,
+      key=lambda entry: (
+        _MEGAPHONE_STRENGTH_ORDER.get(entry.get("key"), 0),
+        _safe_int(entry.get("candidate_score"), 0),
+        _safe_int(entry.get("effective_sort_score"), 0),
+      ),
+    )
+  else:
+    # Already sorted by candidate_score descending from _evaluate_item_candidates
+    kept = megaphone_candidates[0]
+
   kept_name = kept.get("name", kept.get("key", "megaphone"))
   non_megaphone = [e for e in candidates if e.get("key") not in _MEGAPHONE_KEYS]
-  for entry in megaphone_candidates[1:]:
+  for entry in megaphone_candidates:
+    if entry is kept:
+      continue
     entry.pop("candidate_score", None)
     entry["reason"] = f"only one megaphone buff active per turn; {kept_name} preferred"
     deferred.append(entry)
@@ -1065,7 +1187,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     if context["action_func"] != "do_training":
       if not context["weak_summer_training"]:
         return None
-    if not context["summer_window"]:
+    if not context["summer_window"] and not context.get("summer_conservation_bypass"):
       return {
         "defer_reason": "save for summer burst windows",
       }
@@ -1126,7 +1248,11 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
   if usage_group == "energy":
     if context["action_func"] != "do_training":
       return None
-    if item_key.startswith("vita_") and not context["summer_window"]:
+    if (
+      item_key.startswith("vita_")
+      and not context["summer_window"]
+      and not context.get("summer_conservation_bypass")
+    ):
       return {
         "defer_reason": "save Vita for summer burst windows",
       }
@@ -1220,7 +1346,8 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     hammer_spendable,
   )
   candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
-  candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred)
+  candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
+  candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
 
   if _should_commit_after_energy(context, kept_energy) or _should_commit_after_charm(normalized_policy, context, candidates):
     context = {
@@ -1235,11 +1362,16 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       hammer_spendable,
     )
     candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
-    candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred)
+    candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
+    candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
 
   return {
     "context": {
       "timeline_label": context.get("timeline_label"),
+      "timeline_index": context.get("timeline_index"),
+      "past_final_summer": context.get("past_final_summer"),
+      "summer_conservation_bypass": context.get("summer_conservation_bypass"),
+      "score_over_50": context.get("score_over_50"),
       "summer_window": context.get("summer_window"),
       "current_mood": context.get("current_mood"),
       "energy_level": context.get("energy_level"),
