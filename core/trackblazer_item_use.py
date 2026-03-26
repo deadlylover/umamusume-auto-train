@@ -1025,6 +1025,71 @@ def _apply_mood_candidate_selection(candidates, deferred, context):
   return candidates, deferred
 
 
+def _promote_kale_mood_followup(candidates, deferred, context):
+  """If Kale is planned, also plan one mood item to offset the mood loss."""
+  candidates = list(candidates or [])
+  deferred = list(deferred or [])
+  context = context if isinstance(context, dict) else {}
+
+  if not any(entry.get("key") == "royal_kale_juice" for entry in candidates):
+    return candidates, deferred
+  if any(entry.get("usage_group") == "mood" for entry in candidates):
+    return candidates, deferred
+
+  mood_deferred = [entry for entry in deferred if entry.get("usage_group") == "mood"]
+  if not mood_deferred:
+    return candidates, deferred
+
+  projected_mood = context.get("current_mood")
+  if str(projected_mood or "").upper() == "GREAT":
+    projected_mood = "GOOD"
+  steps_needed = _mood_steps_to_great(projected_mood)
+
+  selected = None
+  known_boost_entries = []
+  for entry in mood_deferred:
+    boost = _MOOD_ITEM_BOOST.get(entry.get("key"), 0)
+    if boost > 0:
+      known_boost_entries.append((entry, boost))
+
+  if known_boost_entries and steps_needed > 0:
+    sufficient = [(entry, boost) for entry, boost in known_boost_entries if boost >= steps_needed]
+    if sufficient:
+      selected = min(
+        sufficient,
+        key=lambda item: (
+          item[1],
+          -_safe_int(item[0].get("effective_sort_score"), 0),
+          item[0].get("name", ""),
+        ),
+      )[0]
+    else:
+      selected = max(
+        known_boost_entries,
+        key=lambda item: (
+          item[1],
+          _safe_int(item[0].get("effective_sort_score"), 0),
+          item[0].get("name", ""),
+        ),
+      )[0]
+
+  if selected is None:
+    selected = max(
+      mood_deferred,
+      key=lambda entry: (
+        _safe_int(entry.get("effective_sort_score"), 0),
+        entry.get("name", ""),
+      ),
+    )
+
+  deferred = [entry for entry in deferred if entry is not selected]
+  selected = dict(selected)
+  selected["candidate_score"] = max(_safe_int(selected.get("candidate_score"), 0), 295)
+  selected["reason"] = "offset Royal Kale Juice mood loss before confirming"
+  candidates.append(selected)
+  return candidates, deferred
+
+
 _MEGAPHONE_KEYS = frozenset({"motivating_megaphone", "empowering_megaphone", "coaching_megaphone"})
 _MEGAPHONE_STRENGTH_ORDER = {
   "empowering_megaphone": 3,
@@ -1400,6 +1465,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     hammer_spendable,
   )
   candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
+  candidates, deferred = _promote_kale_mood_followup(candidates, deferred, context)
   candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
   candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
   candidates, deferred = _apply_race_boost_mutual_exclusion(candidates, deferred)
@@ -1417,6 +1483,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       hammer_spendable,
     )
     candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
+    candidates, deferred = _promote_kale_mood_followup(candidates, deferred, context)
     candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
     candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
     candidates, deferred = _apply_race_boost_mutual_exclusion(candidates, deferred)

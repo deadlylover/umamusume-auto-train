@@ -2838,12 +2838,14 @@ def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
         "state": "unknown",
         "checked_match": None,
         "unchecked_match": None,
+        "purchased_match": None,
         "click_target": None,
     }
     if screenshot is None or row_match is None:
         return state
     checked_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("select_checked")
     unchecked_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("select_unchecked")
+    purchased_template = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get("shop_item_purchased")
     checked_matches = _filter_shop_checkbox_matches(
         device_action.match_template(
             checked_template,
@@ -2860,8 +2862,24 @@ def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
             template_scaling=_INVERSE_GLOBAL_SCALE,
         ) if unchecked_template else []
     )
+    purchased_matches = [
+        (int(x), int(y), int(w), int(h))
+        for (x, y, w, h) in (
+            device_action.match_template(
+                purchased_template,
+                screenshot,
+                threshold,
+                template_scaling=_INVERSE_GLOBAL_SCALE,
+            ) if purchased_template else []
+        )
+        if int(x) >= 500 and int(y) >= 400 and int(y) <= 1100
+    ]
     paired_checked = _pair_item_to_increment(row_match, checked_matches, y_tolerance=36)
     paired_unchecked = _pair_item_to_increment(row_match, unchecked_matches, y_tolerance=36)
+    paired_purchased = _pair_item_to_increment(row_match, purchased_matches, y_tolerance=45)
+    if paired_purchased:
+        state["state"] = "purchased"
+        state["purchased_match"] = [int(v) for v in paired_purchased]
     if paired_checked:
         state["state"] = "selected"
         state["checked_match"] = [int(v) for v in paired_checked]
@@ -2952,6 +2970,7 @@ def prepare_trackblazer_shop_item_selection(
     flow["scan_result"] = scan_result
     flow["scan_timing"] = (scan_result.get("flow") or {}).get("timing") or {}
 
+    scanned_purchasable = set(scan_result.get("purchasable_items") or [])
     target_candidates = []
     for page in (scan_result.get("pages") or []):
         for row in (page.get("rows") or []):
@@ -2965,6 +2984,15 @@ def prepare_trackblazer_shop_item_selection(
             })
     if not target_candidates:
         flow["reason"] = "item_not_found_in_shop_scan"
+        flow["timing_total"] = round(_time() - t_total, 4)
+        return flow
+    if scanned_purchasable and requested_item not in scanned_purchasable:
+        flow["reason"] = "item_not_purchasable_in_shop_scan"
+        flow["timing_total"] = round(_time() - t_total, 4)
+        return flow
+    target_candidates = [entry for entry in target_candidates if not (entry.get("row") or {}).get("purchased")]
+    if not target_candidates:
+        flow["reason"] = "item_already_purchased_in_shop_scan"
         flow["timing_total"] = round(_time() - t_total, 4)
         return flow
 
@@ -3035,6 +3063,10 @@ def prepare_trackblazer_shop_item_selection(
 
         checkbox_state = _resolve_shop_row_checkbox_state(live_screenshot, matched_row.get("match"), threshold=checkbox_threshold)
         attempt["checkbox_state"] = checkbox_state
+        if checkbox_state.get("state") == "purchased":
+            flow["attempts"].append(attempt)
+            flow["reason"] = "item_already_purchased_live"
+            break
         if checkbox_state.get("state") == "selected":
             flow["already_selected"] = True
             flow["selected"] = True
@@ -3160,6 +3192,15 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
             confirm_threshold=0.7,
         )
         flow["scan_timing"] = (shared_scan.get("flow") or {}).get("timing") or {}
+        scanned_purchasable = set(shared_scan.get("purchasable_items") or [])
+        requested_but_not_purchasable = [
+            item_key for item_key in requested_keys
+            if item_key not in scanned_purchasable
+        ]
+        if requested_but_not_purchasable:
+            flow["missing_items"] = list(requested_but_not_purchasable)
+            flow["reason"] = "shop_items_not_purchasable_in_scan"
+            return result
 
         # Reset scrollbar to the top before selecting items — the scan
         # leaves the scrollbar at the bottom and subsequent per-item

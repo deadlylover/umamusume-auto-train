@@ -213,6 +213,7 @@ TRACKBLAZER_ITEM_TEMPLATES = {
   "empowering_megaphone": "assets/trackblazer/items/empowering_megaphone.png",
   "energy_drink_max": "assets/trackblazer/items/energy_drink_max.png",
   "fluffy_pillow": "assets/trackblazer/items/fluffy_pillow.png",
+  "glow_sticks": "assets/trackblazer/items/glow_sticks.png",
   "grilled_carrots": "assets/trackblazer/items/grilled_carrots.png",
   "good_luck_charm": "assets/trackblazer/items/good_luck_charm.png",
   "guts_ankle_weights": "assets/trackblazer/items/guts_ankle_weights.png",
@@ -253,6 +254,7 @@ TRACKBLAZER_ITEM_CATEGORIES = {
   "empowering_megaphone": "training_boost",
   "energy_drink_max": "energy",
   "fluffy_pillow": "energy",
+  "glow_sticks": "race",
   "grilled_carrots": "energy",
   "good_luck_charm": "training_boost",
   "guts_ankle_weights": "training_boost",
@@ -295,6 +297,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "climax_race_button": "assets/trackblazer/climax_race_button.png",
   "climax_race_locked": "assets/trackblazer/race_locked_climax.png",
   "climax_race_result": "assets/trackblazer/climax_race_result.png",
+  "complete_career": "assets/trackblazer/complete_career.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",
   "race_g3": "assets/trackblazer/race_g3.png",
@@ -334,6 +337,12 @@ TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX = (
   GAME_WINDOW_BBOX[1] + 240,
 )
 TRACKBLAZER_CLIMAX_RACE_RESULT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX)
+
+# Trackblazer career-complete banner shown on the bottom-right ribbon at the
+# end of a finished run. Use the broader bottom region because live runtime
+# offsets/overrides can shift the exact button placement.
+TRACKBLAZER_COMPLETE_CAREER_BBOX = SCREEN_BOTTOM_BBOX
+TRACKBLAZER_COMPLETE_CAREER_REGION = convert_xyxy_to_xywh(TRACKBLAZER_COMPLETE_CAREER_BBOX)
 
 # Trackblazer item use flow UI templates.
 TRACKBLAZER_ITEM_USE_TEMPLATES = {

@@ -984,6 +984,26 @@ def _trackblazer_pre_action_items(action):
   return []
 
 
+def _order_trackblazer_pre_action_items(items):
+  ordered_items = list(items or [])
+  if not ordered_items:
+    return []
+
+  kale_indexes = [index for index, entry in enumerate(ordered_items) if entry.get("key") == "royal_kale_juice"]
+  mood_indexes = [index for index, entry in enumerate(ordered_items) if entry.get("usage_group") == "mood"]
+  if not kale_indexes or not mood_indexes:
+    return ordered_items
+
+  kale_index = kale_indexes[0]
+  first_mood_index = mood_indexes[0]
+  if kale_index < first_mood_index:
+    return ordered_items
+
+  kale_entry = ordered_items.pop(kale_index)
+  ordered_items.insert(first_mood_index, kale_entry)
+  return ordered_items
+
+
 def _planned_clicks_for_action(action):
   action_func = _action_func(action)
   pre_action_items = _trackblazer_pre_action_items(action)
@@ -1505,6 +1525,7 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     # depend on the post-whistle board, so defer them to the reassess pass
     # where they'll be re-planned against the new training state.
     candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
+  candidates = _order_trackblazer_pre_action_items(candidates)
   action["trackblazer_pre_action_items"] = candidates
   action["trackblazer_item_use_context"] = item_use_plan.get("context") or {}
   action["trackblazer_reassess_after_item_use"] = has_whistle
@@ -1894,6 +1915,71 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
   }
 
 
+def _detect_trackblazer_complete_career_banner(screenshot=None, threshold=0.75, log_result=False, context=""):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "reason": "scenario_inactive",
+      "context": context or "",
+    }
+
+  template_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("complete_career")
+  region_ltrb = getattr(constants, "TRACKBLAZER_COMPLETE_CAREER_BBOX", None)
+  if not template_path or not region_ltrb:
+    return {
+      "detected": False,
+      "reason": "template_or_region_missing",
+      "context": context or "",
+    }
+
+  region_screenshot = screenshot if screenshot is not None else device_action.screenshot(region_ltrb=region_ltrb)
+  matches = device_action.match_template(
+    template_path,
+    region_screenshot,
+    threshold=threshold,
+    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  )
+  detected = bool(matches)
+  if detected:
+    info("[TB_DONE] Career complete banner detected.")
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "complete_career.png",
+      "result": "found",
+      "context": context or "trackblazer_complete_career",
+    })
+  elif log_result:
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "complete_career.png",
+      "result": "not_found",
+      "context": context or "trackblazer_complete_career",
+    })
+
+  return {
+    "detected": detected,
+    "reason": "complete_career_banner_found" if detected else "complete_career_banner_not_found",
+    "context": context or "",
+    "region_ltrb": [int(v) for v in region_ltrb] if region_ltrb else None,
+  }
+
+
+def _stop_for_trackblazer_complete_career(state_obj=None, action=None, context=""):
+  reason = "Trackblazer career complete banner detected; stopping bot without clicking."
+  info(f"[TB_DONE] {reason}")
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="idle",
+    status="complete",
+    message=reason,
+    sub_phase=context or "trackblazer_complete_career",
+  )
+  bot.stop_event.set()
+  bot.is_bot_running = False
+  raise BotStopException(reason)
+
+
 def _generic_post_action_return_to_lobby_step():
   for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
     if label == "cancel":
@@ -1952,6 +2038,14 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
       sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
       reasoning_notes=f"anchor_counts={anchor_counts}",
     )
+
+    if _detect_trackblazer_complete_career_banner(context="post_action_resolution").get("detected"):
+      bot.end_post_action_resolution(outcome="trackblazer_career_complete", status="completed")
+      _stop_for_trackblazer_complete_career(
+        state_obj,
+        action,
+        context="post_action_resolution",
+      )
 
     if select_event():
       _update_post_action_resolution_snapshot(
@@ -3032,6 +3126,8 @@ def career_lobby(dry_run_turn=False):
       sleep(1)
       device_action.flush_screenshot_cache()
       screenshot = device_action.screenshot()
+      if _detect_trackblazer_complete_career_banner(context="lobby_scan").get("detected"):
+        _stop_for_trackblazer_complete_career(context="lobby_scan")
       stable_anchor_counts = _detect_stable_career_screen_anchors(screenshot, threshold=0.8)
 
       if non_match_count > 20:
@@ -3779,9 +3875,10 @@ def career_lobby(dry_run_turn=False):
         record_and_finalize_turn(state_obj, action)
         continue
 
-  except BotStopException:
-    info("Bot stopped by user.")
-    update_operator_snapshot(phase="idle", message="Bot stopped by user.")
+  except BotStopException as exc:
+    message = str(exc) or "Bot stopped."
+    info(message)
+    update_operator_snapshot(phase="idle", message=message)
     return
 
 def record_and_finalize_turn(state_obj, action):
