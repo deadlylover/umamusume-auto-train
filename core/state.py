@@ -28,6 +28,12 @@ from statistics import median
 aptitudes_cache = {}
 _last_turn = None  # Best-effort fallback when OCR intermittently fails.
 _runtime_ocr_debug = {}
+_TRACKBLAZER_CLIMAX_YEAR_ALIASES = (
+  "Finale Underway",
+  "TS Climax Races Underway",
+  "Twinkle Star Climax Races Underway",
+  "Climax Races Underway",
+)
 APTITUDE_BOX_RATIOS = {
   "surface_turf": (0.0, 0.00, 0.25, 0.33),
   "surface_dirt": (0.25, 0.00, 0.25, 0.33),
@@ -76,6 +82,35 @@ def record_runtime_ocr_debug(field, image=None, extra=None, image_path=None):
   if extra:
     entry.update(extra)
   _runtime_ocr_debug[field] = entry
+
+
+def _compact_ocr_text(text):
+  return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
+
+
+def _normalize_trackblazer_climax_year_text(text):
+  raw_text = re.sub(r"\s+", " ", str(text or "")).strip()
+  if not raw_text or constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return None
+
+  compact = _compact_ocr_text(raw_text)
+  alias_compacts = [_compact_ocr_text(alias) for alias in _TRACKBLAZER_CLIMAX_YEAR_ALIASES]
+  if compact in alias_compacts:
+    return "Finale Underway"
+
+  fuzzy = difflib.get_close_matches(compact, alias_compacts, n=1, cutoff=0.6)
+  if fuzzy:
+    return "Finale Underway"
+
+  if "underway" not in compact:
+    return None
+
+  climax_markers = ("climax", "clim", "clinar", "finale")
+  race_markers = ("race", "races", "pace", "paces", "star", "ts")
+  if any(marker in compact for marker in climax_markers) and any(marker in compact for marker in race_markers):
+    return "Finale Underway"
+
+  return None
 
 def _inventory_template_debug_entry(field, template_path, result=None, extra=None):
   result = result or {}
@@ -408,6 +443,21 @@ def collect_main_state():
   state_object["turn"] = get_turn()
   debug("Before year collection.")
   state_object["year"] = get_current_year()
+  if constants.SCENARIO_NAME in ("mant", "trackblazer") and state_object["year"] == "Finale Underway":
+    try:
+      from scenarios.trackblazer import check_climax_locked_race_button
+      climax_locked = bool(check_climax_locked_race_button())
+    except Exception as exc:
+      warning(f"[TB_CLIMAX] Locked-race check failed during main-state collection: {exc}")
+      climax_locked = False
+    state_object["trackblazer_climax"] = True
+    state_object["trackblazer_climax_locked_race"] = climax_locked
+    state_object["trackblazer_trainings_remaining_upper_bound"] = 3
+    if state_object["turn"] == -1:
+      state_object["turn"] = "Climax Training" if climax_locked else "Finale Turn"
+  else:
+    state_object["trackblazer_climax"] = False
+    state_object["trackblazer_climax_locked_race"] = False
   debug("Before criteria collection.")
   state_object["criteria"] = get_criteria()
   debug("Before current stats collection.")
@@ -1275,12 +1325,17 @@ def get_current_year():
       device_action.flush_screenshot_cache()
 
   if text not in constants.TIMELINE:
-    fuzzy = difflib.get_close_matches(text, constants.TIMELINE, n=1, cutoff=0.7)
-    if fuzzy:
-      warning(f"[OCR] Year fuzzy-matched: '{text}' → '{fuzzy[0]}'")
-      text = fuzzy[0]
+    climax_year = _normalize_trackblazer_climax_year_text(text)
+    if climax_year:
+      warning(f"[OCR] Year climax-normalized: '{text}' → '{climax_year}'")
+      text = climax_year
     else:
-      warning(f"[OCR] Year unrecognized after retries: '{text}'")
+      fuzzy = difflib.get_close_matches(text, constants.TIMELINE, n=1, cutoff=0.7)
+      if fuzzy:
+        warning(f"[OCR] Year fuzzy-matched: '{text}' → '{fuzzy[0]}'")
+        text = fuzzy[0]
+      else:
+        warning(f"[OCR] Year unrecognized after retries: '{text}'")
 
   return text
 

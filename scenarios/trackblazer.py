@@ -3456,8 +3456,21 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                     item_data = inventory.get(item_name) or {}
                     target = item_data.get("increment_target")
 
-                    # Scroll to the item's page if its target is stale.
-                    if item_data.get("increment_target_stale") or (not target and item_data.get("detected")):
+                    # Determine if the item's targets are effectively stale.
+                    # The initial scan sets increment_target_stale for items
+                    # on the non-visible page, but scrolling during this loop
+                    # can make previously-fresh targets stale too.
+                    effectively_stale = item_data.get("increment_target_stale")
+                    if not effectively_stale and current_scroll is not None:
+                        page = item_data.get("scroll_page")
+                        if page not in ("both", None) and current_scroll != page:
+                            effectively_stale = True
+                            info(
+                                f"{log_tag} '{item_name}' targets stale: "
+                                f"scroll_page={page} but current_scroll={current_scroll}"
+                            )
+
+                    if effectively_stale or (not target and item_data.get("detected")):
                         desired_edge = "top" if item_data.get("scroll_page") == "top" else "bottom"
                         if current_scroll != desired_edge:
                             info(f"{log_tag} Scrolling inventory to {desired_edge} for '{item_name}'.")
@@ -3468,12 +3481,17 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                                 device_action.flush_screenshot_cache()
                                 current_scroll = desired_edge
                         # Re-scan single page for fresh increment targets.
+                        # Update ALL requested items visible on this page so
+                        # later iterations don't use stale coordinates.
                         rescan, _ = _scan_inventory_page()
+                        for ri_name in requested_items:
+                            ri_data = rescan.get(ri_name)
+                            if ri_data and ri_data.get("increment_target"):
+                                inventory[ri_name] = ri_data
                         rescan_data = rescan.get(item_name) or {}
                         if rescan_data.get("increment_target"):
                             target = rescan_data["increment_target"]
                             item_data = rescan_data
-                            inventory[item_name] = rescan_data
                             info(f"{log_tag} Re-scanned '{item_name}' after scroll: target={target}")
                         else:
                             warning(f"{log_tag} Re-scan after scroll did not find increment for '{item_name}'.")
@@ -4500,7 +4518,25 @@ _RIVAL_BUTTON_INDICATORS = [
 ]
 
 
-def check_rival_race_indicator():
+def check_climax_locked_race_button():
+    """Detect the tiny lock overlay shown on climax training turns."""
+    template_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_locked")
+    if not template_path:
+        return False
+    screenshot = device_action.screenshot(region_ltrb=constants.TRACKBLAZER_CLIMAX_RACE_LOCK_BBOX)
+    matches = device_action.match_template(
+        template_path,
+        screenshot,
+        threshold=0.7,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+    if matches:
+        info("[TB_RIVAL] Climax lock detected on race button.")
+        return True
+    return False
+
+
+def check_rival_race_indicator(state_obj=None):
     """Check the race button area for the VS rival-race indicator icon.
 
     This is a cheap pre-check on the main lobby screen.  If the VS icon is
@@ -4509,6 +4545,10 @@ def check_rival_race_indicator():
 
     Returns True if any rival indicator is detected.
     """
+    state_obj = state_obj if isinstance(state_obj, dict) else {}
+    if state_obj.get("trackblazer_climax") and check_climax_locked_race_button():
+        debug("[TB_RIVAL] Skipping rival indicator check: climax race button is locked.")
+        return False
     screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
     for template_path in _RIVAL_BUTTON_INDICATORS:
         matches = device_action.match_template(

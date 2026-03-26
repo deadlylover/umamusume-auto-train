@@ -663,6 +663,7 @@ def _usage_context(state_obj, action):
   timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
   timeline_label = timeline.get("timeline_label") or ""
   timeline_index = timeline.get("timeline_index")
+  climax_window = bool(timeline.get("is_climax"))
   score_value = _safe_float(score_tuple[0], 0.0)
   past_final_summer = _past_final_summer(timeline_index)
   score_over_50 = score_value > 50.0
@@ -696,6 +697,14 @@ def _usage_context(state_obj, action):
     and matching_stat_gain < 20
     and total_stat_gain < 20
     and score_value < 5.0
+  )
+  weak_climax_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and climax_window
+    and rainbow_count <= 0
+    and score_value < 20.0
+    and matching_stat_gain < 10
+    and total_stat_gain < 18
   )
   held_support_items = []
   for item_key in _FAILSAFE_ITEM_KEYS:
@@ -759,6 +768,7 @@ def _usage_context(state_obj, action):
     "timeline_label": timeline_label,
     "timeline_index": timeline_index,
     "past_final_summer": past_final_summer,
+    "climax_window": climax_window,
     "summer_conservation_bypass": summer_conservation_bypass,
     "score_over_50": score_over_50,
     "summer_window": timeline_label in _SUMMER_WINDOWS,
@@ -791,11 +801,12 @@ def _usage_context(state_obj, action):
     "very_high_value_training": very_high_value_training,
     "committed_value_training": committed_value_training,
     "strong_burst_training": strong_burst_training,
-    "weak_summer_training": weak_summer_training or bool(reroll_signal.get("needs_reroll")),
+    "weak_summer_training": weak_summer_training or weak_climax_training or bool(reroll_signal.get("needs_reroll")),
+    "weak_climax_training": weak_climax_training,
     "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
     "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
     "commit_training_after_items": commit_training_after_items,
-    "is_tsc": timeline_label == "Finale Underway",
+    "is_tsc": climax_window,
     "trackblazer_buff_active": bool(state_obj.get("trackblazer_buff_active")),
     "allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
   }
@@ -1187,7 +1198,11 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     if context["action_func"] != "do_training":
       if not context["weak_summer_training"]:
         return None
-    if not context["summer_window"] and not context.get("summer_conservation_bypass"):
+    if (
+      not context["summer_window"]
+      and not context.get("climax_window")
+      and not context.get("summer_conservation_bypass")
+    ):
       return {
         "defer_reason": "save for summer burst windows",
       }
@@ -1201,7 +1216,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       }
     if not context["weak_summer_training"]:
       return {
-        "defer_reason": "current summer training is acceptable without a reroll",
+        "defer_reason": "current training is acceptable without a reroll",
       }
     support_reasons = []
     if context["held_support_item_names"]:
@@ -1223,7 +1238,8 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       # rescan trainings and re-evaluate failure/energy before committing.
       "reason": "; ".join(
         part for part in [
-          "summer reroll: use whistle, then recheck trainings before committing",
+          "reroll the board, then recheck trainings before committing",
+          "climax training turn" if context.get("climax_window") else "summer reroll",
           target_hint or "current board is too weak or too unsafe to commit",
           "shuffle support cards while follow-up recovery/fail-safe coverage exists",
           *support_reasons,
@@ -1370,6 +1386,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "timeline_label": context.get("timeline_label"),
       "timeline_index": context.get("timeline_index"),
       "past_final_summer": context.get("past_final_summer"),
+      "climax_window": context.get("climax_window"),
       "summer_conservation_bypass": context.get("summer_conservation_bypass"),
       "score_over_50": context.get("score_over_50"),
       "summer_window": context.get("summer_window"),
@@ -1385,6 +1402,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "support_count": context.get("support_count"),
       "strong_burst_training": context.get("strong_burst_training"),
       "weak_summer_training": context.get("weak_summer_training"),
+      "weak_climax_training": context.get("weak_climax_training"),
       "failure_bypassed_by_items": context.get("failure_bypassed_by_items"),
       "held_support_item_names": context.get("held_support_item_names"),
       "affordable_shop_support_item_names": context.get("affordable_shop_support_item_names"),

@@ -30,7 +30,7 @@ from core.runtime_flow import (
   SUB_PHASE_RESOLVE_SHOP_REFRESH_POPUP,
   SUB_PHASE_RETURN_TO_LOBBY,
 )
-from core.trackblazer_shop import get_effective_shop_items, get_priority_preview, policy_context
+from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items, get_priority_preview, policy_context
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 pyautogui.useImageNotFoundException(False)
@@ -1212,7 +1212,11 @@ def _build_trackblazer_planned_actions(state_obj, action):
     would_buy = _trackblazer_shop_buy_candidates(
       effective_shop_items,
       shop_items=shop_items,
-      shop_summary=shop_summary,
+      shop_summary={
+        **(shop_summary or {}),
+        "year": state_obj.get("year"),
+        "turn": state_obj.get("turn"),
+      },
       held_quantities=held_quantities,
       limit=8,
     )
@@ -1363,9 +1367,16 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
   shop_coins = int((shop_summary or {}).get("shop_coins") or 0)
   if shop_coins == 0:
     return []
+  dynamic_limits = get_dynamic_shop_limits(
+    held_quantities=held_quantities,
+    year=(shop_summary or {}).get("year"),
+    turn=(shop_summary or {}).get("turn"),
+  )
   budget_known = shop_coins > 0
   remaining_coins = shop_coins if budget_known else 0
   would_buy = []
+  planned_counts = {}
+  planned_family_counts = {}
   for item in effective_shop_items:
     item_key = item.get("key")
     if item_key not in detected_shop_keys:
@@ -1374,6 +1385,20 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
       continue
     held_quantity = int(held_quantities.get(item_key) or 0)
     max_quantity = int(item.get("max_quantity") or 0)
+    dynamic_limit = dynamic_limits.get(item_key) or {}
+    if dynamic_limit.get("block_purchase"):
+      continue
+    planned_for_item = int(planned_counts.get(item_key) or 0)
+    dynamic_max_total = dynamic_limit.get("max_total")
+    if dynamic_max_total is not None and held_quantity + planned_for_item >= int(dynamic_max_total):
+      continue
+    family_key = dynamic_limit.get("family_key")
+    family_max_total = dynamic_limit.get("family_max_total")
+    if family_key and family_max_total is not None:
+      family_planned = int(planned_family_counts.get(family_key) or 0)
+      family_total_held = int(dynamic_limit.get("family_total_held") or 0)
+      if family_total_held + family_planned >= int(family_max_total):
+        continue
     remaining_capacity = max(0, max_quantity - held_quantity)
     if max_quantity > 0 and remaining_capacity <= 0:
       continue
@@ -1387,6 +1412,8 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
       reason_parts.append(rule.get("label") or "timing override")
       if rule.get("note"):
         reason_parts.append(rule["note"])
+    if dynamic_limit.get("reason"):
+      reason_parts.append(dynamic_limit["reason"])
     elif item.get("policy_notes"):
       reason_parts.append(item["policy_notes"])
     if max_quantity > 0:
@@ -1405,6 +1432,9 @@ def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop
     )
     if budget_known:
       remaining_coins -= cost
+    planned_counts[item_key] = planned_for_item + 1
+    if family_key:
+      planned_family_counts[family_key] = int(planned_family_counts.get(family_key) or 0) + 1
   return would_buy[: max(0, int(limit))]
 
 
@@ -1423,7 +1453,11 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   shop_buy_plan = _trackblazer_shop_buy_candidates(
     effective_shop_items,
     shop_items=state_obj.get("trackblazer_shop_items"),
-    shop_summary=state_obj.get("trackblazer_shop_summary"),
+    shop_summary={
+      **(state_obj.get("trackblazer_shop_summary") or {}),
+      "year": state_obj.get("year"),
+      "turn": state_obj.get("turn"),
+    },
     held_quantities=held_quantities,
     limit=8,
   )
@@ -2174,6 +2208,9 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     state_summary["trackblazer_inventory_pre_shop_flow"] = state_obj.get("trackblazer_inventory_pre_shop_flow")
     state_summary["trackblazer_shop_summary"] = state_obj.get("trackblazer_shop_summary")
     state_summary["trackblazer_shop_flow"] = state_obj.get("trackblazer_shop_flow")
+    state_summary["trackblazer_climax"] = state_obj.get("trackblazer_climax")
+    state_summary["trackblazer_climax_locked_race"] = state_obj.get("trackblazer_climax_locked_race")
+    state_summary["trackblazer_trainings_remaining_upper_bound"] = state_obj.get("trackblazer_trainings_remaining_upper_bound")
     shop_policy_context = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
     state_summary["trackblazer_shop_policy_context"] = shop_policy_context
     state_summary["trackblazer_shop_priority_preview"] = get_priority_preview(
@@ -3316,7 +3353,7 @@ def career_lobby(dry_run_turn=False):
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
         update_operator_snapshot(phase="collecting_race_state", message="Checking race indicators.")
         from scenarios.trackblazer import check_rival_race_indicator
-        rival_indicator = check_rival_race_indicator()
+        rival_indicator = check_rival_race_indicator(state_obj)
         state_obj["rival_indicator_detected"] = rival_indicator
         update_operator_snapshot(
           state_obj, action,

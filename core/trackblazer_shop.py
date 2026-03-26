@@ -12,6 +12,15 @@ _PRIORITY_SORT_BASE = {
   "HIGH": 3000,
 }
 _TIMELINE_INDEX = {label: index for index, label in enumerate(constants.TIMELINE)}
+_CLIMAX_LABEL = "Finale Underway"
+_CLIMAX_TRAINING_TURN_CAP = 3
+_CLIMAX_BURST_MEGAPHONES = ("motivating_megaphone", "empowering_megaphone")
+_CLIMAX_ANKLE_WEIGHT_KEYS = (
+  "speed_ankle_weights",
+  "stamina_ankle_weights",
+  "power_ankle_weights",
+  "guts_ankle_weights",
+)
 
 
 TRACKBLAZER_SHOP_CATALOG = [
@@ -742,13 +751,65 @@ def policy_context(year=None, turn=None):
     label = year_text
   elif turn_text:
     label = turn_text
+  is_climax = year_text == _CLIMAX_LABEL or label == _CLIMAX_LABEL
   return {
     "year": year_text,
     "turn": turn_text,
     "timeline_label": label,
     "timeline_index": _TIMELINE_INDEX.get(label),
     "known_timeline": label in _TIMELINE_INDEX,
+    "is_climax": is_climax,
+    "trainings_remaining_upper_bound": _CLIMAX_TRAINING_TURN_CAP if is_climax else None,
   }
+
+
+def get_dynamic_shop_limits(held_quantities=None, year=None, turn=None):
+  context = policy_context(year=year, turn=turn)
+  if not context.get("is_climax"):
+    return {}
+
+  held_quantities = held_quantities if isinstance(held_quantities, dict) else {}
+  limits = {}
+
+  burst_held_total = sum(max(0, int(held_quantities.get(item_key) or 0)) for item_key in _CLIMAX_BURST_MEGAPHONES)
+  if burst_held_total >= _CLIMAX_TRAINING_TURN_CAP:
+    for item_key in _CLIMAX_BURST_MEGAPHONES:
+      limits[item_key] = {
+        "block_purchase": True,
+        "family_key": "climax_burst_megaphones",
+        "family_max_total": _CLIMAX_TRAINING_TURN_CAP,
+        "family_total_held": burst_held_total,
+        "reason": (
+          f"climax cap reached: holding {burst_held_total} motivating/empowering megaphones "
+          f"for at most {_CLIMAX_TRAINING_TURN_CAP} remaining training turns"
+        ),
+      }
+  else:
+    for item_key in _CLIMAX_BURST_MEGAPHONES:
+      limits[item_key] = {
+        "family_key": "climax_burst_megaphones",
+        "family_max_total": _CLIMAX_TRAINING_TURN_CAP,
+        "family_total_held": burst_held_total,
+      }
+
+  for item_key in _CLIMAX_ANKLE_WEIGHT_KEYS:
+    held_quantity = max(0, int(held_quantities.get(item_key) or 0))
+    if held_quantity >= _CLIMAX_TRAINING_TURN_CAP:
+      limits[item_key] = {
+        "block_purchase": True,
+        "max_total": _CLIMAX_TRAINING_TURN_CAP,
+        "reason": (
+          f"climax cap reached: already holding {held_quantity} copies with at most "
+          f"{_CLIMAX_TRAINING_TURN_CAP} training turns left"
+        ),
+      }
+    else:
+      limits[item_key] = {
+        **(limits.get(item_key) or {}),
+        "max_total": _CLIMAX_TRAINING_TURN_CAP,
+      }
+
+  return limits
 
 
 def _rule_matches(rule, timeline_index):

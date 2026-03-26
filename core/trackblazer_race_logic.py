@@ -179,6 +179,21 @@ def evaluate_trackblazer_race(state_obj, action):
   training_stats = _total_stat_gain(action)
   race_info = _detect_race_options(state_obj)
 
+  if state_obj.get("trackblazer_climax_locked_race"):
+    return _decision(
+      should_race=False,
+      reason="Twinkle Star Climax training turn: race button is locked, so keep the normal inventory/shop/training flow",
+      training_total_stats=training_stats,
+      is_summer=summer,
+      g1_forced=False,
+      prefer_rival_race=False,
+      race_tier_target=None,
+      race_name=None,
+      race_available=False,
+      rival_indicator=False,
+      race_tier_info=race_info,
+    )
+
   # --- Mandatory races (schedule-driven, no rival check needed) -----------
 
   if turn == "Race Day":

@@ -121,3 +121,4 @@ Placeholder sections for later strategy work.
 - Classic Summer: burst — layer megaphones + ankle_weights + energy
 - Classic Fall → Senior: reactive use based on state
 - Late Senior → TSC: use remaining items aggressively, keep hammer reserves
+- Finale Underway: treat climax training turns as a short-horizon burst window; weak boards may whistle, and shop buys should taper once remaining training coverage is already stocked

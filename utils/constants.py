@@ -291,6 +291,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
   "rival_race_button": "assets/trackblazer/rival_race_button.png",
   "rival_race_button_vs": "assets/trackblazer/rival_race_button_VS.png",
+  "climax_race_locked": "assets/trackblazer/race_locked_climax.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",
   "race_g3": "assets/trackblazer/race_g3.png",
@@ -318,6 +319,10 @@ TRACKBLAZER_LOBBY_BUFF_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 50, -670,
 
 # Trackblazer lobby "Scheduled Race" button — replaces the normal race button when a scheduled race is available.
 TRACKBLAZER_LOBBY_SCHEDULED_RACE = "assets/trackblazer/lobby_scheduled_race.png"
+# Trackblazer climax race-button lock — visible on training turns during
+# Twinkle Star Climax when the race button is intentionally disabled.
+TRACKBLAZER_CLIMAX_RACE_LOCK_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (423, 1036, -358, -13))
+TRACKBLAZER_CLIMAX_RACE_LOCK_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_RACE_LOCK_BBOX)
 
 # Trackblazer item use flow UI templates.
 TRACKBLAZER_ITEM_USE_TEMPLATES = {

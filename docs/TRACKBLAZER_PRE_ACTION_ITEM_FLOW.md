@@ -141,6 +141,28 @@ Current live policy also allows `Good-Luck Charm` to promote a risky but valuabl
 
 then the follow-up item pass is allowed to add matching ankle weights and other burst items for that same committed training.
 
+### Twinkle Star Climax training turns
+
+When the lobby year/banner OCR resolves to `Finale Underway`, treat that as the Trackblazer climax training window rather than a generic invalid state.
+
+Current canonical handling:
+
+- the bot still does the normal Trackblazer pre-action sequence: inventory check, shop check, item planning, then training
+- if the climax race button shows the tiny lock overlay, the rival-race pre-check is skipped for that pass
+- `Reset Whistle` is allowed outside summer here and is encouraged on weak climax training boards, because there are at most 3 training turns left before the forced finale races
+
+This is intentionally a forward-looking policy: item use is no longer only "save for summer", it also reasons about the short climax endgame horizon.
+
+### Climax shop tapering
+
+During `Finale Underway`, shop planning now applies short-horizon caps:
+
+- do not buy more `Motivating Megaphone` / `Empowering Megaphone` copies once the combined held stock already covers the 3 remaining training turns
+- do not buy additional ankle weights of a specific stat once 3 copies of that exact weight are already held
+- still allow buying missing `speed`, `stamina`, or `power` ankle weights if that stat is not yet covered, even when another stat's weight count is already high
+
+The goal is to preserve useful burst coverage without spending coins on inventory that cannot realistically be consumed before the forced climax races.
+
 ### Current multi-whistle gate
 
 The current whistle gate does not require burst-enabling items such as:
