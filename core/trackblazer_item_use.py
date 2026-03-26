@@ -1274,6 +1274,14 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
   if held_quantity <= 0:
     return None
 
+  if item_key == "grilled_carrots":
+    return {
+      "candidate_score": 1000 + priority_score,
+      "reason": "detected in inventory; consume immediately",
+      "reserved_quantity": reserve_quantity,
+      "use_now": True,
+    }
+
   if usage_group == "race_boost":
     if context["action_func"] != "do_race":
       return None
