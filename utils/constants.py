@@ -291,6 +291,8 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
   "rival_race_button": "assets/trackblazer/rival_race_button.png",
   "rival_race_button_vs": "assets/trackblazer/rival_race_button_VS.png",
+  "climax_race_day": "assets/trackblazer/climax_race_day.png",
+  "climax_race_button": "assets/trackblazer/climax_race_button.png",
   "climax_race_locked": "assets/trackblazer/race_locked_climax.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",

@@ -4517,6 +4517,16 @@ _RIVAL_BUTTON_INDICATORS = [
     constants.TRACKBLAZER_RACE_TEMPLATES["rival_race_button_vs"],
 ]
 
+def _trackblazer_climax_bottom_region():
+    region_ltrb = getattr(constants, "SCREEN_BOTTOM_BBOX", None)
+    if not isinstance(region_ltrb, tuple) or len(region_ltrb) != 4:
+        return None
+    left, top, right, bottom = region_ltrb
+    if right <= left or bottom <= top:
+        warning(f"[TB_RACE] Invalid SCREEN_BOTTOM_BBOX for climax detection: {region_ltrb}")
+        return None
+    return region_ltrb
+
 
 def check_climax_locked_race_button():
     """Detect the tiny lock overlay shown on climax training turns."""
@@ -4534,6 +4544,92 @@ def check_climax_locked_race_button():
         info("[TB_RIVAL] Climax lock detected on race button.")
         return True
     return False
+
+
+def check_climax_race_day_banner():
+    """Detect the forced Climax race-day banner shown on Finale Underway."""
+    detection = inspect_climax_race_day_detection(log_result=True)
+    return bool((detection.get("banner") or {}).get("passed_threshold"))
+
+
+def check_climax_race_day_button():
+    """Detect the forced Climax race-entry button shown on Finale Underway."""
+    detection = inspect_climax_race_day_detection(log_result=True)
+    return bool((detection.get("button") or {}).get("passed_threshold"))
+
+
+def climax_race_button_region():
+    """Return the current region used to search for the Climax race button."""
+    return _trackblazer_climax_bottom_region()
+
+
+def inspect_climax_race_day_detection(screenshot=None, log_result=True):
+    """Inspect Trackblazer forced race-day templates on the bottom screen."""
+    region_ltrb = _trackblazer_climax_bottom_region()
+    result = {
+        "detected": False,
+        "region_ltrb": [int(v) for v in region_ltrb] if region_ltrb else None,
+        "banner": None,
+        "button": None,
+    }
+    if not region_ltrb:
+        if log_result:
+            warning("[TB_RACE] Forced race-day detection skipped: invalid bottom region.")
+        return result
+
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+
+    banner_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_day")
+    button_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button")
+    if banner_path:
+        banner_entry = _best_match_entry(
+            banner_path,
+            region_ltrb=region_ltrb,
+            threshold=0.75,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+            screenshot=screenshot,
+        )
+        banner_entry["key"] = "climax_race_day"
+        result["banner"] = banner_entry
+    if button_path:
+        button_entry = _best_match_entry(
+            button_path,
+            region_ltrb=region_ltrb,
+            threshold=0.72,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+            screenshot=screenshot,
+        )
+        button_entry["key"] = "climax_race_button"
+        result["button"] = button_entry
+
+    banner_passed = bool((result.get("banner") or {}).get("passed_threshold"))
+    button_passed = bool((result.get("button") or {}).get("passed_threshold"))
+    result["detected"] = bool(banner_passed or button_passed)
+
+    if log_result:
+        info(
+            "[TB_RACE] Forced race-day detection "
+            f"region={result.get('region_ltrb')} "
+            f"banner_score={(result.get('banner') or {}).get('score')} "
+            f"banner_passed={banner_passed} "
+            f"button_score={(result.get('button') or {}).get('score')} "
+            f"button_passed={button_passed} "
+            f"detected={result['detected']}"
+        )
+        bot.push_debug_history({
+            "event": "trackblazer_forced_race_detection",
+            "asset": "climax_race_day_or_button",
+            "result": "found" if result["detected"] else "not_found",
+            "context": "trackblazer_forced_race_day",
+            "region_ltrb": result.get("region_ltrb"),
+            "banner_score": (result.get("banner") or {}).get("score"),
+            "banner_passed": banner_passed,
+            "button_score": (result.get("button") or {}).get("score"),
+            "button_passed": button_passed,
+        })
+
+    return result
 
 
 def check_rival_race_indicator(state_obj=None):

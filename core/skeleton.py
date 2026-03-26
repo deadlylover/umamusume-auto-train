@@ -1089,7 +1089,26 @@ def _planned_clicks_for_action(action):
     race_name = _action_value(action, "race_name")
     race_grade_target = _action_value(action, "race_grade_target")
     prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
+    is_race_day = bool(_action_value(action, "is_race_day"))
+    is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
+    if is_race_day and is_trackblazer_climax_race_day:
+      clicks = shop_clicks + pre_action_clicks + [
+        _planned_click(
+          "Click forced Climax race button",
+          constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button"),
+          note="Race-day screen replaces the normal training/rest/races buttons.",
+        ),
+        _planned_click(
+          "Confirm race-day prompt",
+          "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note="Advance from the race-day prompt after entering the forced race.",
+        ),
+        _planned_click("Confirm race", "assets/buttons/race_btn.png"),
+        _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
+      ]
+      return clicks
     clicks = shop_clicks + pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
@@ -1271,12 +1290,16 @@ def _build_trackblazer_planned_actions(state_obj, action):
   race_entry_gate = {}
   race_scout_planned = {}
   rival_indicator_detected = state_obj.get("rival_indicator_detected")
-  if rival_indicator_detected is not None:
+  forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day"))
+  if rival_indicator_detected is not None or forced_climax_race_day:
     race_check = {
       "phase": "collecting_race_state",
-      "sub_phase": "check_rival_indicator",
-      "method": "lobby_race_button_indicator",
+      "sub_phase": "check_rival_indicator" if not forced_climax_race_day else "check_forced_race_day",
+      "method": "lobby_race_button_indicator" if not forced_climax_race_day else "climax_race_day_banner_or_button",
       "rival_indicator_detected": bool(rival_indicator_detected),
+      "forced_climax_race_day": forced_climax_race_day,
+      "forced_climax_race_day_banner": bool(state_obj.get("trackblazer_climax_race_day_banner")),
+      "forced_climax_race_day_button": bool(state_obj.get("trackblazer_climax_race_day_button")),
       "scout_required": bool(hasattr(action, "get") and _action_func(action) == "do_race" and action.get("prefer_rival_race")),
     }
   if isinstance(race_decision, dict) and race_decision:
@@ -1288,6 +1311,7 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "is_summer": race_decision.get("is_summer"),
       "g1_forced": race_decision.get("g1_forced"),
       "prefer_rival_race": race_decision.get("prefer_rival_race"),
+      "forced_race_day": race_decision.get("forced_race_day"),
       "race_tier_target": race_decision.get("race_tier_target"),
       "race_name": race_decision.get("race_name"),
       "race_available": race_decision.get("race_available"),
@@ -1568,6 +1592,28 @@ def _is_stable_career_lobby_screen(screenshot=None, threshold=0.8):
   screenshot = screenshot if screenshot is not None else device_action.screenshot()
   stable_anchor_counts = _detect_stable_career_screen_anchors(screenshot, threshold=threshold)
   return _has_stable_career_screen(stable_anchor_counts), stable_anchor_counts
+
+
+def _trackblazer_pre_action_ready_state(screenshot=None):
+  result = {
+    "ready": False,
+    "source": "",
+    "forced_climax_race_day": False,
+    "climax_detection": None,
+  }
+  if (constants.SCENARIO_NAME or "") not in ("mant", "trackblazer"):
+    return result
+
+  from scenarios.trackblazer import inspect_climax_race_day_detection
+
+  screenshot = screenshot if screenshot is not None else device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+  detection = inspect_climax_race_day_detection(screenshot=screenshot, log_result=False)
+  result["climax_detection"] = detection
+  result["forced_climax_race_day"] = bool(detection.get("detected"))
+  if result["forced_climax_race_day"]:
+    result["ready"] = True
+    result["source"] = "forced_climax_race_day"
+  return result
 
 
 def _update_post_action_resolution_snapshot(
@@ -1910,16 +1956,17 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
 
 def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=None, ocr_debug=None, planned_clicks=None):
-  """Brief poll for a lobby bottom-bar button after pre-action item use.
+  """Brief poll for a ready pre-action screen after Trackblazer item use.
 
   If the inventory close was slow or the game lingered on an overlay, the
-  lobby buttons won't be visible yet.  Poll up to *max_wait* seconds.
+  next action target won't be visible yet. Poll up to *max_wait* seconds.
 
-  Each iteration checks lobby anchors first (instant success), then
+  Each iteration checks forced Climax race-day assets first (instant success
+  on forced race day), then lobby anchors, then
   whether the inventory screen is visible (close it and keep polling),
   then falls back to a generic back/close click once.
 
-  Returns True if a lobby anchor was confirmed, False if timed out.
+  Returns True if a ready screen was confirmed, False if timed out.
   """
   import time as _time_mod
   from scenarios.trackblazer import detect_inventory_screen, close_training_items_inventory
@@ -1936,8 +1983,12 @@ def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=No
     polls += 1
     device_action.flush_screenshot_cache()
 
-    # 1. Check lobby anchors — if any match, we're done.
+    # 1. Check forced Climax race-day assets and normal lobby anchors.
     screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    ready_state = _trackblazer_pre_action_ready_state(screenshot=screenshot)
+    if ready_state.get("ready"):
+      info(f"[ITEM_USE] Ready screen confirmed after item use via {ready_state.get('source')} (poll {polls}).")
+      return True
     lobby_found = False
     for tpl in _LOBBY_ANCHOR_TEMPLATES:
       if device_action.match_template(tpl, screenshot, threshold=0.8):
@@ -1983,13 +2034,15 @@ def _wait_for_lobby_after_item_use(state_obj, action, max_wait=8.0, sub_phase=No
 
 
 def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
-  """Brief poll for a lobby bottom-bar button after Trackblazer shop purchases.
+  """Brief poll for a ready pre-action screen after Trackblazer shop interaction.
 
-  After the shop close + inventory refresh, the game overlay may linger.
-  Poll up to *max_wait* seconds, closing any residual shop/inventory overlay
-  on each iteration (capped at 3 close attempts each).
+  After the shop close, the game overlay may linger before the next
+  pre-action screen settles. Poll up to *max_wait* seconds, accepting either
+  the normal lobby anchors or the forced Climax race-day bottom assets, while
+  also closing any residual shop/inventory overlay on each iteration
+  (capped at 3 close attempts each).
 
-  Returns True if a lobby anchor was confirmed, False if timed out.
+  Returns True if a ready screen was confirmed, False if timed out.
   """
   import time as _time_mod
   from scenarios.trackblazer import (
@@ -2010,8 +2063,12 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
     polls += 1
     device_action.flush_screenshot_cache()
 
-    # 1. Check lobby anchors — if any match, we're done.
+    # 1. Check forced Climax race-day assets and normal lobby anchors.
     screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+    ready_state = _trackblazer_pre_action_ready_state(screenshot=screenshot)
+    if ready_state.get("ready"):
+      info(f"[TB_SHOP] Ready screen confirmed after shop via {ready_state.get('source')} (poll {polls}).")
+      return True
     lobby_found = False
     for tpl in _LOBBY_ANCHOR_TEMPLATES:
       if device_action.match_template(tpl, screenshot, threshold=0.8):
@@ -3085,6 +3142,8 @@ def career_lobby(dry_run_turn=False):
           never_scanned
           or (execution_intent == "check_only" and current_trackblazer_turn != last_trackblazer_shop_refresh_turn)
         )
+        shop_flow = {}
+        ready_after_shop_scan = True
         if pending_shop_check or automatic_turn_scan:
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
@@ -3093,6 +3152,33 @@ def career_lobby(dry_run_turn=False):
           _merge_trackblazer_shop_result(state_obj, shop_result)
           shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
           if shop_flow.get("entered") and shop_flow.get("closed"):
+            ready_after_shop_scan = _wait_for_lobby_after_shop_purchase()
+            if not ready_after_shop_scan:
+              warning("[TB_SHOP] Ready screen not confirmed after shop scan; forced-race detection may be stale.")
+          elif pending_shop_check:
+            warning(
+              "[TB_SHOP] Pending shop check was queued but shop scan did not complete; "
+              f"reason={shop_flow.get('reason') or 'unknown'}."
+            )
+        elif execution_intent == "check_only":
+          info(
+            "[TB_SHOP] Skipping automatic shop recheck for this turn; "
+            f"already refreshed inventory after shop for {current_trackblazer_turn}."
+          )
+
+        from scenarios.trackblazer import inspect_climax_race_day_detection
+
+        climax_detection = inspect_climax_race_day_detection(log_result=True)
+        state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected"))
+        state_obj["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
+        state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
+
+        if shop_flow.get("entered") and shop_flow.get("closed"):
+          if state_obj.get("trackblazer_climax_race_day"):
+            info("[TB_RACE] Forced Climax race day visible after shop; skipping post-shop inventory refresh.")
+            last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+            bot.clear_trackblazer_shop_check_request()
+          elif ready_after_shop_scan:
             update_operator_snapshot(
               phase="checking_inventory",
               message="Refreshing Trackblazer inventory after shop.",
@@ -3107,15 +3193,7 @@ def career_lobby(dry_run_turn=False):
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
           elif pending_shop_check:
-            warning(
-              "[TB_SHOP] Pending shop check was queued but shop scan did not complete; "
-              f"reason={shop_flow.get('reason') or 'unknown'}."
-            )
-        elif execution_intent == "check_only":
-          info(
-            "[TB_SHOP] Skipping automatic shop recheck for this turn; "
-            f"already refreshed inventory after shop for {current_trackblazer_turn}."
-          )
+            warning("[TB_SHOP] Skipping post-shop inventory refresh because the ready screen never settled.")
 
         # Detect "Scheduled Race" button on the lobby race button area.
         _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
@@ -3135,31 +3213,48 @@ def career_lobby(dry_run_turn=False):
             "context": "lobby_scan_trackblazer",
           })
 
-      if state_obj["turn"] == "Race Day":
+      if state_obj.get("trackblazer_climax_race_day"):
+        forced_reason = "Forced Climax race-day indicator detected on lobby screen"
+        info("[TB_RACE] Taking early forced-race branch before training scan.")
         action.func = "do_race"
         action["is_race_day"] = True
         action["year"] = state_obj["year"]
-        info(f"Race Day")
+        action["trackblazer_climax_race_day"] = True
+        action["trackblazer_race_decision"] = {
+          "should_race": True,
+          "reason": forced_reason,
+          "forced_race_day": True,
+          "race_available": True,
+          "rival_indicator": False,
+          "prefer_rival_race": False,
+          "g1_forced": True,
+          "race_name": "any",
+        }
+        state_obj["rival_indicator_detected"] = False
         update_pre_action_phase(
           state_obj,
           action,
-          message="Race day detected. Preparing pre-race decision.",
+          message="Forced Climax race day detected. Skipping training scan and preparing race entry.",
         )
-        race_day_result = run_action_with_review(
+        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+        if skill_result in ("failed", "previewed"):
+          continue
+        forced_race_result = run_action_with_review(
           state_obj,
           action,
-          "Race day detected. Review before entering race.",
+          "Forced Climax race day detected. Review before entering race.",
           sub_phase="preview_race_selection",
         )
-        if race_day_result == "executed":
+        if forced_race_result == "executed":
           record_and_finalize_turn(state_obj, action)
           continue
-        elif race_day_result == "previewed":
+        elif forced_race_result == "previewed":
           continue
         else:
           action.func = None
-          del action.options["is_race_day"]
-          del action.options["year"]
+          action.options.pop("is_race_day", None)
+          action.options.pop("year", None)
+          action.options.pop("trackblazer_climax_race_day", None)
 
       if config.PRIORITIZE_MISSIONS_OVER_G1 and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
         debug(f"Mission race logic entered with priority.")
@@ -3437,6 +3532,35 @@ def career_lobby(dry_run_turn=False):
               f"training_total={race_decision.get('training_total_stats')}"
             ),
           )
+
+      if state_obj["turn"] == "Race Day" or state_obj.get("trackblazer_climax_race_day"):
+        forced_reason = (
+          "Forced Climax race-day indicator detected on lobby screen"
+          if state_obj.get("trackblazer_climax_race_day") else
+          "Turn OCR reports Race Day"
+        )
+        action.func = "do_race"
+        action["is_race_day"] = True
+        action["year"] = state_obj["year"]
+        action["trackblazer_climax_race_day"] = bool(state_obj.get("trackblazer_climax_race_day"))
+        action["trackblazer_race_decision"] = {
+          "should_race": True,
+          "reason": forced_reason,
+          "forced_race_day": True,
+          "race_available": True,
+          "rival_indicator": bool(state_obj.get("rival_indicator_detected")),
+          "prefer_rival_race": False,
+          "g1_forced": True,
+          "race_name": "any",
+        }
+        info(f"[TB_RACE] {forced_reason}. Overriding final action to race.")
+        update_operator_snapshot(
+          state_obj, action,
+          phase="evaluating_strategy",
+          message=forced_reason,
+          sub_phase="evaluate_trackblazer_race",
+          reasoning_notes="Forced race day bypasses normal training/rest options at the end of the decision tree.",
+        )
 
       if not trackblazer_pre_debut:
         action = _attach_trackblazer_pre_action_item_plan(state_obj, action)

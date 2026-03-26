@@ -49,6 +49,10 @@ _HAMMER_TIERS = (
   "master_cleat_hammer",
   "artisan_cleat_hammer",
 )
+_HAMMER_TIER_PRIORITY = {
+  item_key: len(_HAMMER_TIERS) - index
+  for index, item_key in enumerate(_HAMMER_TIERS)
+}
 _ENERGY_ITEM_KEYS = (
   "vita_65",
   "vita_40",
@@ -1114,9 +1118,10 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return {
         "defer_reason": "reserved for TSC or no surplus hammers available",
       }
+    tier_bonus = _HAMMER_TIER_PRIORITY.get(item_key, 0) * 25
     reason = "TSC race boost" if context["is_tsc"] else "surplus race hammer outside TSC"
     return {
-      "candidate_score": 200 + priority_score + spendable * 10,
+      "candidate_score": 200 + priority_score + spendable * 10 + tier_bonus,
       "reason": reason,
       "reserved_quantity": reserve_quantity,
       "use_now": True,

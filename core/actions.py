@@ -191,7 +191,20 @@ def do_rest(options=None):
   return True
 
 def race_day(options=None):
-  if options["year"] == "Finale Underway":
+  if options.get("trackblazer_climax_race_day"):
+    from scenarios.trackblazer import climax_race_button_region
+
+    region_ltrb = climax_race_button_region()
+    if not region_ltrb:
+      warning("[TB_RACE] Climax race-day button region is invalid; cannot click forced race button.")
+      return False
+    device_action.locate_and_click(
+      constants.TRACKBLAZER_RACE_TEMPLATES["climax_race_button"],
+      min_search_time=get_secs(10),
+      region_ltrb=region_ltrb,
+      template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+    )
+  elif options["year"] == "Finale Underway":
     device_action.locate_and_click("assets/ura/ura_race_btn.png", min_search_time=get_secs(10), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
   else:
     device_action.locate_and_click("assets/buttons/race_day_btn.png", min_search_time=get_secs(10), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
