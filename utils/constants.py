@@ -294,6 +294,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "climax_race_day": "assets/trackblazer/climax_race_day.png",
   "climax_race_button": "assets/trackblazer/climax_race_button.png",
   "climax_race_locked": "assets/trackblazer/race_locked_climax.png",
+  "climax_race_result": "assets/trackblazer/climax_race_result.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
   "race_g2": "assets/trackblazer/race_g2.png",
   "race_g3": "assets/trackblazer/race_g3.png",
@@ -325,6 +326,14 @@ TRACKBLAZER_LOBBY_SCHEDULED_RACE = "assets/trackblazer/lobby_scheduled_race.png"
 # Twinkle Star Climax when the race button is intentionally disabled.
 TRACKBLAZER_CLIMAX_RACE_LOCK_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (423, 1036, -358, -13))
 TRACKBLAZER_CLIMAX_RACE_LOCK_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_RACE_LOCK_BBOX)
+# Trackblazer climax race result banner captured from the upper game window.
+TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX = (
+  GAME_WINDOW_BBOX[0] + 211,
+  GAME_WINDOW_BBOX[1] + 78,
+  GAME_WINDOW_BBOX[0] + 564,
+  GAME_WINDOW_BBOX[1] + 240,
+)
+TRACKBLAZER_CLIMAX_RACE_RESULT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX)
 
 # Trackblazer item use flow UI templates.
 TRACKBLAZER_ITEM_USE_TEMPLATES = {

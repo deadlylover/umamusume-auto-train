@@ -1031,6 +1031,11 @@ _MEGAPHONE_STRENGTH_ORDER = {
   "motivating_megaphone": 2,
   "coaching_megaphone": 1,
 }
+_RACE_BOOST_KEYS = frozenset(_HAMMER_TIERS)
+_RACE_BOOST_STRENGTH_ORDER = {
+  item_key: len(_HAMMER_TIERS) - index
+  for index, item_key in enumerate(_HAMMER_TIERS)
+}
 
 
 def _apply_megaphone_mutual_exclusion(candidates, deferred, context=None):
@@ -1067,6 +1072,34 @@ def _apply_megaphone_mutual_exclusion(candidates, deferred, context=None):
     entry["reason"] = f"only one megaphone buff active per turn; {kept_name} preferred"
     deferred.append(entry)
   candidates = non_megaphone + [kept]
+  return candidates, deferred
+
+
+def _apply_race_boost_mutual_exclusion(candidates, deferred):
+  """Cleat hammers do not stack. Keep only the strongest planned race boost."""
+  candidates = list(candidates or [])
+  deferred = list(deferred or [])
+  race_boost_candidates = [entry for entry in candidates if entry.get("key") in _RACE_BOOST_KEYS]
+  if len(race_boost_candidates) <= 1:
+    return candidates, deferred
+
+  kept = max(
+    race_boost_candidates,
+    key=lambda entry: (
+      _RACE_BOOST_STRENGTH_ORDER.get(entry.get("key"), 0),
+      _safe_int(entry.get("candidate_score"), 0),
+      _safe_int(entry.get("effective_sort_score"), 0),
+    ),
+  )
+  kept_name = kept.get("name", kept.get("key", "race boost"))
+  non_race_boost = [entry for entry in candidates if entry.get("key") not in _RACE_BOOST_KEYS]
+  for entry in race_boost_candidates:
+    if entry is kept:
+      continue
+    entry.pop("candidate_score", None)
+    entry["reason"] = f"race boosts do not stack; {kept_name} preferred"
+    deferred.append(entry)
+  candidates = non_race_boost + [kept]
   return candidates, deferred
 
 
@@ -1369,6 +1402,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
   candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
   candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
   candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
+  candidates, deferred = _apply_race_boost_mutual_exclusion(candidates, deferred)
 
   if _should_commit_after_energy(context, kept_energy) or _should_commit_after_charm(normalized_policy, context, candidates):
     context = {
@@ -1385,6 +1419,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     candidates, deferred, kept_energy = _apply_energy_candidate_stacking(candidates, deferred, context)
     candidates, deferred = _apply_mood_candidate_selection(candidates, deferred, context)
     candidates, deferred = _apply_megaphone_mutual_exclusion(candidates, deferred, context=context)
+    candidates, deferred = _apply_race_boost_mutual_exclusion(candidates, deferred)
 
   return {
     "context": {

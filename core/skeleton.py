@@ -1808,6 +1808,92 @@ def _handle_trackblazer_scheduled_race_popup(state_obj, action):
   }
 
 
+def _handle_trackblazer_climax_race_result_screen(state_obj, action):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "climax_race_result",
+      "reason": "scenario_inactive",
+      "deferred_work": [],
+    }
+
+  template_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_result")
+  region_ltrb = getattr(constants, "TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX", None)
+  if not template_path or not region_ltrb:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "climax_race_result",
+      "reason": "template_or_region_missing",
+      "deferred_work": [],
+    }
+
+  _inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+  screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+  matches = device_action.match_template(
+    template_path,
+    screenshot,
+    threshold=0.72,
+    template_scaling=_inv_scale,
+  )
+  if not matches:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "climax_race_result",
+      "reason": "result_banner_not_found",
+      "deferred_work": [],
+    }
+
+  info("[TB_POST] Climax race result screen detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "climax_race_result.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+
+  for label, template_path in (
+    ("next", "assets/buttons/next_btn.png"),
+    ("next2", "assets/buttons/next2_btn.png"),
+  ):
+    if device_action.locate_and_click(
+      template_path,
+      min_search_time=get_secs(0.6),
+      region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+      text=f"Clicked {label} on Trackblazer climax race result screen.",
+    ):
+      bot.push_debug_history({
+        "event": "click",
+        "asset": template_path,
+        "result": "clicked",
+        "context": "post_action_resolution",
+      })
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "climax_race_result",
+        "reason": f"{label}_clicked",
+        "deferred_work": [],
+      }
+
+  warning("[TB_POST] Climax race result screen detected but no bottom-region Next button matched.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "next_btn_or_next2_btn",
+    "result": "not_found",
+    "context": "post_action_resolution",
+  })
+  return {
+    "detected": True,
+    "handled": False,
+    "popup_type": "climax_race_result",
+    "reason": "next_button_not_found",
+    "deferred_work": [],
+  }
+
+
 def _generic_post_action_return_to_lobby_step():
   for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
     if label == "cancel":
@@ -1908,6 +1994,22 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
           reasoning_notes=scheduled_race_result.get("reason"),
         )
         if scheduled_race_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+      climax_race_result = _handle_trackblazer_climax_race_result_screen(state_obj, action)
+      if climax_race_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer climax race result screen." if climax_race_result.get("handled") else "Trackblazer climax race result screen detected but Next was not matched.",
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=climax_race_result.get("popup_type"),
+          deferred_work=climax_race_result.get("deferred_work"),
+          reasoning_notes=climax_race_result.get("reason"),
+        )
+        if climax_race_result.get("handled"):
           idle_loops = 0
           sleep(0.8)
           continue
@@ -3230,6 +3332,7 @@ def career_lobby(dry_run_turn=False):
           "g1_forced": True,
           "race_name": "any",
         }
+        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
         state_obj["rival_indicator_detected"] = False
         update_pre_action_phase(
           state_obj,
