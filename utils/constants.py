@@ -304,6 +304,11 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "race_g3": "assets/trackblazer/race_g3.png",
 }
 
+TRACKBLAZER_RESOLUTION_TEMPLATES = {
+  "post_race_watch_concert": "assets/trackblazer/resolution/post_race_watch_concert.png",
+  "post_race_watch_concert_next": "assets/trackblazer/resolution/post_race_watch_concert_next.png",
+}
+
 TRACKBLAZER_SHOP_UI_TEMPLATES = {
   "shop_confirm": "assets/trackblazer/shop_confirm.png",
   "shop_confirm_2": "assets/trackblazer/shop_confirm_2.png",
@@ -338,6 +343,14 @@ TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX = (
   GAME_WINDOW_BBOX[1] + 240,
 )
 TRACKBLAZER_CLIMAX_RACE_RESULT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX)
+
+# Trackblazer post-race resolution buttons shown on the result screen after a
+# successful placement/win. These assets are native-resolution captures and
+# should bypass the global template scale.
+TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (113, 1178, -437, -175))
+TRACKBLAZER_POST_RACE_WATCH_CONCERT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX)
+TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (443, 1176, -128, -173))
+TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX)
 
 # Trackblazer career-complete banner shown on the bottom-right ribbon at the
 # end of a finished run. Use the broader bottom region because live runtime

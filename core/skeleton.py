@@ -2037,6 +2037,101 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
   }
 
 
+def _handle_trackblazer_post_race_watch_concert_screen(state_obj, action):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "post_race_watch_concert",
+      "reason": "scenario_inactive",
+      "deferred_work": [],
+    }
+
+  watch_template = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("post_race_watch_concert")
+  next_template = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("post_race_watch_concert_next")
+  watch_region = getattr(constants, "TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX", None)
+  next_region = getattr(constants, "TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX", None)
+  if not watch_template or not next_template or not watch_region or not next_region:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "post_race_watch_concert",
+      "reason": "template_or_region_missing",
+      "deferred_work": [],
+    }
+
+  inv_scale = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+  watch_screenshot = device_action.screenshot(region_ltrb=watch_region)
+  watch_matches = device_action.match_template(
+    watch_template,
+    watch_screenshot,
+    threshold=0.72,
+    template_scaling=inv_scale,
+  )
+  if not watch_matches:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "post_race_watch_concert",
+      "reason": "watch_concert_not_found",
+      "deferred_work": [],
+    }
+
+  info("[TB_POST] Post-race watch concert screen detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "post_race_watch_concert.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+
+  next_screenshot = device_action.screenshot(region_ltrb=next_region)
+  next_matches = device_action.match_template(
+    next_template,
+    next_screenshot,
+    threshold=0.72,
+    template_scaling=inv_scale,
+  )
+  if not next_matches:
+    warning("[TB_POST] Watch concert screen detected but the paired Next button was not matched.")
+    bot.push_debug_history({
+      "event": "template_match",
+      "asset": "post_race_watch_concert_next.png",
+      "result": "not_found",
+      "context": "post_action_resolution",
+    })
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "post_race_watch_concert",
+      "reason": "paired_next_not_found",
+      "deferred_work": [],
+    }
+
+  x, y, w, h = next_matches[0]
+  click_target = (
+    int(next_region[0] + x + (w // 2)),
+    int(next_region[1] + y + (h // 2)),
+  )
+  device_action.click(
+    target=click_target,
+    text="Clicked post-race watch concert Next button.",
+  )
+  bot.push_debug_history({
+    "event": "click",
+    "asset": "post_race_watch_concert_next.png",
+    "result": "clicked",
+    "context": "post_action_resolution",
+  })
+  return {
+    "detected": True,
+    "handled": True,
+    "popup_type": "post_race_watch_concert",
+    "reason": "paired_next_clicked",
+    "deferred_work": [],
+  }
+
+
 def _click_trackblazer_next_button(context_label, min_search_time=0.6):
   for label, template_path in (
     ("next", "assets/buttons/next_btn.png"),
@@ -2227,6 +2322,18 @@ _POST_ACTION_MAX_WAIT_RACE = 45.0
 _POST_ACTION_MAX_WAIT_DEFAULT = 20.0
 
 
+# Post-action resolution branch order:
+# 1. Stable lobby check
+# 2. Trackblazer career-complete banner
+# 3. Event choice resolution
+# 4. Trackblazer shop refresh popup
+# 5. Trackblazer scheduled race popup
+# 6. Trackblazer climax race result screen
+# 7. Trackblazer post-race watch-concert result screen
+# 8. Trackblazer goal-complete screen
+# 9. Generic bottom-screen recovery clicks
+# 10. Safe-space tap fallback after repeated idle loops
+# 11. Timeout fallback to the generic lobby scan
 def _resolve_post_action_resolution(state_obj, action, max_wait=None):
   import time as _time_mod
 
@@ -2336,6 +2443,22 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
           reasoning_notes=climax_race_result.get("reason"),
         )
         if climax_race_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+      post_race_watch_concert_result = _handle_trackblazer_post_race_watch_concert_screen(state_obj, action)
+      if post_race_watch_concert_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer post-race result screen." if post_race_watch_concert_result.get("handled") else "Trackblazer post-race result screen detected but the paired Next button was not matched.",
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=post_race_watch_concert_result.get("popup_type"),
+          deferred_work=post_race_watch_concert_result.get("deferred_work"),
+          reasoning_notes=post_race_watch_concert_result.get("reason"),
+        )
+        if post_race_watch_concert_result.get("handled"):
           idle_loops = 0
           sleep(0.8)
           continue

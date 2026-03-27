@@ -211,7 +211,6 @@ class OperatorConsole:
       self._root.after(1000, self._enable_geometry_persist)
     elif state == "iconic":
       self._root.deiconify()
-    self._root.lift()
 
   def _build_layout(self):
     root = self._root
@@ -798,7 +797,6 @@ class OperatorConsole:
       while True:
         cmd, payload = self._queue.get_nowait()
         if cmd == "refresh":
-          self._show_window()
           self._render(payload or {})
         elif cmd == "shutdown":
           if self._root is not None:
