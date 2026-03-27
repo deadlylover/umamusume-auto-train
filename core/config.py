@@ -116,6 +116,9 @@ def reload_config(print_config=True):
     load_var('VERBOSE_OCR', debug_config.get("verbose_ocr", False))
     load_var('DEVICE_DEBUG_LOGGING', debug_config.get("device_debug", False))
     load_var('SAVE_DEBUG_IMAGES', debug_config.get("save_debug_images", False))
+    turn_trace_config = debug_config.get("turn_trace", {})
+    load_var('TURN_TRACE_ENABLED', bool(turn_trace_config.get("enabled", False)))
+    load_var('TURN_TRACE_FILENAME', str(turn_trace_config.get("filename", "turn_trace.txt") or "turn_trace.txt"))
 
     trackblazer_config = config.get("trackblazer", {})
     load_var('TRACKBLAZER_CONFIG', trackblazer_config)

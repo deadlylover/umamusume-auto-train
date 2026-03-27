@@ -1,6 +1,9 @@
 # core/bot.py - Global bot state
 # Shared state variables for the bot, accessible across modules
 
+import datetime
+import json
+import os
 import threading
 import time
 
@@ -55,7 +58,7 @@ runtime_error = ""
 runtime_updated_at = 0.0
 latest_snapshot = {}
 debug_history = []          # Ring buffer of recent template match / action events
-DEBUG_HISTORY_MAX = 200
+DEBUG_HISTORY_MAX = 10000
 pending_trackblazer_shop_check = False
 pending_trackblazer_shop_check_reason = ""
 review_waiting = False
@@ -72,6 +75,12 @@ trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive 
 trackblazer_allow_buff_override = False  # allow 60% megaphone to override active 40% buff
 skill_dry_run_enabled = False
 post_action_resolution = default_post_action_resolution_state()
+turn_trace_lock = threading.Lock()
+turn_trace_path = ""
+turn_trace_session_started = False
+turn_trace_current_turn_label = ""
+turn_trace_snapshot_count = 0
+turn_trace_event_count = 0
 
 
 def _coerce_debug_turn_label(value):
@@ -98,11 +107,222 @@ def _extract_debug_context_from_snapshot(snapshot):
   if year or turn:
     context["turn_label"] = " / ".join(part for part in (year, turn) if part)
 
-  action_name = _coerce_debug_turn_label(selected_action.get("action"))
+  action_name = _coerce_debug_turn_label(selected_action.get("func") or selected_action.get("action"))
   if action_name:
     context["action"] = action_name
 
   return context
+
+
+def _turn_trace_settings():
+  try:
+    import core.config as config
+  except Exception:
+    return {
+      "enabled": False,
+      "filename": "turn_trace.txt",
+    }
+  return {
+    "enabled": bool(getattr(config, "TURN_TRACE_ENABLED", False)),
+    "filename": str(getattr(config, "TURN_TRACE_FILENAME", "turn_trace.txt") or "turn_trace.txt"),
+  }
+
+
+def _turn_trace_default_dir():
+  if hotkey == "f1":
+    return os.path.join(os.getcwd(), "logs")
+  return os.path.join(os.getcwd(), "logs", hotkey)
+
+
+def _resolve_turn_trace_path(filename):
+  if os.path.isabs(filename):
+    return filename
+  return os.path.join(_turn_trace_default_dir(), filename)
+
+
+def _trace_ts(ts=None):
+  target = float(ts if ts is not None else time.time())
+  return datetime.datetime.fromtimestamp(target).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f %Z")
+
+
+def _json_text(value):
+  return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True, default=str)
+
+
+def _turn_trace_summary_line(snapshot):
+  summary = snapshot.get("state_summary") or {}
+  selected_action = snapshot.get("selected_action") or {}
+  backend_state = snapshot.get("backend_state") or {}
+  mood = summary.get("current_mood") or "?"
+  energy = summary.get("energy_level")
+  max_energy = summary.get("max_energy")
+  backend = (
+    summary.get("control_backend")
+    or backend_state.get("active_backend")
+    or "?"
+  )
+  action_func = selected_action.get("func") or "?"
+  training_name = selected_action.get("training_name") or ""
+  if training_name and action_func == "do_training":
+    action_label = f"{action_func} ({training_name})"
+  else:
+    action_label = action_func
+  return (
+    f"State: mood={mood} | energy={energy}/{max_energy} | backend={backend}\n"
+    f"Action: {action_label}"
+  )
+
+
+def _format_trace_snapshot(snapshot, sequence, ts):
+  lines = []
+  turn_label = snapshot.get("turn_label") or "unknown turn"
+  selected_action = snapshot.get("selected_action") or {}
+  lines.append(f"[SNAPSHOT {sequence:03d}] {_trace_ts(ts)}")
+  lines.append(f"Turn: {turn_label}")
+  lines.append(f"Scenario: {snapshot.get('scenario_name') or 'unknown'}")
+  lines.append(
+    f"Phase: {selected_action.get('phase') or get_runtime_state().get('phase') or '?'}"
+  )
+  runtime_state = get_runtime_state()
+  lines[-1] = f"Phase: {runtime_state.get('phase') or '?'}"
+  lines.append(f"Sub-phase: {snapshot.get('sub_phase') or runtime_state.get('sub_phase') or '?'}")
+  lines.append(f"Status: {runtime_state.get('status') or '?'}")
+  lines.append(f"Intent: {snapshot.get('execution_intent') or runtime_state.get('execution_intent') or '?'}")
+  message = runtime_state.get("message") or ""
+  error_text = runtime_state.get("error") or ""
+  if message:
+    lines.append(f"Message: {message}")
+  if error_text:
+    lines.append(f"Error: {error_text}")
+  lines.append(_turn_trace_summary_line(snapshot))
+  reasoning = snapshot.get("reasoning_notes") or ""
+  if reasoning:
+    lines.append(f"Reasoning: {reasoning}")
+  available_actions = snapshot.get("available_actions") or []
+  lines.append(
+    "Available Actions: " + (", ".join(str(value) for value in available_actions) if available_actions else "none")
+  )
+  lines.append("")
+  lines.append("State Summary JSON:")
+  lines.append(_json_text(snapshot.get("state_summary") or {}))
+  lines.append("")
+  lines.append("Selected Action JSON:")
+  lines.append(_json_text(selected_action))
+  lines.append("")
+  lines.append("Ranked Trainings JSON:")
+  lines.append(_json_text(snapshot.get("ranked_trainings") or []))
+  lines.append("")
+  lines.append("Planned Actions JSON:")
+  lines.append(_json_text(snapshot.get("planned_actions") or {}))
+  lines.append("")
+  lines.append("Planned Clicks JSON:")
+  lines.append(_json_text(snapshot.get("planned_clicks") or []))
+  lines.append("")
+  lines.append("---")
+  lines.append("")
+  return "\n".join(lines)
+
+
+def _format_trace_event(entry, sequence):
+  ts = entry.get("_ts", time.time())
+  lines = []
+  lines.append(f"[EVENT {sequence:03d}] {_trace_ts(ts)}")
+  lines.append(f"Turn: {entry.get('turn_label') or turn_trace_current_turn_label or 'unknown turn'}")
+  lines.append(f"Phase: {entry.get('phase') or '?'}")
+  lines.append(f"Sub-phase: {entry.get('sub_phase') or '?'}")
+  lines.append(
+    f"Event: {entry.get('event') or '?'} | Asset: {entry.get('asset') or '?'} | "
+    f"Result: {entry.get('result') or '?'} | Context: {entry.get('context') or '?'}"
+  )
+  lines.append("Event Payload JSON:")
+  lines.append(_json_text(entry))
+  lines.append("")
+  lines.append("---")
+  lines.append("")
+  return "\n".join(lines)
+
+
+def _write_turn_trace_text_unlocked(text):
+  if not turn_trace_path:
+    return
+  os.makedirs(os.path.dirname(turn_trace_path), exist_ok=True)
+  with open(turn_trace_path, "a", encoding="utf-8") as handle:
+    handle.write(text)
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _ensure_turn_trace_header_unlocked():
+  global turn_trace_path, turn_trace_session_started
+  settings = _turn_trace_settings()
+  if not settings["enabled"]:
+    return False
+
+  resolved_path = _resolve_turn_trace_path(settings["filename"])
+  if turn_trace_path != resolved_path:
+    turn_trace_path = resolved_path
+    turn_trace_session_started = False
+
+  if not turn_trace_session_started:
+    session_header = [
+      "",
+      "=" * 100,
+      f"TURN TRACE SESSION START | {_trace_ts()}",
+      f"File: {turn_trace_path}",
+      f"Hotkey: {hotkey}",
+      "=" * 100,
+      "",
+    ]
+    _write_turn_trace_text_unlocked("\n".join(session_header))
+    turn_trace_session_started = True
+  return True
+
+
+def _start_turn_trace_section_unlocked(turn_label):
+  global turn_trace_current_turn_label, turn_trace_snapshot_count, turn_trace_event_count
+  normalized = str(turn_label or "").strip()
+  if not normalized or normalized == turn_trace_current_turn_label:
+    return
+  turn_trace_current_turn_label = normalized
+  turn_trace_snapshot_count = 0
+  turn_trace_event_count = 0
+  section_header = [
+    "#" * 100,
+    f"TURN START | {normalized} | {_trace_ts()}",
+    "#" * 100,
+    "",
+  ]
+  _write_turn_trace_text_unlocked("\n".join(section_header))
+
+
+def _append_turn_trace_snapshot(snapshot):
+  global turn_trace_snapshot_count
+  if not isinstance(snapshot, dict):
+    return
+  turn_label = str(snapshot.get("turn_label") or "").strip()
+  with turn_trace_lock:
+    if not _ensure_turn_trace_header_unlocked():
+      return
+    _start_turn_trace_section_unlocked(turn_label)
+    turn_trace_snapshot_count += 1
+    _write_turn_trace_text_unlocked(
+      _format_trace_snapshot(snapshot, turn_trace_snapshot_count, time.time())
+    )
+
+
+def _append_turn_trace_event(entry):
+  global turn_trace_event_count
+  if not isinstance(entry, dict):
+    return
+  turn_label = str(entry.get("turn_label") or "").strip()
+  with turn_trace_lock:
+    if not _ensure_turn_trace_header_unlocked():
+      return
+    _start_turn_trace_section_unlocked(turn_label)
+    turn_trace_event_count += 1
+    _write_turn_trace_text_unlocked(
+      _format_trace_event(entry, turn_trace_event_count)
+    )
 
 
 def set_phase(phase, status="active", message="", error="", sub_phase=None):
@@ -181,6 +401,7 @@ def set_snapshot(snapshot):
   with runtime_lock:
     latest_snapshot = snapshot
     runtime_updated_at = time.time()
+  _append_turn_trace_snapshot(snapshot)
 
 
 def push_debug_history(entry):
@@ -198,6 +419,7 @@ def push_debug_history(entry):
     debug_history.append(payload)
     if len(debug_history) > DEBUG_HISTORY_MAX:
       del debug_history[:len(debug_history) - DEBUG_HISTORY_MAX]
+  _append_turn_trace_event(payload)
 
 
 def get_debug_history():

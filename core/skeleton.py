@@ -4097,8 +4097,6 @@ def career_lobby(dry_run_turn=False):
               "retrying the same turn from lobby before opening training."
             )
             _wait_for_lobby_after_shop_purchase(max_wait=4.0)
-            last_trackblazer_shop_refresh_turn = current_trackblazer_turn
-            bot.clear_trackblazer_shop_check_request()
             update_operator_snapshot(
               state_obj,
               action,

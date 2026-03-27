@@ -1780,6 +1780,10 @@
     "verbose_ocr": false,
     "device_debug": false,
     "save_debug_images": false,
+    "turn_trace": {
+      "enabled": false,
+      "filename": "turn_trace.txt"
+    },
     "region_adjuster": {
       "enabled": false,
       "overrides_path": "data/region_overrides.json",
