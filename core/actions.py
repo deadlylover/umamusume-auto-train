@@ -261,6 +261,19 @@ def enter_race(race_name="any", race_image_path="", options=None):
         info(f"[RIVAL] Clicking rival race aptitude stars at ({abs_x}, {abs_y})")
         device_action.click(target=(abs_x, abs_y), duration=0.15)
         break
+      else:
+        # Rival not visible on this page — skip generic match and scroll.
+        debug(f"[RIVAL] No rival on current page, scrolling to find it...")
+        sleep(0.5)
+        device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS)
+        device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
+        sleep(0.25)
+        screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
+          info(f"[RIVAL] No rival race found in list, falling back to generic match.")
+          options["prefer_rival_race"] = False
+          go_to_racebox_top()
+        continue
 
     if options is not None and "race_mission_available" in options and options["race_mission_available"]:
       mission_icon = device_action.locate("assets/icons/race_mission_icon.png", min_search_time=get_secs(1), region_ltrb=constants.RACE_LIST_BOX_BBOX, template_scaling=0.72)

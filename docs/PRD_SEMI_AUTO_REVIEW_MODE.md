@@ -2,7 +2,16 @@
 
 ## Status
 
-In progress. As of March 21, 2026, the pause/review workflow and operator console are fully usable for day-to-day inspection, including Trackblazer inventory/shop debugging. The remaining work is mostly deeper Trackblazer race-review coverage, richer reasoning/snapshot detail, and persistence/polish.
+**Functionally complete as of March 27, 2026.** The pause/review workflow, operator console, and `check_only` + Continue walkthrough mode are all stable and in daily use for Trackblazer debugging. Active phase is real-game testing and edge-case bug fixes.
+
+Remaining items are polish/nice-to-have only — none block the core review workflow:
+- Richer Trackblazer race-review sub-phases (race candidate scoring, checkpoint/fatigue rationale)
+- Concrete per-item planned-click coordinates for shop-purchase sequences
+- Threshold and scenario-specific score fields in decision snapshots
+- Persist last paused snapshot to JSON / server endpoint
+- Screenshot/debug capture paths attached to snapshot
+- Web schema/types update for `execution_mode` config field
+- README / CLAUDE.md hotkey docs update
 
 ## Current Progress
 

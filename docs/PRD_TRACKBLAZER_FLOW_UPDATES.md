@@ -2,16 +2,19 @@
 
 ## Status
 
-In progress. The repo now has:
+**Functionally complete as of March 27, 2026.** All planned flow boundaries are implemented. Active phase is complete real-game testing and edge-case debugging.
 
-- partial Trackblazer detection scaffolding
-- an operator console with phase/sub-phase support
-- a prose bot flow reference in `docs/BOT_FLOW.md`
-- a gameplay/mechanics brief in `docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md`
-- Trackblazer inventory scan / item-use scaffolding and console timing visibility
-- a first-pass Trackblazer race-vs-training gate in `core/trackblazer_race_logic.py`
+- Full Trackblazer detection, inventory scan/use, shop scan/purchase, `evaluate_trackblazer_race` gate
+- Operator console with phase/sub-phase, OCR debug, timing pane, copy-to-clipboard
+- `check_only` + Continue walkthrough mode as primary debugging workflow
+- Post-action resolver handles shop-refresh and scheduled-race popups
+- Training scoring is stat-based (intentional, simpler)
+- Grade Points OCR intentionally omitted — race warning system is sufficient for scenario progression
+- Consecutive-race limiting via `config.json`; race fatigue not needed as first-class state
+- TSC / Twinkle Star Climax detection is wired with distinct liberal item-spend behavior
+- Live grade detection from schedule is sufficient for current needs
 
-What is still missing is a Trackblazer-specific flow model that the code can follow.
+Remaining open items are in `docs/PRD_TODO.md` (metagame optimisations, post-summer burst tuning, stat pace planner, etc.) and are not blocking functional completeness.
 
 ## Current Progress
 

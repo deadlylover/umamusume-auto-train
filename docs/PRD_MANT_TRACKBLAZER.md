@@ -2,7 +2,20 @@
 
 ## Status
 
-In progress. As of March 21, 2026, the branch now has working Trackblazer detection, operator-console visibility, inventory scan/use plumbing, shop scan/purchase plumbing, policy-driven buy/use planning, and a first-pass Trackblazer race-vs-training gate. The main critical implementation still missing is richer race candidate scoring driven by real scenario state, plus the scenario-state/scoring work that should feed it.
+**Functionally complete as of March 27, 2026.** The bot can run real Trackblazer turns end-to-end in both `check_only` and `execute` modes. Active phase is complete real-game testing and edge-case / hang debugging.
+
+Implemented and confirmed done:
+- Scenario detection, inventory scan/use, shop scan/purchase, policy-driven buy/use planning
+- `evaluate_trackblazer_race` gate wired into skeleton
+- Operator console, timing pane, sub-phases, OCR debug, copy-to-clipboard, check_only+Continue walkthrough
+- Post-action resolver with shop-refresh popup and scheduled-race popup branches
+- Training scoring is stat-based (simpler path, intentional — no scenario gimmick score needed)
+- Grade Points OCR intentionally omitted — race warning system ensures enough racing to pass scenario without it
+- Consecutive-race limiting handled via `config.json` (avoid 3 consecutive races setting)
+- TSC (Twinkle Star Climax) detection is wired; climax-underway phase has liberal item usage handling
+- TSC flow treated as end-of-run, with appropriate item spend behavior
+
+Remaining work is metagame optimisation and live-run bug fixes only — not blocking functional completeness.
 
 ## Current Progress
 
