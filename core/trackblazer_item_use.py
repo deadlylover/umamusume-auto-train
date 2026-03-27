@@ -1,5 +1,6 @@
 from copy import deepcopy
 
+import core.bot as bot
 import utils.constants as constants
 from utils.log import info
 from core.trackblazer_shop import PRIORITY_LEVELS, get_shop_catalog, normalize_priority, policy_context
@@ -77,6 +78,10 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
 _ENERGY_RESCUE_TARGET_RATIO = 0.55
+# Keep this aligned with the Trackblazer optional-race gate: spending energy to
+# "rescue" a training only makes sense if the reassess pass would still keep
+# that training over an optional rival race.
+_RACE_GATE_WEAK_TRAINING_THRESHOLD = 35
 _VITA_ITEM_KEYS = (
   "vita_65",
   "vita_40",
@@ -717,6 +722,23 @@ def _select_energy_restore_combo(copy_entries, required_restore):
   return list(best_combo["combo"]) if best_combo else None
 
 
+def _energy_rescue_survives_race_gate(state_obj, candidate):
+  if not candidate:
+    return False
+  rival_indicator = bool(state_obj.get("rival_indicator_detected"))
+  if not rival_indicator:
+    return True
+  training_total = _safe_int(candidate.get("total_stat_gain"), 0)
+  training_score = _safe_float(candidate.get("score"), 0.0)
+  if training_total >= _RACE_GATE_WEAK_TRAINING_THRESHOLD:
+    return True
+  if bot.get_trackblazer_scoring_mode() == "stat_focused":
+    strong_training_score_threshold = get_training_behavior_strong_training_score_threshold()
+    if training_score >= strong_training_score_threshold:
+      return True
+  return False
+
+
 def _energy_can_rescue_training(state_obj, candidate):
   """Check if held energy items make a strong risky training worth committing
   instead of burning a Reset Whistle.  The candidate must be genuinely strong
@@ -732,6 +754,8 @@ def _energy_can_rescue_training(state_obj, candidate):
     or (candidate["supports"] >= 2 and candidate["matching_stat_gain"] >= 20)
   )
   if not strong:
+    return False
+  if not _energy_rescue_survives_race_gate(state_obj, candidate):
     return False
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
@@ -982,6 +1006,13 @@ def _usage_context(state_obj, action):
       )
     )
   )
+  training_survives_race_gate = _energy_rescue_survives_race_gate(
+    state_obj,
+    {
+      "total_stat_gain": total_stat_gain,
+      "score": score_value,
+    },
+  )
   return {
     "timeline_label": timeline_label,
     "timeline_index": timeline_index,
@@ -1029,6 +1060,7 @@ def _usage_context(state_obj, action):
     "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
     "summer_reroll_target_failure": reroll_signal.get("risky_training_failure"),
     "commit_training_after_items": commit_training_after_items,
+    "training_survives_race_gate": training_survives_race_gate,
     "is_tsc": climax_window,
     "trackblazer_buff_active": bool(state_obj.get("trackblazer_buff_active")),
     "allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
@@ -1662,6 +1694,10 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       }
     if context["action_func"] != "do_training":
       return None
+    if not context.get("training_survives_race_gate", True):
+      return {
+        "defer_reason": "optional race gate would still override this training after energy use",
+      }
     if (
       item_key.startswith("vita_")
       and not context["summer_window"]

@@ -723,6 +723,12 @@ class OperatorConsole:
       reasons = entry.get("reasons") or []
       trigger = entry.get("trigger", "")
       before_phase = entry.get("before_phase", "")
+      before_sub_phase = entry.get("before_sub_phase", "")
+      before_status = entry.get("before_status", "")
+      previous_reason = entry.get("previous_reason", "")
+      changed = entry.get("changed") or []
+      changes = entry.get("changes") or {}
+      target_sub_phase = entry.get("target_sub_phase", "")
       same_turn_retry = entry.get("same_turn_retry")
       if note:
         details.append(str(note))
@@ -734,6 +740,18 @@ class OperatorConsole:
         details.append(f"trigger={trigger}")
       if before_phase:
         details.append(f"before={before_phase}")
+      if before_sub_phase and before_sub_phase != before_phase:
+        details.append(f"before_sub={before_sub_phase}")
+      if before_status:
+        details.append(f"before_status={before_status}")
+      if previous_reason:
+        details.append(f"previous_reason={previous_reason}")
+      if changed:
+        details.append(f"changed={','.join(str(value) for value in changed)}")
+      if changes:
+        details.append(f"changes={','.join(str(key) for key in changes.keys())}")
+      if target_sub_phase:
+        details.append(f"target_sub={target_sub_phase}")
       if same_turn_retry is not None:
         details.append(f"same_turn_retry={bool(same_turn_retry)}")
       if backend:

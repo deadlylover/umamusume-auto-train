@@ -108,6 +108,12 @@ def _extract_debug_context_from_snapshot(snapshot):
 def set_phase(phase, status="active", message="", error="", sub_phase=None):
   global runtime_phase, runtime_sub_phase, runtime_phase_status, runtime_phase_message, runtime_error, runtime_updated_at
   with runtime_lock:
+    before_phase = runtime_phase
+    before_sub_phase = runtime_sub_phase
+    before_status = runtime_phase_status
+    before_message = runtime_phase_message
+    before_error = runtime_error
+
     runtime_phase = phase
     if sub_phase is not None:
       runtime_sub_phase = str(sub_phase or SUB_PHASE_IDLE)
@@ -115,6 +121,34 @@ def set_phase(phase, status="active", message="", error="", sub_phase=None):
     runtime_phase_message = message
     runtime_error = error
     runtime_updated_at = time.time()
+
+    changed = []
+    if runtime_phase != before_phase:
+      changed.append("phase")
+    if runtime_sub_phase != before_sub_phase:
+      changed.append("sub_phase")
+    if runtime_phase_status != before_status:
+      changed.append("status")
+    if runtime_phase_message != before_message:
+      changed.append("message")
+    if runtime_error != before_error:
+      changed.append("error")
+
+    if changed:
+      push_debug_history({
+        "event": "phase_transition",
+        "asset": runtime_phase,
+        "result": runtime_phase_status,
+        "context": "runtime_flow",
+        "note": runtime_phase_message or runtime_error or ",".join(changed),
+        "changed": changed,
+        "before_phase": before_phase,
+        "before_sub_phase": before_sub_phase,
+        "before_status": before_status,
+        "before_message": before_message,
+        "before_error": before_error,
+        "error": runtime_error,
+      })
 
 
 def get_runtime_state():
@@ -180,17 +214,38 @@ def clear_debug_history():
 def request_trackblazer_shop_check(reason=""):
   global pending_trackblazer_shop_check, pending_trackblazer_shop_check_reason, runtime_updated_at
   with runtime_lock:
+    was_pending = pending_trackblazer_shop_check
+    previous_reason = pending_trackblazer_shop_check_reason
     pending_trackblazer_shop_check = True
     pending_trackblazer_shop_check_reason = str(reason or "")
     runtime_updated_at = time.time()
+    if not was_pending or pending_trackblazer_shop_check_reason != previous_reason:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "pending_trackblazer_shop_check",
+        "result": "set",
+        "context": "runtime_flow",
+        "reason": pending_trackblazer_shop_check_reason,
+        "previous_reason": previous_reason,
+      })
 
 
 def clear_trackblazer_shop_check_request():
   global pending_trackblazer_shop_check, pending_trackblazer_shop_check_reason, runtime_updated_at
   with runtime_lock:
+    was_pending = pending_trackblazer_shop_check
+    previous_reason = pending_trackblazer_shop_check_reason
     pending_trackblazer_shop_check = False
     pending_trackblazer_shop_check_reason = ""
     runtime_updated_at = time.time()
+    if was_pending or previous_reason:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "pending_trackblazer_shop_check",
+        "result": "cleared",
+        "context": "runtime_flow",
+        "reason": previous_reason,
+      })
 
 
 def has_pending_trackblazer_shop_check():
@@ -206,14 +261,32 @@ def get_pending_trackblazer_shop_check_reason():
 def begin_review_wait():
   global review_waiting
   with runtime_lock:
+    was_waiting = review_waiting
     review_waiting = True
+    if not was_waiting:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "review_wait",
+        "result": "begin",
+        "context": "runtime_flow",
+        "note": "Waiting for operator confirmation or continue.",
+      })
   review_event.clear()
 
 
 def end_review_wait():
   global review_waiting
   with runtime_lock:
+    was_waiting = review_waiting
     review_waiting = False
+    if was_waiting:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "review_wait",
+        "result": "end",
+        "context": "runtime_flow",
+        "note": "Review wait released.",
+      })
   review_event.set()
 
 
@@ -250,8 +323,17 @@ def set_execution_intent(intent):
     intent = "check_only"
   normalized = intent if intent in ("check_only", "execute") else "execute"
   with runtime_lock:
+    previous_intent = execution_intent
     execution_intent = normalized
     runtime_updated_at = time.time()
+    if execution_intent != previous_intent:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "execution_intent",
+        "result": execution_intent,
+        "context": "runtime_flow",
+        "note": f"previous={previous_intent}",
+      })
 
 
 def get_execution_intent():
@@ -262,8 +344,16 @@ def get_execution_intent():
 def set_manual_control_active(active):
   global manual_control_active, runtime_updated_at
   with runtime_lock:
+    previous = manual_control_active
     manual_control_active = bool(active)
     runtime_updated_at = time.time()
+    if manual_control_active != previous:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "manual_control_active",
+        "result": "enabled" if manual_control_active else "disabled",
+        "context": "runtime_flow",
+      })
 
 
 def is_manual_control_active():
@@ -362,6 +452,14 @@ def begin_post_action_resolution(source_action="", reason="", sub_phase=SUB_PHAS
       "outcome": "",
     })
     runtime_updated_at = time.time()
+    push_debug_history({
+      "event": "post_action_resolution",
+      "asset": source_action or "unknown_action",
+      "result": "begin",
+      "context": "runtime_flow",
+      "reason": str(reason or ""),
+      "target_sub_phase": str(sub_phase or SUB_PHASE_IDLE),
+    })
 
 
 def update_post_action_resolution(**changes):
@@ -369,12 +467,28 @@ def update_post_action_resolution(**changes):
   with runtime_lock:
     if not isinstance(post_action_resolution, dict):
       post_action_resolution = default_post_action_resolution_state()
+    changed = {}
     for key, value in (changes or {}).items():
       if key == "deferred_work" and value is not None:
-        post_action_resolution[key] = list(value)
+        new_value = list(value)
       elif value is not None:
-        post_action_resolution[key] = value
+        new_value = value
+      else:
+        continue
+      previous = post_action_resolution.get(key)
+      if previous != new_value:
+        changed[key] = {"before": previous, "after": new_value}
+        post_action_resolution[key] = new_value
     runtime_updated_at = time.time()
+    if changed:
+      push_debug_history({
+        "event": "post_action_resolution",
+        "asset": post_action_resolution.get("source_action") or "unknown_action",
+        "result": str(post_action_resolution.get("status") or "updated"),
+        "context": "runtime_flow",
+        "changes": changed,
+        "note": ",".join(changed.keys()),
+      })
 
 
 def end_post_action_resolution(outcome="", status="completed"):
@@ -384,8 +498,17 @@ def end_post_action_resolution(outcome="", status="completed"):
 def clear_post_action_resolution():
   global post_action_resolution, runtime_updated_at
   with runtime_lock:
+    had_state = dict(post_action_resolution or {})
     post_action_resolution = default_post_action_resolution_state()
     runtime_updated_at = time.time()
+    if had_state.get("active") or had_state.get("source_action") or had_state.get("reason") or had_state.get("outcome"):
+      push_debug_history({
+        "event": "post_action_resolution",
+        "asset": had_state.get("source_action") or "unknown_action",
+        "result": "cleared",
+        "context": "runtime_flow",
+        "note": had_state.get("outcome") or had_state.get("reason") or "",
+      })
 
 
 def get_post_action_resolution_state():
