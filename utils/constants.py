@@ -91,6 +91,9 @@ UNITY_TURN_REGION = convert_xyxy_to_xywh(UNITY_TURN_BBOX)
 
 MANT_TURN_BBOX = TURN_BBOX
 MANT_TURN_REGION = TURN_REGION
+TURN_1_LEFT_TEMPLATE = "assets/custom/turn_1_left.png"
+TURN_1_LEFT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (14, 107, -614, -1188))
+TURN_1_LEFT_REGION = convert_xyxy_to_xywh(TURN_1_LEFT_BBOX)
 
 UNITY_RACE_TURNS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (120, 114, -640, -947))
 UNITY_RACE_TURNS_REGION = convert_xyxy_to_xywh(UNITY_RACE_TURNS_BBOX)
@@ -199,6 +202,10 @@ MANT_SHOP_CONTROLS_REGION = convert_xyxy_to_xywh(MANT_SHOP_CONTROLS_BBOX)
 # Placeholder offsets; tune with the region adjuster once the screen is accessible.
 MANT_INVENTORY_ITEMS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (50, 250, -50, -200))
 MANT_INVENTORY_ITEMS_REGION = convert_xyxy_to_xywh(MANT_INVENTORY_ITEMS_BBOX)
+# Trackblazer inventory list swipe area. Keep drags inside the item list so
+# ADB scrolls advance the rows without grabbing footer controls.
+MANT_INVENTORY_SCROLLSWIPE_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (610, 360, -70, -280))
+MANT_INVENTORY_SCROLLSWIPE_REGION = convert_xyxy_to_xywh(MANT_INVENTORY_SCROLLSWIPE_BBOX)
 # Trackblazer inventory scrollbar — narrow strip on the right of the item list.
 # Placeholder offsets; tune with the region adjuster once the screen is accessible.
 MANT_INVENTORY_SCROLLBAR_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (705, 280, -18, -250))
@@ -231,6 +238,7 @@ TRACKBLAZER_ITEM_TEMPLATES = {
   "power_scroll": "assets/trackblazer/items/power_scroll.png",
   "practice_drills_dvd": "assets/trackblazer/items/practice_drills_dvd.png",
   "reporters_binoculars": "assets/trackblazer/items/reporters_binoculars.png",
+  "rich_hand_cream": "assets/trackblazer/items/rich_hand_cream.png",
   "reset_whistle": "assets/trackblazer/items/reset_whistle.png",
   "royal_kale_juice": "assets/trackblazer/items/royal_kale_juice.png",
   "speed_ankle_weights": "assets/trackblazer/items/speed_ankle_weights.png",
@@ -300,6 +308,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
   "goal_complete": "assets/trackblazer/goal_complete.png",
   "complete_career": "assets/trackblazer/complete_career.png",
   "race_warning_consecutive": "assets/trackblazer/race_warning_consecutive.png",
+  "race_warning_consecutive_ok": "assets/trackblazer/consecutive_race_warning_OK.png",
   "race_g2": "assets/trackblazer/race_g2.png",
   "race_g3": "assets/trackblazer/race_g3.png",
 }
@@ -611,10 +620,34 @@ def update_shop_scroll_positions():
   MANT_SHOP_SCROLL_TOP_MOUSE_POS = (x, top_y)
   MANT_SHOP_SCROLL_BOTTOM_MOUSE_POS = (x, bottom_y)
 
+def update_inventory_scroll_positions():
+  """Derive Trackblazer inventory swipe points from the adjustable swipe bbox."""
+  global MANT_INVENTORY_SCROLL_BOTTOM_MOUSE_POS, MANT_INVENTORY_SCROLL_TOP_MOUSE_POS
+  x1, y1, x2, y2 = MANT_INVENTORY_SCROLLSWIPE_BBOX
+  width = max(1, x2 - x1)
+  height = max(1, y2 - y1)
+  # Favor the left side of the list where the drag is less likely to land on
+  # the scrollbar, quantity OCR area, or nearby close/confirm controls.
+  x = x1 + int(width * 0.22)
+  top_y = y1 + int(height * 0.22)
+  bottom_y = y1 + int(height * 0.82)
+  min_y = y1 + 1
+  max_y = y2 - 1
+  top_y = max(min_y, min(max_y, top_y))
+  bottom_y = max(min_y, min(max_y, bottom_y))
+  if bottom_y <= top_y:
+    top_y = max(min_y, min(max_y, y1 + 1))
+    bottom_y = max(min_y, min(max_y, y2 - 1))
+    if bottom_y <= top_y:
+      bottom_y = min(max_y, top_y + 1)
+  MANT_INVENTORY_SCROLL_TOP_MOUSE_POS = (x, top_y)
+  MANT_INVENTORY_SCROLL_BOTTOM_MOUSE_POS = (x, bottom_y)
+
 def update_action_positions():
   update_training_button_positions()
   update_race_scroll_positions()
   update_shop_scroll_positions()
+  update_inventory_scroll_positions()
 
 update_action_positions()
 
@@ -754,6 +787,8 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_SHOP_CONTROLS_REGION",
   "MANT_INVENTORY_ITEMS_BBOX",
   "MANT_INVENTORY_ITEMS_REGION",
+  "MANT_INVENTORY_SCROLLSWIPE_BBOX",
+  "MANT_INVENTORY_SCROLLSWIPE_REGION",
   "MANT_INVENTORY_SCROLLBAR_BBOX",
   "MANT_INVENTORY_SCROLLBAR_REGION",
   "SKILL_SCROLLBAR_BBOX",

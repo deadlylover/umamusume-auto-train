@@ -72,6 +72,7 @@ templates = {
 }
 
 cached_templates = cache_templates(templates)
+RUNTIME_DEBUG_IMAGE_CAPTURE_ENABLED = False  # Re-enable this if you need review/debug crops written under logs/runtime_debug again.
 
 unity_templates = {
   "close_btn": "assets/buttons/close_btn.png",
@@ -613,6 +614,39 @@ last_state = CleanDefaultDict()
 scenario_detection_attempts = 0
 
 
+def _is_usable_turn_value(value):
+  if value in ("", None, -1):
+    return False
+  return bool(str(value).strip())
+
+
+def _restore_turn_from_last_state(state_obj):
+  global last_state
+  if not isinstance(state_obj, dict) or _is_usable_turn_value(state_obj.get("turn")):
+    return False
+
+  previous_year = last_state.get("year") if hasattr(last_state, "get") else None
+  previous_turn = last_state.get("turn") if hasattr(last_state, "get") else None
+  if not _is_usable_turn_value(previous_turn):
+    return False
+
+  current_year = state_obj.get("year")
+  if current_year and previous_year and current_year != previous_year:
+    return False
+
+  state_obj["turn"] = previous_turn
+  state_obj["turn_fallback"] = {
+    "source": "last_state",
+    "year": current_year or previous_year,
+    "turn": previous_turn,
+  }
+  warning(
+    f"[STATE] Turn OCR failed during main-state collection; reusing last remembered turn {previous_turn}"
+    f" for year {current_year or previous_year}."
+  )
+  return True
+
+
 def _truncate(value, limit=180):
   text = str(value)
   if len(text) <= limit:
@@ -802,6 +836,10 @@ def _profile_debug_entry():
 
 def _save_runtime_debug_image(image, stem):
   global runtime_debug_counter
+  if image is None or getattr(image, "size", 0) == 0:
+    return ""
+  if not RUNTIME_DEBUG_IMAGE_CAPTURE_ENABLED:
+    return ""
   runtime_debug_dir = Path("logs/runtime_debug")
   runtime_debug_dir.mkdir(parents=True, exist_ok=True)
   safe_stem = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in stem)
@@ -1226,6 +1264,7 @@ def _planned_clicks_for_action(action):
     prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
     is_race_day = bool(_action_value(action, "is_race_day"))
     is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
+    scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
     if is_race_day and is_trackblazer_climax_race_day:
       clicks = shop_clicks + pre_action_clicks + [
@@ -1251,21 +1290,38 @@ def _planned_clicks_for_action(action):
         constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
         region_key="GAME_WINDOW_BBOX",
         note=(
+          "If this warning appears after clicking Races, continue with OK for scheduled races; "
+          "otherwise follow the race gate before opening the race list."
+          if scheduled_race else
           "If this warning appears after clicking Races, decide whether to continue with OK "
           "or back out with Cancel before opening the race list."
         ),
       ),
       _planned_click(
         "Continue through warning (OK)",
+        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note=(
+          "Scheduled race override: click the warning dialog OK and continue into the race list."
+          if scheduled_race else
+          "Use the warning-dialog OK when the race gate accepts a third consecutive race."
+        ),
+      ),
+      _planned_click(
+        "Fallback warning OK",
         "assets/buttons/ok_btn.png",
         region_key="GAME_WINDOW_BBOX",
-        note="Use this when the race gate accepts a third consecutive race.",
+        note="Generic fallback if the warning-specific OK template is not matched.",
       ),
       _planned_click(
         "Back out from warning (Cancel)",
         "assets/buttons/cancel_btn.png",
         region_key="GAME_WINDOW_BBOX",
-        note="Use this when the race gate rejects a third consecutive race and returns to lobby.",
+        note=(
+          "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
+          if scheduled_race else
+          "Use this when the race gate rejects a third consecutive race and returns to lobby."
+        ),
       ),
       _planned_click(
         "Scan/select race entry",
@@ -1426,15 +1482,33 @@ def _build_trackblazer_planned_actions(state_obj, action):
   race_scout_planned = {}
   rival_indicator_detected = state_obj.get("rival_indicator_detected")
   forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day"))
-  if rival_indicator_detected is not None or forced_climax_race_day:
+  scheduled_race = bool(hasattr(action, "get") and (action.get("scheduled_race") or action.get("trackblazer_lobby_scheduled_race")))
+  lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race") or (hasattr(action, "get") and action.get("trackblazer_lobby_scheduled_race")))
+  scheduled_race_source = None
+  if lobby_scheduled_race:
+    scheduled_race_source = "lobby_button"
+  elif scheduled_race:
+    scheduled_race_source = "config_schedule"
+  if rival_indicator_detected is not None or forced_climax_race_day or scheduled_race:
     race_check = {
       "phase": "collecting_race_state",
-      "sub_phase": "check_rival_indicator" if not forced_climax_race_day else "check_forced_race_day",
-      "method": "lobby_race_button_indicator" if not forced_climax_race_day else "climax_race_day_banner_or_button",
+      "sub_phase": (
+        "check_scheduled_race"
+        if scheduled_race else
+        ("check_rival_indicator" if not forced_climax_race_day else "check_forced_race_day")
+      ),
+      "method": (
+        "scheduled_race_signal"
+        if scheduled_race else
+        ("lobby_race_button_indicator" if not forced_climax_race_day else "climax_race_day_banner_or_button")
+      ),
       "rival_indicator_detected": bool(rival_indicator_detected),
       "forced_climax_race_day": forced_climax_race_day,
       "forced_climax_race_day_banner": bool(state_obj.get("trackblazer_climax_race_day_banner")),
       "forced_climax_race_day_button": bool(state_obj.get("trackblazer_climax_race_day_button")),
+      "scheduled_race": scheduled_race,
+      "scheduled_race_source": scheduled_race_source,
+      "lobby_scheduled_race_detected": lobby_scheduled_race,
       "scout_required": bool(hasattr(action, "get") and _action_func(action) == "do_race" and action.get("prefer_rival_race")),
     }
   if isinstance(race_decision, dict) and race_decision:
@@ -1455,24 +1529,40 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "available_grades": race_info.get("available_grades"),
       "best_grade": race_info.get("best_grade"),
       "race_count": race_info.get("race_count"),
+      "scheduled_race": scheduled_race,
+      "scheduled_race_source": scheduled_race_source,
     }
-    if _action_func(action) == "do_race" or race_decision.get("should_race"):
-      # Decide expected consecutive-race warning behavior.
-      # The race gate already filters weak signals, so should_race=True means
-      # the signal was strong enough to justify racing. G1 or should_race both
-      # continue; otherwise back out to the lobby.
-      if race_decision.get("g1_forced") or race_decision.get("should_race"):
-        expected_branch = "continue_to_race_list"
-      else:
-        expected_branch = "return_to_lobby"
-      race_entry_gate = {
-        "opens_from_lobby": True,
-        "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
-        "warning_meaning": "This race would become the third consecutive race",
-        "ok_action": "continue_to_race_list",
-        "cancel_action": "return_to_lobby",
-        "expected_branch": expected_branch,
-      }
+  if scheduled_race:
+    race_entry_gate = {
+      "opens_from_lobby": True,
+      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+      "warning_meaning": "This scheduled race would become the third consecutive race",
+      "ok_action": "continue_to_race_list",
+      "cancel_action": "return_to_lobby",
+      "expected_branch": "continue_to_race_list",
+      "scheduled_race": True,
+      "scheduled_race_source": scheduled_race_source,
+      "force_accept_warning": True,
+    }
+  elif isinstance(race_decision, dict) and race_decision and (_action_func(action) == "do_race" or race_decision.get("should_race")):
+    # Decide expected consecutive-race warning behavior.
+    # The race gate already filters weak signals, so should_race=True means
+    # the signal was strong enough to justify racing. G1 or should_race both
+    # continue; otherwise back out to the lobby.
+    if race_decision.get("g1_forced") or race_decision.get("should_race"):
+      expected_branch = "continue_to_race_list"
+    else:
+      expected_branch = "return_to_lobby"
+    race_entry_gate = {
+      "opens_from_lobby": True,
+      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+      "warning_meaning": "This race would become the third consecutive race",
+      "ok_action": "continue_to_race_list",
+      "cancel_action": "return_to_lobby",
+      "expected_branch": expected_branch,
+    }
   if isinstance(rival_scout, dict) and rival_scout:
     race_scout_planned = {
       "phase": "scouting_rival_race",
@@ -1664,6 +1754,22 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   planned_items = _trackblazer_pre_action_items(action)
   if not planned_items:
     return {"status": "skipped"}
+
+  # Re-scan inventory immediately before item use so execute/dry-run flows do
+  # not rely on a stale per-turn cache when choosing accompanying items.
+  state_obj = collect_trackblazer_inventory(
+    state_obj,
+    allow_open_non_execute=True,
+    trigger="pre_action_refresh",
+  )
+  _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  _attach_trackblazer_pre_action_item_plan(state_obj, action)
+  planned_items = _trackblazer_pre_action_items(action)
+  if not planned_items:
+    return {
+      "status": "skipped",
+      "reason": "trackblazer_pre_action_items_cleared_after_refresh",
+    }
 
   from scenarios.trackblazer import execute_training_items
 
@@ -1869,25 +1975,21 @@ def _handle_trackblazer_scheduled_race_popup(state_obj, action):
       popup_type="scheduled_race_popup",
     )
     if config.CANCEL_CONSECUTIVE_RACE:
-      device_action.locate_and_click(
-        "assets/buttons/cancel_btn.png",
+      info("[TB_POST] Consecutive-race warning overridden for scheduled race popup; continuing with OK.")
+    warning_ok_template = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok")
+    warning_ok_clicked = False
+    if warning_ok_template:
+      warning_ok_clicked = device_action.locate_and_click(
+        warning_ok_template,
         min_search_time=get_secs(1),
         region_ltrb=constants.GAME_WINDOW_BBOX,
-        text="Cancelled scheduled race because consecutive-race warning was shown.",
+        text="Accepted consecutive-race warning via warning-specific OK during scheduled race popup flow.",
       )
-      info("[TB_POST] Consecutive-race warning dismissed via Cancel during scheduled race popup flow.")
-      return {
-        "detected": True,
-        "handled": True,
-        "popup_type": "scheduled_race_popup",
-        "reason": "canceled_due_to_consecutive_race_warning",
-        "deferred_work": [],
-      }
-    if not device_action.locate_and_click(
+    if not warning_ok_clicked and not device_action.locate_and_click(
       "assets/buttons/ok_btn.png",
       min_search_time=get_secs(1),
       region_ltrb=constants.GAME_WINDOW_BBOX,
-      text="Accepted consecutive-race warning during scheduled race popup flow.",
+      text="Accepted consecutive-race warning via fallback OK during scheduled race popup flow.",
     ):
       warning("[TB_POST] Consecutive-race warning detected but OK button was not found.")
       return {
@@ -3262,6 +3364,15 @@ def review_action_before_execution(state_obj, action, message="Review action bef
     planned_clicks=planned_clicks,
   )
   if not should_wait:
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message="Executing approved action.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
     return True
   ensure_operator_console()
   bot.begin_review_wait()
@@ -3419,6 +3530,15 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   # completes before we open the race list.
   if pre_run_hook is not None:
     pre_run_hook()
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=f"Executing {action.func}.",
+    sub_phase="action_run",
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
   result = action.run()
   if not result:
     update_operator_snapshot(
@@ -3785,6 +3905,7 @@ def career_lobby(dry_run_turn=False):
       action = Action()
       update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
       state_obj = collect_main_state()
+      _restore_turn_from_last_state(state_obj)
 
       state_validation = strategy.validate_state_details(state_obj)
       if not state_validation.get("valid"):

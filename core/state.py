@@ -28,6 +28,7 @@ from statistics import median
 aptitudes_cache = {}
 _last_turn = None  # Best-effort fallback when OCR intermittently fails.
 _runtime_ocr_debug = {}
+_RUNTIME_DEBUG_IMAGE_CAPTURE_ENABLED = False  # Re-enable this if you need OCR/search crops written under logs/runtime_debug again.
 _TRACKBLAZER_CLIMAX_YEAR_ALIASES = (
   "Finale Underway",
   "TS Climax Races Underway",
@@ -50,6 +51,8 @@ APTITUDE_BOX_RATIOS = {
 
 def _save_training_scan_debug_image(image, training_name, label):
   if image is None or getattr(image, "size", 0) == 0:
+    return ""
+  if not _RUNTIME_DEBUG_IMAGE_CAPTURE_ENABLED:
     return ""
   runtime_debug_dir = Path("logs/runtime_debug")
   runtime_debug_dir.mkdir(parents=True, exist_ok=True)
@@ -560,6 +563,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     "reason": "",
     "open_result": None,
     "close_result": None,
+    "action_log": [],
   }
 
   t_flow_start = time.time()
@@ -594,6 +598,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     open_result = open_training_items_inventory(skip_precheck=True)
     flow["timing_open"] = round(time.time() - t0, 3)
     flow["open_result"] = open_result
+    flow["action_log"].extend(list(open_result.get("action_log") or []))
     flow["opened"] = bool(open_result.get("opened"))
     flow["already_open"] = bool(open_result.get("already_open"))
     if not flow["opened"]:
@@ -606,6 +611,19 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     inventory = scan_training_items_inventory()
     flow["timing_scan"] = round(time.time() - t0, 3)
     flow["scan_timing"] = inventory.pop("_timing", None)
+    scan_scroll = (flow.get("scan_timing") or {}).get("scroll") or {}
+    for key in ("reset_swipe", "forward_swipe", "fallback_swipe", "recovery_swipe"):
+      action = scan_scroll.get(key)
+      if action and action.get("start") and action.get("end"):
+        flow["action_log"].append({
+          "step": key,
+          "type": action.get("type") or "swipe",
+          "start": action.get("start"),
+          "end": action.get("end"),
+          "performed": bool(action.get("swiped")),
+          "why": action.get("why") or "",
+          "source": "scan_training_items_inventory",
+        })
     t0 = time.time()
     controls = detect_inventory_controls()
     flow["timing_controls"] = round(time.time() - t0, 3)
@@ -619,6 +637,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
       close_result = close_training_items_inventory()
       flow["timing_close"] = round(time.time() - t0, 3)
       flow["close_result"] = close_result
+      flow["action_log"].extend(list(close_result.get("action_log") or []))
       flow["closed"] = bool(close_result.get("closed"))
       if not flow["closed"]:
         warning("[STATE] Inventory scan completed but close-backout failed.")
@@ -1296,6 +1315,19 @@ def get_turn():
   if digits_only:
     _last_turn = int(digits_only)
     return _last_turn
+
+  if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    turn_1_match = device_action.locate(
+      constants.TURN_1_LEFT_TEMPLATE,
+      confidence=0.82,
+      region_ltrb=constants.SCREEN_TOP_BBOX,
+      text="Checking turn 1 template fallback after OCR miss.",
+      template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+    )
+    if turn_1_match:
+      warning("[STATE] Turn OCR returned no digits; matched turn 1 template fallback.")
+      _last_turn = 1
+      return _last_turn
 
   if _last_turn is not None:
     warning(f"[STATE] Turn OCR failed; using last known turn {_last_turn}.")

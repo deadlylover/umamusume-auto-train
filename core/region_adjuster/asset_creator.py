@@ -13,6 +13,29 @@ import pyautogui
 from PIL import Image, ImageDraw, ImageTk
 
 
+def capture_screen_image(capture_bbox=None) -> Image.Image:
+  if platform.system() == "Darwin":
+    with mss.mss() as sct:
+      if capture_bbox is not None:
+        left, top, right, bottom = [int(v) for v in capture_bbox]
+        monitor = {
+          "left": left,
+          "top": top,
+          "width": max(1, right - left),
+          "height": max(1, bottom - top),
+        }
+      else:
+        monitor = dict(sct.monitors[0])
+      raw = np.array(sct.grab(monitor))
+      return Image.fromarray(cv2.cvtColor(raw, cv2.COLOR_BGRA2RGBA), mode="RGBA")
+
+  screenshot = pyautogui.screenshot()
+  if capture_bbox is not None:
+    left, top, right, bottom = [int(v) for v in capture_bbox]
+    screenshot = screenshot.crop((left, top, right, bottom))
+  return screenshot.convert("RGBA")
+
+
 class AssetCreatorWindow:
   """Standalone window for creating template assets from screenshot selections."""
 
@@ -191,25 +214,7 @@ class AssetCreatorWindow:
 
   def _capture_screenshot(self):
     try:
-      if platform.system() == "Darwin":
-        with mss.mss() as sct:
-          if self._capture_bbox is not None:
-            left, top, right, bottom = [int(v) for v in self._capture_bbox]
-            monitor = {
-              "left": left,
-              "top": top,
-              "width": max(1, right - left),
-              "height": max(1, bottom - top),
-            }
-          else:
-            monitor = dict(sct.monitors[0])
-          raw = np.array(sct.grab(monitor))
-          screenshot = Image.fromarray(cv2.cvtColor(raw, cv2.COLOR_BGRA2RGBA), mode="RGBA")
-      else:
-        screenshot = pyautogui.screenshot()
-        if self._capture_bbox is not None:
-          left, top, right, bottom = [int(v) for v in self._capture_bbox]
-          screenshot = screenshot.crop((left, top, right, bottom))
+      screenshot = capture_screen_image(self._capture_bbox)
     except Exception as exc:
       messagebox.showerror("Screenshot Failed", f"Unable to capture: {exc}")
       return
@@ -281,7 +286,33 @@ class AssetCreatorWindow:
     preview.thumbnail((260, 200), Image.LANCZOS)
     self._selection_photo = ImageTk.PhotoImage(preview)
     self._preview_label.configure(image=self._selection_photo, text="")
-    self._selection_info_var.set(f"{x2 - x1}x{y2 - y1}px at ({x1}, {y1}) -> ({x2}, {y2})")
+    info_lines = [f"{x2 - x1}x{y2 - y1}px at ({x1}, {y1}) -> ({x2}, {y2})"]
+    game_window_relative = self._selection_game_window_relative_rect()
+    if game_window_relative is not None:
+      gx1, gy1, gx2, gy2 = game_window_relative
+      info_lines.append(f"game window: ({gx1}, {gy1}) -> ({gx2}, {gy2})")
+    self._selection_info_var.set("\n".join(info_lines))
+
+  def _selection_absolute_rect(self):
+    if not self._selection_rect:
+      return None
+    x1, y1, x2, y2 = self._selection_rect
+    if self._capture_bbox is None:
+      return (x1, y1, x2, y2)
+    left, top, _, _ = [int(v) for v in self._capture_bbox]
+    return (x1 + left, y1 + top, x2 + left, y2 + top)
+
+  def _selection_game_window_relative_rect(self):
+    absolute = self._selection_absolute_rect()
+    game_window_bbox_text = self._context.get("game_window_bbox")
+    if absolute is None or not game_window_bbox_text:
+      return None
+    try:
+      left, top, _, _ = [int(v.strip()) for v in game_window_bbox_text.strip("()[]").split(",")]
+    except Exception:
+      return None
+    x1, y1, x2, y2 = absolute
+    return (x1 - left, y1 - top, x2 - left, y2 - top)
 
   def _browse_path(self):
     directory = filedialog.askdirectory(initialdir=self._save_path_var.get() or "assets/")
@@ -330,6 +361,14 @@ class AssetCreatorWindow:
       lines.append("- **File**: (not saved yet)")
     lines.append(f"- **Dimensions**: {w}x{h}px")
     lines.append(f"- **Source coordinates**: ({x1}, {y1}) to ({x2}, {y2})")
+    absolute_rect = self._selection_absolute_rect()
+    if absolute_rect is not None and absolute_rect != (x1, y1, x2, y2):
+      ax1, ay1, ax2, ay2 = absolute_rect
+      lines.append(f"- **Absolute screen coordinates**: ({ax1}, {ay1}) to ({ax2}, {ay2})")
+    game_window_relative = self._selection_game_window_relative_rect()
+    if game_window_relative is not None:
+      gx1, gy1, gx2, gy2 = game_window_relative
+      lines.append(f"- **Game-window coordinates**: ({gx1}, {gy1}) to ({gx2}, {gy2})")
     lines.append("")
 
     # Include context from caller

@@ -24,6 +24,7 @@ import Levenshtein
 from pathlib import Path
 
 _SKILL_RUNTIME_DEBUG_LOCK = threading.Lock()
+_SKILL_RUNTIME_DEBUG_CAPTURE_ENABLED = False  # Re-enable this if you need buffered skill-scan frames written under logs/runtime_debug again.
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,6 +101,8 @@ def _capture_live_skill_screenshot():
 
 
 def _ensure_skill_runtime_debug_dir(session_name):
+    if not _SKILL_RUNTIME_DEBUG_CAPTURE_ENABLED:
+        return None
     runtime_debug_dir = Path("logs/runtime_debug")
     runtime_debug_dir.mkdir(parents=True, exist_ok=True)
     safe_session = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(session_name or "skill_scan"))
@@ -128,6 +131,8 @@ def _append_skill_runtime_debug_manifest(session_dir, entry):
 
 def _save_skill_runtime_debug_frame(session_dir, stem, screenshot, frame_summary=None):
     if screenshot is None or getattr(screenshot, "size", 0) == 0 or not session_dir:
+        return ""
+    if not _SKILL_RUNTIME_DEBUG_CAPTURE_ENABLED:
         return ""
     safe_stem = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in str(stem))
     image_path = Path(session_dir) / "frames" / f"{safe_stem}.png"

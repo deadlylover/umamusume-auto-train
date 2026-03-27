@@ -27,7 +27,6 @@ from core.trackblazer_shop import (
   policy_context,
 )
 import utils.constants as constants
-import utils.device_action_wrapper as device_action
 from core.platform.window_focus import focus_target_window
 from core.region_adjuster import run_region_adjuster_session
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
@@ -1293,6 +1292,11 @@ class OperatorConsole:
         parts.append("indicator yes")
       elif indicator is False:
         parts.append("indicator no")
+      if race_check.get("scheduled_race"):
+        parts.append("scheduled yes")
+        scheduled_source = race_check.get("scheduled_race_source")
+        if scheduled_source:
+          parts.append(f"source {scheduled_source}")
       method = race_check.get("method")
       if method:
         parts.append(f"check {method}")
@@ -1353,6 +1357,11 @@ class OperatorConsole:
     meaning = entry_gate.get("warning_meaning")
     if meaning:
       lines.append(f"Race Warning: {meaning}")
+    warning_ok_template = entry_gate.get("consecutive_warning_ok_template")
+    if warning_ok_template:
+      lines.append(f"Race Warning OK Template: {warning_ok_template}")
+    if entry_gate.get("force_accept_warning"):
+      lines.append("Race Warning Policy: scheduled race override forces OK")
 
     ok_action = entry_gate.get("ok_action")
     cancel_action = entry_gate.get("cancel_action")
@@ -2037,8 +2046,6 @@ class OperatorConsole:
   def _launch_asset_creator(self):
     from core.region_adjuster.asset_creator import AssetCreatorWindow
     context = {}
-    screenshot = None
-    capture_bbox = None
     try:
       runtime_state = bot.get_runtime_state()
       snapshot = runtime_state.get("snapshot") or {}
@@ -2055,16 +2062,12 @@ class OperatorConsole:
         if val:
           context[key] = str(val)
       game_window_bbox = tuple(int(v) for v in constants.GAME_WINDOW_BBOX)
-      capture_bbox = game_window_bbox
-      full_screenshot = device_action.screenshot()
-      if full_screenshot is not None:
-        screenshot = Image.fromarray(full_screenshot).convert("RGBA")
-        context["capture_space"] = "game_window_bbox"
-        context["game_window_bbox"] = str(game_window_bbox)
+      context["capture_space"] = "full_display"
+      context["game_window_bbox"] = str(game_window_bbox)
     except Exception:
       pass
     context = {k: v for k, v in context.items() if v}
-    AssetCreatorWindow(parent=self._root, screenshot=screenshot, context=context, capture_bbox=capture_bbox)
+    AssetCreatorWindow(parent=self._root, context=context)
 
   def _launch_adjuster(self):
     threading.Thread(target=self._launch_adjuster_background, daemon=True).start()

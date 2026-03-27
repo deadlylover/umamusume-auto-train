@@ -227,16 +227,40 @@ def go_to_racebox_top():
       return True
   return False
 
+def _should_accept_consecutive_race_warning(options=None):
+  options = options or {}
+  return bool(
+    options.get("scheduled_race")
+    or options.get("trackblazer_lobby_scheduled_race")
+  )
+
 def enter_race(race_name="any", race_image_path="", options=None):
   device_action.locate_and_click("assets/buttons/races_btn.png", min_search_time=get_secs(10), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
   debug(f"race_name: {race_name}, race_image_path: {race_image_path}")
   sleep(1)
   consecutive_cancel_btn = device_action.locate("assets/buttons/cancel_btn.png", min_search_time=get_secs(1))
-  if config.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn:
+  accept_warning = _should_accept_consecutive_race_warning(options)
+  if config.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn and not accept_warning:
     device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Already raced 3+ times consecutively. Cancelling race and doing training.")
     return False
   elif consecutive_cancel_btn:
-    device_action.locate_and_click("assets/buttons/ok_btn.png", min_search_time=get_secs(1))
+    warning_reason = "scheduled race override" if accept_warning else "config allows consecutive race"
+    warning_ok_template = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok")
+    clicked_warning_ok = False
+    if warning_ok_template:
+      clicked_warning_ok = device_action.locate_and_click(
+        warning_ok_template,
+        min_search_time=get_secs(1),
+        region_ltrb=constants.GAME_WINDOW_BBOX,
+        text=f"[INFO] Consecutive-race warning detected. Continuing via warning-specific OK ({warning_reason}).",
+      )
+    if not clicked_warning_ok:
+      device_action.locate_and_click(
+        "assets/buttons/ok_btn.png",
+        min_search_time=get_secs(1),
+        region_ltrb=constants.GAME_WINDOW_BBOX,
+        text=f"[INFO] Consecutive-race warning detected. Continuing via fallback OK ({warning_reason}).",
+      )
 
   if race_name == "any" or race_image_path == "":
     race_image_path = "assets/ui/match_track.png"

@@ -626,13 +626,13 @@
   "MANT_INVENTORY_SCROLLBAR_BBOX": [
     736,
     248,
-    750,
+    748,
     1282
   ],
   "MANT_INVENTORY_SCROLLBAR_REGION": [
     736,
     248,
-    14,
+    12,
     1034
   ],
   "SKILL_SCROLLBAR_BBOX": [
@@ -784,5 +784,41 @@
     456,
     109,
     649
+  ],
+  "TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX": [
+    673,
+    1178,
+    923,
+    905
+  ],
+  "TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX": [
+    1003,
+    1176,
+    1232,
+    907
+  ],
+  "TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_REGION": [
+    1003,
+    1176,
+    229,
+    -269
+  ],
+  "TRACKBLAZER_POST_RACE_WATCH_CONCERT_REGION": [
+    673,
+    1178,
+    250,
+    -273
+  ],
+  "TURN_1_LEFT_BBOX": [
+    574,
+    107,
+    746,
+    -108
+  ],
+  "TURN_1_LEFT_REGION": [
+    574,
+    107,
+    172,
+    -215
   ]
 }
