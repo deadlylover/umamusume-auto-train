@@ -90,7 +90,17 @@ That means a rerolled strong training can pick up new pre-action items such as:
 
 This is not a continuation of the old item list. It is a fresh item-planning pass against the rerolled board.
 
-### 4a. Multiple `Reset Whistle` uses are possible across passes
+### 4a. `Good-Luck Charm` alone is not a reassess trigger
+
+If the final planned pre-action items only add burst items and/or `Good-Luck Charm`, the bot should continue directly into the already selected training action after item use.
+
+Canonical interpretation:
+
+- `Reset Whistle` requires reassess because it rerolls the board
+- energy items require reassess because they change post-item energy and failure state
+- `Good-Luck Charm` by itself does not require reassess because it is a turn-local failure bypass, not a board reroll
+
+### 4b. Multiple `Reset Whistle` uses are possible across passes
 
 Current behavior allows at most one `Reset Whistle` use in a single pre-action item pass.
 
@@ -150,6 +160,7 @@ Current canonical handling:
 - the bot still does the normal Trackblazer pre-action sequence: inventory check, shop check, item planning, then training
 - if the climax race button shows the tiny lock overlay, the rival-race pre-check is skipped for that pass
 - `Reset Whistle` is allowed outside summer here and is encouraged on weak climax training boards, because there are at most 3 training turns left before the forced finale races
+- during `Finale Underway`, whistles are not held in reserve; weak 20s boards should reroll regardless of remaining whistle count, and the bot should look for roughly 35+ value or similarly strong matching/total gains before committing a training turn
 
 This is intentionally a forward-looking policy: item use is no longer only "save for summer", it also reasons about the short climax endgame horizon.
 

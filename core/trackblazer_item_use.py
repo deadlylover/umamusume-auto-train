@@ -27,6 +27,9 @@ _FINAL_SUMMER_INDEX = (
   constants.TIMELINE.index(_FINAL_SUMMER_LABEL)
   if _FINAL_SUMMER_LABEL in constants.TIMELINE else None
 )
+_CLIMAX_COMMIT_SCORE_THRESHOLD = 35.0
+_CLIMAX_COMMIT_MATCHING_STAT_THRESHOLD = 22
+_CLIMAX_COMMIT_TOTAL_STAT_THRESHOLD = 32
 _TRAINING_LABELS = {
   "spd": "speed",
   "sta": "stamina",
@@ -73,6 +76,7 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max": 5,       # mainly raises max energy (+4), only +5 direct
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
+_ENERGY_RESCUE_TARGET_RATIO = 0.55
 _VITA_ITEM_KEYS = (
   "vita_65",
   "vita_40",
@@ -256,6 +260,15 @@ def _safe_float(value, default=0.0):
     return float(value)
   except (TypeError, ValueError):
     return default
+
+
+def _climax_commit_thresholds(held_reset_whistles):
+  _safe_int(held_reset_whistles, 0)
+  return {
+    "score": _CLIMAX_COMMIT_SCORE_THRESHOLD,
+    "matching": _CLIMAX_COMMIT_MATCHING_STAT_THRESHOLD,
+    "total": _CLIMAX_COMMIT_TOTAL_STAT_THRESHOLD,
+  }
 
 
 def _safe_bool(value, default=False):
@@ -661,6 +674,49 @@ def _affordable_shop_support_items(state_obj):
   return affordable
 
 
+def _min_restore_needed_for_ratio(energy_level, max_energy, target_ratio):
+  energy_level = _safe_float(energy_level, 0.0)
+  max_energy = max(_safe_float(max_energy, energy_level), 1.0)
+  target_energy = max_energy * _safe_float(target_ratio, 0.0)
+  return max(0, int(target_energy - energy_level + 0.9999))
+
+
+def _select_energy_restore_combo(copy_entries, required_restore):
+  if required_restore <= 0:
+    return []
+  best_combo = None
+  reachable = {0: []}
+  for entry in copy_entries:
+    restore = _safe_int(entry.get("restore"), 0)
+    if restore <= 0:
+      continue
+    next_reachable = dict(reachable)
+    for total_restore, combo in reachable.items():
+      new_total = total_restore + restore
+      new_combo = combo + [entry]
+      existing = next_reachable.get(new_total)
+      if existing is None or len(new_combo) < len(existing):
+        next_reachable[new_total] = new_combo
+    reachable = next_reachable
+
+  for total_restore, combo in reachable.items():
+    if total_restore < required_restore:
+      continue
+    if (
+      best_combo is None
+      or total_restore < best_combo["total_restore"]
+      or (
+        total_restore == best_combo["total_restore"]
+        and len(combo) < len(best_combo["combo"])
+      )
+    ):
+      best_combo = {
+        "total_restore": total_restore,
+        "combo": combo,
+      }
+  return list(best_combo["combo"]) if best_combo else None
+
+
 def _energy_can_rescue_training(state_obj, candidate):
   """Check if held energy items make a strong risky training worth committing
   instead of burning a Reset Whistle.  The candidate must be genuinely strong
@@ -680,11 +736,27 @@ def _energy_can_rescue_training(state_obj, candidate):
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   held_quantities = dict(inventory_summary.get("held_quantities") or {})
+  energy_level = _safe_float(state_obj.get("energy_level"), 0.0)
+  max_energy = max(_safe_float(state_obj.get("max_energy"), energy_level), 1.0)
+  required_restore = _min_restore_needed_for_ratio(
+    energy_level,
+    max_energy,
+    _ENERGY_RESCUE_TARGET_RATIO,
+  )
+  if required_restore <= 0:
+    return True
+  copy_entries = []
   for item_key in _ENERGY_ITEM_KEYS:
     held = _current_held_quantity(item_key, inventory, held_quantities)
-    if held > 0 and _ENERGY_RESTORE_VALUES.get(item_key, 0) > 0:
-      return True
-  return False
+    restore = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    if held <= 0 or restore <= 0:
+      continue
+    for _ in range(held):
+      copy_entries.append({
+        "key": item_key,
+        "restore": restore,
+      })
+  return _select_energy_restore_combo(copy_entries, required_restore) is not None
 
 
 def _summer_reroll_signal(state_obj, current_context):
@@ -804,12 +876,35 @@ def _usage_context(state_obj, action):
     if held_quantity <= 0:
       continue
     total_held_vita_restore += _ENERGY_RESTORE_VALUES.get(item_key, 0) * held_quantity
+  held_reset_whistles = _current_held_quantity("reset_whistle", inventory, held_quantities)
+  climax_commit_thresholds = _climax_commit_thresholds(held_reset_whistles)
+  climax_committed_training = bool(
+    getattr(action, "func", None) == "do_training"
+    and climax_window
+    and (
+      score_value >= climax_commit_thresholds["score"]
+      or matching_stat_gain >= climax_commit_thresholds["matching"]
+      or total_stat_gain >= climax_commit_thresholds["total"]
+      or (
+        rainbow_count >= 2
+        and (
+          score_value >= 24.0
+          or matching_stat_gain >= 16
+          or total_stat_gain >= 24
+        )
+      )
+    )
+  )
   strong_burst_training = bool(
     getattr(action, "func", None) == "do_training"
     and (
-      matching_stat_gain >= 30
-      or total_stat_gain >= 30
-      or (rainbow_count > 0 and score_value >= 6.0)
+      climax_committed_training
+      if climax_window else
+      (
+        matching_stat_gain >= 30
+        or total_stat_gain >= 30
+        or (rainbow_count > 0 and score_value >= 6.0)
+      )
     )
   )
   weak_summer_training = bool(
@@ -823,10 +918,7 @@ def _usage_context(state_obj, action):
   weak_climax_training = bool(
     getattr(action, "func", None) == "do_training"
     and climax_window
-    and rainbow_count <= 0
-    and score_value < 20.0
-    and matching_stat_gain < 10
-    and total_stat_gain < 18
+    and not climax_committed_training
   )
   held_support_items = []
   for item_key in _FAILSAFE_ITEM_KEYS:
@@ -883,7 +975,11 @@ def _usage_context(state_obj, action):
     or (
       getattr(action, "func", None) == "do_training"
       and (failure_rate <= 0 or failure_bypassed_by_items)
-      and very_high_value_training
+      and (
+        climax_committed_training
+        if climax_window else
+        very_high_value_training
+      )
     )
   )
   return {
@@ -901,6 +997,7 @@ def _usage_context(state_obj, action):
     "energy_deficit": max(0, max_energy - energy_level),
     "safe_energy_target": safe_energy_target,
     "held_vita_restore_total": total_held_vita_restore,
+    "held_reset_whistles": held_reset_whistles,
     "held_vita_reaches_safe_energy": (energy_level + total_held_vita_restore) >= safe_energy_target,
     "action_func": getattr(action, "func", None),
     "training_name": training_name,
@@ -911,6 +1008,9 @@ def _usage_context(state_obj, action):
     "failure_rate": failure_rate,
     "rainbow_count": rainbow_count,
     "support_count": support_count,
+    "climax_commit_score_threshold": climax_commit_thresholds["score"],
+    "climax_commit_matching_stat_threshold": climax_commit_thresholds["matching"],
+    "climax_commit_total_stat_threshold": climax_commit_thresholds["total"],
     "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
     "held_support_item_names": [entry["name"] for entry in held_support_items],
     "affordable_shop_support_item_names": [entry["name"] for entry in affordable_shop_support_items],
@@ -1017,6 +1117,54 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
       candidates = non_energy
   elif energy_candidates:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
+    if context.get("energy_rescue"):
+      required_restore = _min_restore_needed_for_ratio(
+        context.get("energy_level"),
+        context.get("max_energy"),
+        _ENERGY_RESCUE_TARGET_RATIO,
+      )
+      rescue_copy_entries = []
+      for entry in energy_candidates:
+        restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
+        spendable_copies = max(
+          0,
+          _safe_int(entry.get("held_quantity"), 0) - _safe_int(entry.get("reserve_quantity"), 0),
+        )
+        for _ in range(spendable_copies):
+          rescue_copy_entries.append({
+            "entry": entry,
+            "restore": restore,
+          })
+      selected_rescue_entries = _select_energy_restore_combo(rescue_copy_entries, required_restore)
+      if selected_rescue_entries:
+        planned_counts = {}
+        for selected in selected_rescue_entries:
+          item_key = selected["entry"].get("key")
+          planned_counts[item_key] = planned_counts.get(item_key, 0) + 1
+        rescue_kept = []
+        for entry in sorted(energy_candidates, key=lambda item: _ENERGY_RESTORE_VALUES.get(item["key"], 0)):
+          item_key = entry.get("key")
+          copies_needed = planned_counts.get(item_key, 0)
+          if copies_needed <= 0:
+            entry.pop("candidate_score", None)
+            entry["reason"] = (
+              f"too small for summer energy rescue target "
+              f"({_ENERGY_RESCUE_TARGET_RATIO * 100:.0f}% energy floor)"
+            )
+            deferred.append(entry)
+            continue
+          for copy_index in range(copies_needed):
+            planned_entry = dict(entry)
+            if copy_index > 0:
+              planned_entry["reason"] = (
+                f"{entry.get('reason')}; extra copy to satisfy "
+                f"{_ENERGY_RESCUE_TARGET_RATIO * 100:.0f}% rescue floor"
+              )
+            rescue_kept.append(planned_entry)
+        kept_energy = rescue_kept
+        candidates = non_energy + rescue_kept
+        return candidates, deferred, kept_energy
+
     energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
     planned_energy_restored = 0
     for entry in energy_candidates:
@@ -1654,6 +1802,10 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "failure_rate": context.get("failure_rate"),
       "rainbow_count": context.get("rainbow_count"),
       "support_count": context.get("support_count"),
+      "held_reset_whistles": context.get("held_reset_whistles"),
+      "climax_commit_score_threshold": context.get("climax_commit_score_threshold"),
+      "climax_commit_matching_stat_threshold": context.get("climax_commit_matching_stat_threshold"),
+      "climax_commit_total_stat_threshold": context.get("climax_commit_total_stat_threshold"),
       "strong_burst_training": context.get("strong_burst_training"),
       "weak_summer_training": context.get("weak_summer_training"),
       "weak_climax_training": context.get("weak_climax_training"),

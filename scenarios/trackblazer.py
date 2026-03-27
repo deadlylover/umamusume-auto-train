@@ -671,6 +671,17 @@ def _drag_trackblazer_inventory_scrollbar(scrollbar_state, edge="top", duration=
     edge_name = str(edge or "top").strip().lower()
     if edge_name not in ("top", "bottom"):
         raise ValueError(f"Unsupported inventory scrollbar edge: {edge}")
+    if not (scrollbar_state or {}).get("detected") or not (scrollbar_state or {}).get("scrollable"):
+        return {
+            "direction": f"scrollbar_{edge_name}",
+            "type": "swipe",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+            "why": f"Skip inventory scrollbar drag toward the {edge_name}; no draggable scrollbar was detected.",
+        }
     thumb_center = (scrollbar_state or {}).get("thumb_center")
     bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX]
     track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
@@ -709,6 +720,16 @@ def _drag_trackblazer_inventory_scrollbar(scrollbar_state, edge="top", duration=
 
 def _drag_trackblazer_inventory_scrollbar_to_ratio(scrollbar_state, position_ratio, duration=_INV_SCROLLBAR_SEEK_DURATION_SECONDS):
     """Drag the inventory scrollbar thumb to an approximate position ratio."""
+    if not (scrollbar_state or {}).get("detected") or not (scrollbar_state or {}).get("scrollable"):
+        return {
+            "direction": "scrollbar_ratio",
+            "start": None,
+            "end": None,
+            "duration": float(duration),
+            "settle_seconds": 0.0,
+            "swiped": False,
+            "target_ratio": None,
+        }
     thumb_center = (scrollbar_state or {}).get("thumb_center")
     bbox = (scrollbar_state or {}).get("bbox") or [int(v) for v in constants.MANT_INVENTORY_SCROLLBAR_BBOX]
     track_center_x = int((scrollbar_state or {}).get("track_center_x") or 0)
@@ -2284,60 +2305,38 @@ def scan_training_items_inventory(threshold=0.8):
 
     if not needs_scroll:
         fallback_needed = _inventory_page_looks_full(page1)
-        fallback_page = None
-        fallback_page_timing = None
         if fallback_needed:
-            scroll_flow["recovery_reason"] = "fallback_drag_after_scrollbar_miss"
-            info("[TB_INV] inventory fallback drag triggered after scrollbar miss.")
-            scroll_flow["fallback_swipe"] = scroll_trackblazer_inventory(direction="down", duration=0.6)
-            device_action.flush_screenshot_cache()
-            fallback_page, fallback_page_timing = _scan_inventory_page(threshold=threshold)
-            scroll_flow["fallback_page_timing"] = fallback_page_timing
-            scroll_flow["pages_scanned"] = 2
             scrollbar_post = inspect_trackblazer_inventory_scrollbar()
             scroll_flow["scrollbar_post"] = scrollbar_post
-            bottom_page = fallback_page
-            bottom_page_timing = fallback_page_timing
             if scrollbar_post.get("detected") and scrollbar_post.get("scrollable"):
-                recovery_needed, recovery_reason = _inventory_scan_needs_recovery(page1, fallback_page, scrollbar_post)
-                if recovery_needed:
-                    scroll_flow["recovery_reason"] = recovery_reason
-                    info(f"[TB_INV] inventory scrollbar recovery triggered after fallback drag: {recovery_reason}")
-                    scroll_flow["recovery_swipe"] = _drag_trackblazer_inventory_scrollbar(
-                        scrollbar_post, edge="bottom",
-                    )
+                scroll_flow["recovery_reason"] = "scrollbar_detected_after_top_scan"
+                info("[TB_INV] inventory scrollbar appeared after top scan; using scrollbar drag instead of in-list fallback swipe.")
+                scroll_flow["recovery_swipe"] = _drag_trackblazer_inventory_scrollbar(
+                    scrollbar_post, edge="bottom",
+                )
+                if scroll_flow["recovery_swipe"].get("swiped"):
                     sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
                     device_action.flush_screenshot_cache()
-                    page3, page3_timing = _scan_inventory_page(threshold=threshold)
-                    scroll_flow["recovery_page_timing"] = page3_timing
-                    scroll_flow["pages_scanned"] = 3
+                    page2, page2_timing = _scan_inventory_page(threshold=threshold)
+                    scroll_flow["recovery_page_timing"] = page2_timing
+                    scroll_flow["pages_scanned"] = 2
                     scroll_flow["scrollbar_recovery_post"] = inspect_trackblazer_inventory_scrollbar()
-                    bottom_page = _merge_inventory_pages(fallback_page, page3)
-                    bottom_page_timing = {
-                        "total": round(fallback_page_timing.get("total", 0) + page3_timing.get("total", 0), 4),
-                        "held_ocr": round(fallback_page_timing.get("held_ocr", 0) + page3_timing.get("held_ocr", 0), 4),
-                        "templates": round(fallback_page_timing.get("templates", 0) + page3_timing.get("templates", 0), 4),
-                        "families": round(fallback_page_timing.get("families", 0) + page3_timing.get("families", 0), 4),
-                        "families_resolved": fallback_page_timing.get("families_resolved", 0) + page3_timing.get("families_resolved", 0),
-                        "families_skipped": fallback_page_timing.get("families_skipped", 0) + page3_timing.get("families_skipped", 0),
-                        "items_detected": len(_inventory_detected_item_names(bottom_page)),
-                        "quantity_reads": fallback_page_timing.get("quantity_reads", 0) + page3_timing.get("quantity_reads", 0),
-                        "recovery_pages": [fallback_page_timing, page3_timing],
+                    page1 = _merge_inventory_pages(page1, page2)
+                    page1_timing = {
+                        "total": round(page1_timing.get("total", 0) + page2_timing.get("total", 0), 4),
+                        "held_ocr": round(page1_timing.get("held_ocr", 0) + page2_timing.get("held_ocr", 0), 4),
+                        "templates": round(page1_timing.get("templates", 0) + page2_timing.get("templates", 0), 4),
+                        "families": round(page1_timing.get("families", 0) + page2_timing.get("families", 0), 4),
+                        "families_resolved": page1_timing.get("families_resolved", 0) + page2_timing.get("families_resolved", 0),
+                        "families_skipped": page1_timing.get("families_skipped", 0) + page2_timing.get("families_skipped", 0),
+                        "items_detected": len(_inventory_detected_item_names(page1)),
+                        "quantity_reads": page1_timing.get("quantity_reads", 0) + page2_timing.get("quantity_reads", 0),
+                        "fallback_pages": [page1_timing, page2_timing],
                     }
                 else:
-                    scroll_flow["recovery_reason"] = recovery_reason
-            page1 = _merge_inventory_pages(page1, bottom_page)
-            page1_timing = {
-                "total": round(page1_timing.get("total", 0) + bottom_page_timing.get("total", 0), 4),
-                "held_ocr": round(page1_timing.get("held_ocr", 0) + bottom_page_timing.get("held_ocr", 0), 4),
-                "templates": round(page1_timing.get("templates", 0) + bottom_page_timing.get("templates", 0), 4),
-                "families": round(page1_timing.get("families", 0) + bottom_page_timing.get("families", 0), 4),
-                "families_resolved": page1_timing.get("families_resolved", 0) + bottom_page_timing.get("families_resolved", 0),
-                "families_skipped": page1_timing.get("families_skipped", 0) + bottom_page_timing.get("families_skipped", 0),
-                "items_detected": len(_inventory_detected_item_names(page1)),
-                "quantity_reads": page1_timing.get("quantity_reads", 0) + bottom_page_timing.get("quantity_reads", 0),
-                "fallback_pages": [page1_timing, bottom_page_timing],
-            }
+                    scroll_flow["recovery_reason"] = "scrollbar_detected_after_top_scan_but_drag_skipped"
+            else:
+                scroll_flow["recovery_reason"] = "fallback_skipped_no_scrollbar"
         # Single-page inventory, or fallback drag did not reveal a scrollbar.
         t_total_elapsed = _time() - t_total
         page1_timing["total"] = round(t_total_elapsed, 4)
@@ -2374,26 +2373,35 @@ def scan_training_items_inventory(threshold=0.8):
     bottom_page_timing = page2_timing
     if recovery_needed:
         scroll_flow["recovery_reason"] = recovery_reason
-        info(f"[TB_INV] inventory bottom-page recovery triggered: {recovery_reason}")
-        scroll_flow["recovery_swipe"] = scroll_trackblazer_inventory(direction="down", duration=0.6)
-        device_action.flush_screenshot_cache()
-        page3, page3_timing = _scan_inventory_page(threshold=threshold)
-        scroll_flow["recovery_page_timing"] = page3_timing
-        scroll_flow["pages_scanned"] = 3
-        scrollbar_recovery_post = inspect_trackblazer_inventory_scrollbar()
-        scroll_flow["scrollbar_recovery_post"] = scrollbar_recovery_post
-        bottom_page = _merge_inventory_pages(page2, page3)
-        bottom_page_timing = {
-            "total": round(page2_timing.get("total", 0) + page3_timing.get("total", 0), 4),
-            "held_ocr": round(page2_timing.get("held_ocr", 0) + page3_timing.get("held_ocr", 0), 4),
-            "templates": round(page2_timing.get("templates", 0) + page3_timing.get("templates", 0), 4),
-            "families": round(page2_timing.get("families", 0) + page3_timing.get("families", 0), 4),
-            "families_resolved": page2_timing.get("families_resolved", 0) + page3_timing.get("families_resolved", 0),
-            "families_skipped": page2_timing.get("families_skipped", 0) + page3_timing.get("families_skipped", 0),
-            "items_detected": len(_inventory_detected_item_names(bottom_page)),
-            "quantity_reads": page2_timing.get("quantity_reads", 0) + page3_timing.get("quantity_reads", 0),
-            "recovery_pages": [page2_timing, page3_timing],
-        }
+        if scrollbar_post.get("detected") and scrollbar_post.get("scrollable"):
+            info(f"[TB_INV] inventory bottom-page recovery triggered with scrollbar drag: {recovery_reason}")
+            scroll_flow["recovery_swipe"] = _drag_trackblazer_inventory_scrollbar(
+                scrollbar_post, edge="bottom",
+            )
+            if scroll_flow["recovery_swipe"].get("swiped"):
+                sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
+                device_action.flush_screenshot_cache()
+                page3, page3_timing = _scan_inventory_page(threshold=threshold)
+                scroll_flow["recovery_page_timing"] = page3_timing
+                scroll_flow["pages_scanned"] = 3
+                scrollbar_recovery_post = inspect_trackblazer_inventory_scrollbar()
+                scroll_flow["scrollbar_recovery_post"] = scrollbar_recovery_post
+                bottom_page = _merge_inventory_pages(page2, page3)
+                bottom_page_timing = {
+                    "total": round(page2_timing.get("total", 0) + page3_timing.get("total", 0), 4),
+                    "held_ocr": round(page2_timing.get("held_ocr", 0) + page3_timing.get("held_ocr", 0), 4),
+                    "templates": round(page2_timing.get("templates", 0) + page3_timing.get("templates", 0), 4),
+                    "families": round(page2_timing.get("families", 0) + page3_timing.get("families", 0), 4),
+                    "families_resolved": page2_timing.get("families_resolved", 0) + page3_timing.get("families_resolved", 0),
+                    "families_skipped": page2_timing.get("families_skipped", 0) + page3_timing.get("families_skipped", 0),
+                    "items_detected": len(_inventory_detected_item_names(bottom_page)),
+                    "quantity_reads": page2_timing.get("quantity_reads", 0) + page3_timing.get("quantity_reads", 0),
+                    "recovery_pages": [page2_timing, page3_timing],
+                }
+            else:
+                scroll_flow["recovery_reason"] = f"{recovery_reason}_drag_skipped"
+        else:
+            scroll_flow["recovery_reason"] = f"{recovery_reason}_skipped_no_scrollbar"
     else:
         scroll_flow["recovery_reason"] = recovery_reason
 

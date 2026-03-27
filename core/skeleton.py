@@ -206,6 +206,26 @@ def _restore_cached_trackblazer_inventory(state_obj, current_turn_number=None):
   return True
 
 
+def _trackblazer_inventory_flow_cacheable(flow):
+  if not isinstance(flow, dict):
+    return False
+  if flow.get("skipped"):
+    return False
+  if flow.get("reason") in {
+    "failed_to_open_inventory",
+    "failed_to_close_inventory",
+    "confirm_use_not_available",
+    "confirm_use_not_available_closed_inventory",
+    "required_items_not_actionable",
+  }:
+    return False
+  if flow.get("missing_increment_targets"):
+    return False
+  if flow.get("opened") and not flow.get("closed") and not flow.get("already_open"):
+    return False
+  return True
+
+
 def _invalidate_trackblazer_inventory_cache():
   global _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   _cached_trackblazer_inventory = None
@@ -1120,6 +1140,17 @@ def _trackblazer_pre_action_items(action):
   return []
 
 
+def _trackblazer_items_require_reassess(items):
+  for entry in (items or []):
+    if not isinstance(entry, dict):
+      continue
+    if entry.get("key") == "reset_whistle":
+      return True
+    if entry.get("usage_group") == "energy":
+      return True
+  return False
+
+
 def _trackblazer_training_score(action):
   training_data = _action_value(action, "training_data")
   if not isinstance(training_data, dict):
@@ -1733,14 +1764,12 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
   candidates = _order_trackblazer_pre_action_items(candidates)
   item_context = item_use_plan.get("context") or {}
-  energy_rescue = bool(item_context.get("energy_rescue"))
   action["trackblazer_pre_action_items"] = candidates
   action["trackblazer_item_use_context"] = item_context
-  # Reassess after item use when the board will change (whistle) or when
-  # energy items were used to rescue a strong training from high failure —
-  # the reassess pass re-collects training state with updated energy so the
-  # previously-filtered training can be picked.
-  action["trackblazer_reassess_after_item_use"] = has_whistle or energy_rescue
+  # Reassess only when the final planned item list actually changes the board
+  # in a way that requires a fresh training scan. Charm-only failure bypass is
+  # action-local and should proceed directly into the selected training.
+  action["trackblazer_reassess_after_item_use"] = _trackblazer_items_require_reassess(candidates)
   return action
 
 
@@ -1762,7 +1791,10 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
     allow_open_non_execute=True,
     trigger="pre_action_refresh",
   )
-  _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  if _trackblazer_inventory_flow_cacheable(state_obj.get("trackblazer_inventory_flow")):
+    _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  else:
+    _invalidate_trackblazer_inventory_cache()
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
   planned_items = _trackblazer_pre_action_items(action)
   if not planned_items:
@@ -1783,7 +1815,10 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
   state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
   state_obj["trackblazer_inventory_flow"] = flow
-  _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  if result.get("success") and _trackblazer_inventory_flow_cacheable(flow):
+    _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  else:
+    _invalidate_trackblazer_inventory_cache()
 
   if commit_mode == "dry_run":
     return {
@@ -2064,7 +2099,7 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
     }
 
   template_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_result")
-  region_ltrb = getattr(constants, "TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX", None)
+  region_ltrb = getattr(constants, "SCREEN_TOP_BBOX", None)
   if not template_path or not region_ltrb:
     return {
       "detected": False,
@@ -2091,12 +2126,13 @@ def _handle_trackblazer_climax_race_result_screen(state_obj, action):
       "deferred_work": [],
     }
 
-  info("[TB_POST] Climax race result screen detected during post-action resolution.")
+  info("[TB_POST] Climax race result screen detected during post-action resolution via SCREEN_TOP_BBOX.")
   bot.push_debug_history({
     "event": "template_match",
     "asset": "climax_race_result.png",
     "result": "found",
     "context": "post_action_resolution",
+    "region": "SCREEN_TOP_BBOX",
   })
 
   for label, template_path in (
@@ -4000,7 +4036,10 @@ def career_lobby(dry_run_turn=False):
             state_obj,
             allow_open_non_execute=execution_intent != "execute",
           )
-          _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+          if _trackblazer_inventory_flow_cacheable(state_obj.get("trackblazer_inventory_flow")):
+            _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+          else:
+            _invalidate_trackblazer_inventory_cache()
         _copy_trackblazer_inventory_snapshot(state_obj)
         current_trackblazer_turn = _trackblazer_turn_key(state_obj)
         pending_shop_check = bot.has_pending_trackblazer_shop_check()
