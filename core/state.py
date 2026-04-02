@@ -17,6 +17,7 @@ import utils.device_action_wrapper as device_action
 import utils.pyautogui_actions as pyautogui_actions
 import core.bot as bot
 from core.platform.window_focus import apply_configured_recognition_geometry
+from core.race_selector import get_effective_schedule_entries
 
 from utils.shared import CleanDefaultDict, read_status_effects_from_current_full_stats
 import core.config as config
@@ -1698,7 +1699,10 @@ def filter_race_list(state):
   debug(f"Races after filtering: {constants.RACES}")
 
 def filter_race_schedule(state):
-  config.RACE_SCHEDULE = config.RACE_SCHEDULE_CONF.copy()
+  config.RACE_SCHEDULE = get_effective_schedule_entries(
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+    getattr(config, "RACE_SCHEDULE_CONF", []),
+  )
   debug(f"Schedule before filtering: {config.RACE_SCHEDULE}")
   schedule = {}
   for race in config.RACE_SCHEDULE:

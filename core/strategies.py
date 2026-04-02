@@ -1,12 +1,22 @@
 import core.trainings
 import utils.constants as constants
 import core.config as config
+from core.race_selector import get_race_gate_for_turn_label
 from utils.shared import check_status_effects
 from core.actions import Action
 from core.recognizer import compare_brightness
 from utils.log import error, warning, info, debug
 from utils.tools import remove_if_exists, sleep, get_secs, click
 import utils.device_action_wrapper as device_action
+
+
+def _optional_race_blocked(state):
+  gate = get_race_gate_for_turn_label(
+    state.get("year"),
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+  blocked = bool(gate.get("enabled") and not gate.get("race_allowed"))
+  return blocked, gate
 
 class Strategy:
 
@@ -315,6 +325,14 @@ class Strategy:
 
   # Check only unscheduled races
   def check_race(self, state, action, grades: list[str] = None):
+    blocked, gate = _optional_race_blocked(state)
+    if blocked:
+      info(
+        f"[RACE_GATE] Skipping optional race search on {gate.get('turn_label') or state.get('year')}: "
+        "operator selector has race_allowed disabled."
+      )
+      return action
+
     date = state["year"]
     if grades is not None:
       races_on_date = [r for r in constants.RACES.get(date, []) if r.get("grade") in grades]
@@ -346,6 +364,14 @@ class Strategy:
       return action
 
   def check_scheduled_races(self, state, action):
+    blocked, gate = _optional_race_blocked(state)
+    if blocked:
+      info(
+        f"[RACE_GATE] Skipping scheduled race selection on {gate.get('turn_label') or state.get('year')}: "
+        "operator selector has race_allowed disabled."
+      )
+      return action
+
     date = state["year"]
 
     races_on_date = constants.RACES.get(date, [])
@@ -420,7 +446,10 @@ class Strategy:
     # (mediocre training → try a race instead) is relevant here.
     if constants.SCENARIO_NAME in ("mant", "trackblazer"):
       min_score = self._get_min_score(action)
+      blocked, gate = _optional_race_blocked(state)
       if (
+        not blocked
+        and
         training_score <= min_score
         and state["turn"] != "Race Day"
       ):
@@ -432,6 +461,11 @@ class Strategy:
         action["prefer_rival_race"] = True
         info(f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) at or below minimum ({min_score}), attempting rival race for bonus stats")
       else:
+        if blocked:
+          debug(
+            f"[ENERGY_MGMT] → TRACKBLAZER: optional race gate blocked rival fallback on "
+            f"{gate.get('turn_label') or state.get('year')}"
+          )
         debug(f"[ENERGY_MGMT] → TRACKBLAZER: Keeping training (score {training_score}), item planner handles energy/fail")
       return action
 
@@ -536,6 +570,14 @@ class Strategy:
 
   # helper functions
   def decide_race_for_goal(self, state, action):
+    blocked, gate = _optional_race_blocked(state)
+    if blocked:
+      info(
+        f"[RACE_GATE] Skipping goal-race selection on {gate.get('turn_label') or state.get('year')}: "
+        "operator selector has race_allowed disabled."
+      )
+      return action
+
     year = state["year"]
     turn = state["turn"]
     if isinstance(turn, str):

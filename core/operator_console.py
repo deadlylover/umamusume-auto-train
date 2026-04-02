@@ -10,6 +10,14 @@ from PIL import Image, ImageTk
 
 import core.bot as bot
 import core.config as config
+from core.race_selector import (
+  CALENDAR as RACE_SELECTOR_CALENDAR,
+  YEAR_ORDER as RACE_SELECTOR_YEARS,
+  get_races_for_date,
+  get_selector_ui_state,
+  serialize_selector_payload,
+  summarize_selector_state,
+)
 from core.trackblazer_item_use import (
   ITEM_USE_BEHAVIOR_MODES,
   get_default_item_use_policy,
@@ -89,6 +97,13 @@ class OperatorConsole:
     self._trackblazer_scoring_mode_var = None
     self._strong_training_score_threshold_var = None
     self._phase_labels = {}
+    self._race_selector_status_var = None
+    self._race_selector_window = None
+    self._race_selector_summary_var = None
+    self._race_selector_entries = {}
+    self._race_selector_year_bodies = {}
+    self._race_selector_date_window = None
+    self._race_selector_date_context = None
     self._details_notebook = None
     self._planned_actions_text = None
     self._timing_text = None
@@ -310,6 +325,15 @@ class OperatorConsole:
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
     tk.Button(secondary_controls, text="Save Position", command=self._save_and_test_position).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Button(secondary_controls, text="Race Selector", command=self._open_race_selector_window).pack(side=tk.LEFT, padx=(12, 0))
+    self._race_selector_status_var = tk.StringVar(value=self._race_selector_status_text())
+    tk.Label(
+      secondary_controls,
+      textvariable=self._race_selector_status_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(6, 0))
 
     tk.Button(
       tertiary_controls,
@@ -852,6 +876,8 @@ class OperatorConsole:
       self._trackblazer_scoring_mode_var.set(runtime_state.get("trackblazer_scoring_mode") or "stat_focused")
     if self._skill_dry_run_var is not None:
       self._skill_dry_run_var.set(bool(runtime_state.get("skill_dry_run_enabled")))
+    if self._race_selector_status_var is not None:
+      self._race_selector_status_var.set(self._race_selector_status_text())
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
     is_bot_running = bool(runtime_state.get("is_bot_running"))
@@ -1181,6 +1207,10 @@ class OperatorConsole:
     if criteria:
       lines.append(f"Criteria: {criteria}")
 
+    gate_line = self._format_operator_race_gate_line(state_summary)
+    if gate_line:
+      lines.append(gate_line)
+
     lines.append(self._format_selected_action_line(selected_action))
 
     rival_line = self._format_rival_line(selected_action, state_summary)
@@ -1243,6 +1273,25 @@ class OperatorConsole:
       else:
         parts.append(f"{key}:{val}")
     return "Stats: " + " | ".join(parts)
+
+  def _format_operator_race_gate_line(self, state_summary):
+    gate = state_summary.get("operator_race_gate") or {}
+    if not isinstance(gate, dict):
+      return ""
+    if not gate.get("enabled") and not gate.get("selected_race"):
+      return ""
+
+    parts = []
+    if gate.get("enabled"):
+      parts.append(f"Race Allowed: {'yes' if gate.get('race_allowed') else 'no'}")
+      parts.append("source selector")
+    else:
+      parts.append("Race Allowed: legacy config")
+
+    selected_race = gate.get("selected_race")
+    if selected_race:
+      parts.append(f"selected {selected_race}")
+    return " | ".join(parts)
 
   def _format_selected_action_line(self, selected_action):
     action_name = selected_action.get("func") or "-"
@@ -1915,6 +1964,16 @@ class OperatorConsole:
     self._root.clipboard_append(value)
     self._message_value.set("Copied pane contents to clipboard.")
 
+  def _race_selector_status_text(self):
+    summary = summarize_selector_state(
+      getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      legacy_schedule=getattr(config, "RACE_SCHEDULE_CONF", []),
+      use_ui_fallback=True,
+    )
+    selector_enabled = bool((getattr(config, "OPERATOR_RACE_SELECTOR", {}) or {}).get("enabled"))
+    source = "selector" if selector_enabled else "legacy"
+    return f"{source}: {summary['selected_count']} sel / {summary['blocked_count']} blocked"
+
   def _set_execution_intent(self):
     if self._execution_intent_var is None:
       return
@@ -2064,6 +2123,500 @@ class OperatorConsole:
     except Exception as exc:
       debug(f"Unable to persist config key '{key_path}': {exc}")
       return False
+
+  def _load_race_selector_entries(self):
+    ui_state = get_selector_ui_state(
+      getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      legacy_schedule=getattr(config, "RACE_SCHEDULE_CONF", []),
+    )
+    self._race_selector_entries = {
+      (entry["year"], entry["date"]): dict(entry)
+      for entry in ui_state.get("dates", [])
+    }
+
+  def _persist_race_selector_entries(self, message):
+    payload = serialize_selector_payload(self._race_selector_entries, enabled=True)
+    if not self._persist_config_value("operator_race_selector", payload):
+      self._message_value.set("Failed to save race selector state.")
+      return False
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved race selector state, but reload failed: {exc}")
+      return False
+    if self._race_selector_status_var is not None:
+      self._race_selector_status_var.set(self._race_selector_status_text())
+    self._message_value.set(message)
+    self.publish()
+    return True
+
+  def _clear_race_selector_window_state(self):
+    self._race_selector_window = None
+    self._race_selector_summary_var = None
+    self._race_selector_year_bodies = {}
+    if self._race_selector_date_window is not None and self._race_selector_date_window.winfo_exists():
+      self._race_selector_date_window.destroy()
+    self._race_selector_date_window = None
+    self._race_selector_date_context = None
+
+  def _open_race_selector_window(self):
+    if self._root is None:
+      return
+    if self._race_selector_window is not None and self._race_selector_window.winfo_exists():
+      self._refresh_race_selector_window()
+      self._race_selector_window.deiconify()
+      self._race_selector_window.lift()
+      self._race_selector_window.focus_force()
+      return
+
+    self._load_race_selector_entries()
+
+    window = tk.Toplevel(self._root)
+    window.title("Race Selector")
+    window.configure(bg="#101418")
+    window.geometry("1120x760")
+    window.minsize(900, 560)
+    window.transient(self._root)
+
+    header = tk.Frame(window, bg="#101418", padx=14, pady=12)
+    header.pack(fill=tk.X)
+    header.columnconfigure(0, weight=1)
+    header.columnconfigure(1, weight=0)
+
+    title_block = tk.Frame(header, bg="#101418")
+    title_block.grid(row=0, column=0, sticky="w")
+    tk.Label(
+      title_block,
+      text="Race Selector",
+      fg="white",
+      bg="#101418",
+      font=("Helvetica", 16, "bold"),
+      anchor="w",
+    ).pack(anchor="w")
+    self._race_selector_summary_var = tk.StringVar(value="")
+    tk.Label(
+      title_block,
+      textvariable=self._race_selector_summary_var,
+      fg="#8bd5ca",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+    ).pack(anchor="w", pady=(2, 0))
+    tk.Label(
+      title_block,
+      text="Click a date card to pick a race. The checkbox on each card is the authoritative race-allowed gate for that date.",
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+      wraplength=760,
+    ).pack(anchor="w", pady=(6, 0))
+
+    controls = tk.Frame(header, bg="#101418")
+    controls.grid(row=0, column=1, sticky="e")
+    tk.Button(controls, text="Clear All", command=self._clear_all_race_selector_entries).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(controls, text="Close", command=window.destroy).pack(side=tk.LEFT)
+
+    notebook = ttk.Notebook(window)
+    notebook.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+    self._race_selector_year_bodies = {}
+    for year in RACE_SELECTOR_YEARS:
+      outer = tk.Frame(notebook, bg="#101418")
+      outer.rowconfigure(0, weight=1)
+      outer.columnconfigure(0, weight=1)
+
+      canvas = tk.Canvas(outer, bg="#101418", highlightthickness=0)
+      scrollbar = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+      body = tk.Frame(canvas, bg="#101418")
+      window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+      canvas.configure(yscrollcommand=scrollbar.set)
+      canvas.grid(row=0, column=0, sticky="nsew")
+      scrollbar.grid(row=0, column=1, sticky="ns")
+      body.bind("<Configure>", lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+      canvas.bind("<Configure>", lambda event, c=canvas, wid=window_id: c.itemconfigure(wid, width=event.width))
+
+      notebook.add(outer, text=year)
+      self._race_selector_year_bodies[year] = body
+
+    self._race_selector_window = window
+    window.bind(
+      "<Destroy>",
+      lambda event, target=window: self._clear_race_selector_window_state() if event.widget is target else None,
+    )
+    self._refresh_race_selector_window()
+
+  def _refresh_race_selector_window(self):
+    if self._race_selector_window is None or not self._race_selector_window.winfo_exists():
+      return
+    selected_count = sum(1 for entry in self._race_selector_entries.values() if str(entry.get("name") or "").strip())
+    blocked_count = sum(1 for entry in self._race_selector_entries.values() if not bool(entry.get("race_allowed", True)))
+    if self._race_selector_summary_var is not None:
+      self._race_selector_summary_var.set(
+        f"Console override active. {selected_count} selected date(s), {blocked_count} blocked date(s)."
+      )
+
+    for year, body in self._race_selector_year_bodies.items():
+      for child in body.winfo_children():
+        child.destroy()
+      for column in range(4):
+        body.grid_columnconfigure(column, weight=1, uniform=f"{year}-cards")
+
+      for index, date in enumerate(RACE_SELECTOR_CALENDAR):
+        row = index // 4
+        column = index % 4
+        entry = dict(self._race_selector_entries.get((year, date)) or {
+          "year": year,
+          "date": date,
+          "name": "",
+          "race_allowed": True,
+        })
+        races = get_races_for_date(year, date)
+        selected_name = str(entry.get("name") or "").strip()
+        race_allowed = bool(entry.get("race_allowed", True))
+        selected_race = next((race for race in races if race.get("name") == selected_name), None)
+
+        if not race_allowed:
+          card_bg = "#2a1818"
+          border = "#b55"
+        elif selected_name:
+          card_bg = "#15283b"
+          border = "#3b82f6"
+        else:
+          card_bg = "#161d24"
+          border = "#2d333b"
+
+        card = tk.Frame(
+          body,
+          bg=card_bg,
+          highlightbackground=border,
+          highlightthickness=1,
+          padx=8,
+          pady=8,
+          cursor="hand2",
+        )
+        card.grid(row=row, column=column, sticky="nsew", padx=6, pady=6)
+
+        title_row = tk.Frame(card, bg=card_bg)
+        title_row.pack(fill=tk.X)
+        date_label = tk.Label(
+          title_row,
+          text=date,
+          fg="white",
+          bg=card_bg,
+          anchor="w",
+          font=("Helvetica", 11, "bold"),
+          cursor="hand2",
+        )
+        date_label.pack(side=tk.LEFT, anchor="w")
+        badge_text = "Blocked" if not race_allowed else ("Selected" if selected_name else "Open")
+        badge_fg = "#ffb4b4" if not race_allowed else ("#8bd5ca" if selected_name else "#9aa4ad")
+        badge = tk.Label(
+          title_row,
+          text=badge_text,
+          fg=badge_fg,
+          bg=card_bg,
+          anchor="e",
+          font=("Helvetica", 9, "bold"),
+          cursor="hand2",
+        )
+        badge.pack(side=tk.RIGHT, anchor="e")
+
+        allow_var = tk.BooleanVar(value=race_allowed)
+        allow_toggle = tk.Checkbutton(
+          card,
+          text="Race allowed",
+          variable=allow_var,
+          command=lambda y=year, d=date, var=allow_var: self._toggle_race_selector_allowed(y, d, var.get()),
+          fg="#d6dde5",
+          bg=card_bg,
+          selectcolor="#192028",
+          activebackground=card_bg,
+          activeforeground="white",
+          anchor="w",
+          justify="left",
+        )
+        allow_toggle.pack(fill=tk.X, pady=(8, 6))
+        allow_toggle._codex_var = allow_var
+
+        if selected_race:
+          subtitle_text = f"{selected_race.get('name')} ({selected_race.get('grade') or '-'})"
+          detail_text = (
+            f"{selected_race.get('terrain') or '-'} • "
+            f"{(selected_race.get('distance') or {}).get('type') or '-'} "
+            f"{(selected_race.get('distance') or {}).get('meters') or '-'}m"
+          )
+        elif races:
+          grades = sorted({str(race.get("grade") or "").strip() for race in races if race.get("grade")})
+          grade_text = ", ".join(grade for grade in grades if grade) or "listed races"
+          subtitle_text = f"{len(races)} listed race(s)"
+          detail_text = grade_text
+        else:
+          subtitle_text = "No listed races"
+          detail_text = "Gate still blocks rival and optional races"
+
+        subtitle = tk.Label(
+          card,
+          text=subtitle_text,
+          fg="#d6dde5",
+          bg=card_bg,
+          anchor="w",
+          justify="left",
+          wraplength=220,
+          cursor="hand2",
+        )
+        subtitle.pack(fill=tk.X)
+        detail = tk.Label(
+          card,
+          text=detail_text,
+          fg="#9aa4ad",
+          bg=card_bg,
+          anchor="w",
+          justify="left",
+          wraplength=220,
+          cursor="hand2",
+        )
+        detail.pack(fill=tk.X, pady=(4, 0))
+
+        for widget in (card, title_row, date_label, badge, subtitle, detail):
+          widget.bind("<Button-1>", lambda _event, y=year, d=date: self._open_race_selector_date_popup(y, d))
+
+    if self._race_selector_date_window is not None and self._race_selector_date_window.winfo_exists():
+      self._refresh_race_selector_date_popup()
+
+  def _toggle_race_selector_allowed(self, year, date, allowed):
+    key = (year, date)
+    entry = dict(self._race_selector_entries.get(key) or {
+      "year": year,
+      "date": date,
+      "name": "",
+      "race_allowed": True,
+    })
+    entry["race_allowed"] = bool(allowed)
+    if entry["race_allowed"] and not str(entry.get("name") or "").strip():
+      self._race_selector_entries.pop(key, None)
+    else:
+      self._race_selector_entries[key] = entry
+    if self._persist_race_selector_entries(
+      f"Race gate {'enabled' if allowed else 'blocked'} for {year} {date}."
+    ):
+      self._refresh_race_selector_window()
+
+  def _set_race_selector_race(self, year, date, race_name):
+    key = (year, date)
+    entry = dict(self._race_selector_entries.get(key) or {
+      "year": year,
+      "date": date,
+      "name": "",
+      "race_allowed": True,
+    })
+    selected_name = str(race_name or "").strip()
+    if selected_name and entry.get("name") == selected_name:
+      selected_name = ""
+    entry["name"] = selected_name
+    if not entry["name"] and bool(entry.get("race_allowed", True)):
+      self._race_selector_entries.pop(key, None)
+    else:
+      self._race_selector_entries[key] = entry
+    action_text = f"Selected {selected_name}" if selected_name else "Cleared race selection"
+    if self._persist_race_selector_entries(f"{action_text} for {year} {date}."):
+      self._refresh_race_selector_window()
+
+  def _clear_all_race_selector_entries(self):
+    self._race_selector_entries = {}
+    if self._persist_race_selector_entries("Cleared all race selector dates and gates."):
+      self._refresh_race_selector_window()
+
+  def _open_race_selector_date_popup(self, year, date):
+    parent = self._race_selector_window or self._root
+    if parent is None:
+      return
+
+    if self._race_selector_date_window is not None and self._race_selector_date_window.winfo_exists():
+      if self._race_selector_date_context != (year, date):
+        self._race_selector_date_window.destroy()
+      else:
+        self._refresh_race_selector_date_popup()
+        self._race_selector_date_window.deiconify()
+        self._race_selector_date_window.lift()
+        self._race_selector_date_window.focus_force()
+        return
+
+    window = tk.Toplevel(parent)
+    window.configure(bg="#101418")
+    window.geometry("760x520")
+    window.minsize(620, 420)
+    window.transient(parent)
+    self._race_selector_date_window = window
+    self._race_selector_date_context = (year, date)
+    window.bind(
+      "<Destroy>",
+      lambda event, target=window: self._clear_race_selector_date_popup() if event.widget is target else None,
+    )
+    self._refresh_race_selector_date_popup()
+
+  def _clear_race_selector_date_popup(self):
+    self._race_selector_date_window = None
+    self._race_selector_date_context = None
+
+  def _refresh_race_selector_date_popup(self):
+    window = self._race_selector_date_window
+    context = self._race_selector_date_context
+    if window is None or context is None or not window.winfo_exists():
+      return
+
+    year, date = context
+    entry = dict(self._race_selector_entries.get((year, date)) or {
+      "year": year,
+      "date": date,
+      "name": "",
+      "race_allowed": True,
+    })
+    selected_name = str(entry.get("name") or "").strip()
+    race_allowed = bool(entry.get("race_allowed", True))
+    races = get_races_for_date(year, date)
+
+    window.title(f"Race Selector - {date} - {year}")
+    for child in window.winfo_children():
+      child.destroy()
+
+    header = tk.Frame(window, bg="#101418", padx=12, pady=12)
+    header.pack(fill=tk.X)
+    header.columnconfigure(0, weight=1)
+
+    tk.Label(
+      header,
+      text=f"{date} - {year}",
+      fg="white",
+      bg="#101418",
+      font=("Helvetica", 14, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, sticky="w")
+    tk.Button(header, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
+
+    allow_var = tk.BooleanVar(value=race_allowed)
+    allow_toggle = tk.Checkbutton(
+      header,
+      text="Race allowed",
+      variable=allow_var,
+      command=lambda y=year, d=date, var=allow_var: self._toggle_race_selector_allowed(y, d, var.get()),
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    )
+    allow_toggle.grid(row=1, column=0, sticky="w", pady=(8, 0))
+    allow_toggle._codex_var = allow_var
+
+    tk.Button(
+      header,
+      text="Clear Selection",
+      state=tk.NORMAL if selected_name else tk.DISABLED,
+      command=lambda y=year, d=date: self._set_race_selector_race(y, d, ""),
+    ).grid(row=1, column=1, sticky="e", pady=(8, 0))
+
+    tk.Label(
+      window,
+      text=(
+        "Selected race overrides legacy config for this date. "
+        "If no race is selected, the date gate still applies to optional and rival races."
+      ),
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+      wraplength=700,
+      padx=12,
+    ).pack(fill=tk.X, pady=(0, 8))
+
+    body = tk.Frame(window, bg="#101418", padx=12, pady=0)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    if not races:
+      tk.Label(
+        body,
+        text="No listed races on this date. The race-allowed checkbox still blocks rival and other optional race entry.",
+        fg="#d6dde5",
+        bg="#101418",
+        anchor="w",
+        justify="left",
+        wraplength=680,
+      ).pack(fill=tk.X, pady=(12, 0))
+      return
+
+    for race in races:
+      race_name = str(race.get("name") or "")
+      selected = selected_name == race_name
+      card_bg = "#15283b" if selected else "#161d24"
+      border = "#3b82f6" if selected else "#2d333b"
+      card = tk.Frame(
+        body,
+        bg=card_bg,
+        highlightbackground=border,
+        highlightthickness=1,
+        padx=10,
+        pady=10,
+        cursor="hand2",
+      )
+      card.pack(fill=tk.X, pady=(0, 8))
+
+      title_row = tk.Frame(card, bg=card_bg)
+      title_row.pack(fill=tk.X)
+      tk.Label(
+        title_row,
+        text=race_name,
+        fg="white",
+        bg=card_bg,
+        anchor="w",
+        font=("Helvetica", 11, "bold"),
+        cursor="hand2",
+      ).pack(side=tk.LEFT, anchor="w")
+      tk.Label(
+        title_row,
+        text=race.get("grade") or "-",
+        fg="#8bd5ca" if selected else "#9aa4ad",
+        bg=card_bg,
+        anchor="e",
+        font=("Helvetica", 10, "bold"),
+        cursor="hand2",
+      ).pack(side=tk.RIGHT, anchor="e")
+
+      terrain = race.get("terrain") or "-"
+      distance = race.get("distance") or {}
+      distance_label = f"{distance.get('type') or '-'} {distance.get('meters') or '-'}m"
+      racetrack = race.get("racetrack") or "-"
+      fans = race.get("fans") or {}
+      tk.Label(
+        card,
+        text=f"{racetrack} • {terrain} • {distance_label}",
+        fg="#d6dde5",
+        bg=card_bg,
+        anchor="w",
+        justify="left",
+        cursor="hand2",
+      ).pack(fill=tk.X, pady=(6, 0))
+      tk.Label(
+        card,
+        text=f"Fans +{fans.get('gained') or '-'} • Req {fans.get('required') or '-'}",
+        fg="#9aa4ad",
+        bg=card_bg,
+        anchor="w",
+        justify="left",
+        cursor="hand2",
+      ).pack(fill=tk.X, pady=(2, 8))
+
+      action_button = tk.Button(
+        card,
+        text="Selected" if selected else "Use This Race",
+        command=lambda y=year, d=date, name=race_name: self._set_race_selector_race(y, d, name),
+      )
+      action_button.pack(anchor="e")
+
+      for widget in card.winfo_children():
+        if widget is action_button:
+          continue
+        widget.bind("<Button-1>", lambda _event, y=year, d=date, name=race_name: self._set_race_selector_race(y, d, name))
+      card.bind("<Button-1>", lambda _event, y=year, d=date, name=race_name: self._set_race_selector_race(y, d, name))
 
   def _launch_asset_creator(self):
     from core.region_adjuster.asset_creator import AssetCreatorWindow

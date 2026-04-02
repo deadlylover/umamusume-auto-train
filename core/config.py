@@ -1,6 +1,7 @@
 import json
 import os
 
+from core.race_selector import normalize_operator_race_selector
 from core.trackblazer_item_use import normalize_item_use_policy
 from core.trackblazer_shop import normalize_shop_policy
 
@@ -80,6 +81,7 @@ def reload_config(print_config=True):
     load_var('WINDOW_NAME', config["window_name"])
     load_var('RACE_SCHEDULE', config["race_schedule"])
     load_var('RACE_SCHEDULE_CONF', config["race_schedule"])
+    load_var('OPERATOR_RACE_SELECTOR', normalize_operator_race_selector(config.get("operator_race_selector")))
     load_var('CONFIG_NAME', config["config_name"])
     load_var('REST_BEFORE_SUMMER_ENERGY', config["rest_before_summer_energy"])
     load_var('RAINBOW_SUPPORT_WEIGHT_ADDITION', config["rainbow_support_weight_addition"])

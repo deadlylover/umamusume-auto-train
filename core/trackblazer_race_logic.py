@@ -8,6 +8,8 @@ main loop can log, preview, and act on.
 
 import utils.constants as constants
 import core.bot as bot
+import core.config as config
+from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
 from utils.log import debug, info, warning
 
@@ -253,6 +255,33 @@ def evaluate_trackblazer_race(state_obj, action):
       race_name=None,
       race_available=True,
       rival_indicator=False,
+      race_tier_info=race_info,
+    )
+
+  race_gate = get_race_gate_for_turn_label(
+    state_obj.get("year"),
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+  if race_gate.get("enabled") and not race_gate.get("race_allowed"):
+    selected_race = race_gate.get("selected_race")
+    blocked_reason = (
+      f"Operator race gate disabled racing on {race_gate.get('turn_label') or state_obj.get('year')}"
+    )
+    if selected_race:
+      blocked_reason += f" (selected race: {selected_race})"
+    return _decision(
+      should_race=False,
+      reason=blocked_reason,
+      training_total_stats=training_stats,
+      training_score=training_score,
+      training_supports=training_supports,
+      is_summer=summer,
+      g1_forced=False,
+      prefer_rival_race=False,
+      race_tier_target=None,
+      race_name=selected_race,
+      race_available=False,
+      rival_indicator=bool(state_obj.get("rival_indicator_detected")),
       race_tier_info=race_info,
     )
 

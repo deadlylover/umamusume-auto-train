@@ -20,6 +20,7 @@ from core.skill_scanner import collect_skill_purchase
 from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
+from core.race_selector import get_race_gate_for_turn_label
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
   SUB_PHASE_POST_ACTION_RESOLUTION,
@@ -1112,6 +1113,101 @@ def _action_func(action):
   if isinstance(action, dict):
     return action.get("func")
   return getattr(action, "func", None)
+
+
+def _action_option_pop(action, key):
+  if isinstance(action, dict):
+    action.pop(key, None)
+  elif hasattr(action, "options"):
+    action.options.pop(key, None)
+
+
+def _clear_optional_race_action_fields(action):
+  for key in (
+    "race_name",
+    "race_image_path",
+    "race_mission_available",
+    "prioritize_missions_over_g1",
+    "scheduled_race",
+    "trackblazer_lobby_scheduled_race",
+    "hammer_spendable",
+    "prefer_rival_race",
+    "race_grade_target",
+  ):
+    _action_option_pop(action, key)
+
+
+def _operator_race_gate_for_state(state_obj):
+  return get_race_gate_for_turn_label(
+    state_obj.get("year") if isinstance(state_obj, dict) else "",
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+
+
+def _operator_race_gate_blocks_optional_races(state_obj):
+  gate = _operator_race_gate_for_state(state_obj)
+  blocked = bool(gate.get("enabled") and not gate.get("race_allowed"))
+  return blocked, gate
+
+
+def _operator_race_gate_message(gate, context="racing"):
+  turn_label = gate.get("turn_label") or "this date"
+  message = f"Operator race gate disabled {context} on {turn_label}."
+  selected_race = gate.get("selected_race")
+  if selected_race:
+    message += f" Selected race remains {selected_race}."
+  return message
+
+
+def _revert_optional_race_to_fallback(action):
+  fallback_func = _action_value(action, "_rival_fallback_func")
+  if not fallback_func or fallback_func == "do_race":
+    return False
+  if isinstance(action, dict):
+    action["func"] = fallback_func
+  else:
+    action.func = fallback_func
+  if _action_value(action, "_rival_fallback_training_name"):
+    action["training_name"] = _action_value(action, "_rival_fallback_training_name")
+  if _action_value(action, "_rival_fallback_training_data"):
+    action["training_data"] = _action_value(action, "_rival_fallback_training_data")
+  _clear_optional_race_action_fields(action)
+  return True
+
+
+def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  if _action_func(action) != "do_race":
+    return None
+  if _action_value(action, "is_race_day") or _action_value(action, "trackblazer_climax_race_day"):
+    return None
+
+  blocked, gate = _operator_race_gate_blocks_optional_races(state_obj)
+  if not blocked:
+    return None
+
+  reason = _operator_race_gate_message(gate)
+  if _revert_optional_race_to_fallback(action):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message=f"{reason} Reverted to {_action_func(action)} before execute.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "reverted"
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="waiting_for_confirmation",
+    message=reason,
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  return "blocked"
 
 
 def _strategy_decision_note(state_obj, action):
@@ -3064,6 +3160,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
   profile_info = _active_region_profile_info()
   backend_state = bot.get_backend_state()
   post_action_resolution = bot.get_post_action_resolution_state()
+  operator_race_gate = _operator_race_gate_for_state(state_obj)
   debug_entries = ([ _profile_debug_entry() ] + ocr_debug) if ocr_debug is not None else ([ _profile_debug_entry() ] + _ocr_debug_for_action(state_obj, action))
   debug_entries = _enrich_ocr_debug_entries(debug_entries)
   state_summary = {
@@ -3086,6 +3183,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "pending_trackblazer_shop_check": bot.has_pending_trackblazer_shop_check(),
     "pending_trackblazer_shop_check_reason": bot.get_pending_trackblazer_shop_check_reason(),
     "state_validation": state_obj.get("state_validation"),
+    "operator_race_gate": operator_race_gate,
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
@@ -3619,8 +3717,19 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   # Run pre_run_hook (e.g. rival scout) now — after items are consumed and
   # any reassess has already returned.  This ensures energy rescue → reassess
   # completes before we open the race list.
-  if pre_run_hook is not None:
-    pre_run_hook()
+  gate_result = _enforce_operator_race_gate_before_execute(
+    state_obj,
+    action,
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  if gate_result == "blocked":
+    return "blocked"
+  if gate_result != "reverted" and pre_run_hook is not None:
+    hook_result = pre_run_hook()
+    if isinstance(hook_result, str) and hook_result in {"failed", "blocked", "reassess", "previewed", "executed"}:
+      return hook_result
   update_operator_snapshot(
     state_obj,
     action,
@@ -4378,36 +4487,39 @@ def career_lobby(dry_run_turn=False):
           action.options.pop("year", None)
           action.options.pop("trackblazer_climax_race_day", None)
 
+      optional_race_blocked, race_gate = _operator_race_gate_blocks_optional_races(state_obj)
+
       if config.PRIORITIZE_MISSIONS_OVER_G1 and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
-        debug(f"Mission race logic entered with priority.")
-        action.func = "do_race"
-        action["race_name"] = "any"
-        action["race_image_path"] = "assets/ui/match_track.png"
-        action["race_mission_available"] = True
-        update_pre_action_phase(
-          state_obj,
-          action,
-          message="Mission race candidate detected. Preparing pre-race decision.",
-        )
-        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
-        if skill_result in ("failed", "previewed"):
-          continue
-        mission_race_result = run_action_with_review(
-          state_obj,
-          action,
-          "Mission race selected. Review before race entry.",
-          sub_phase="preview_race_selection",
-        )
-        if mission_race_result == "executed":
-          record_and_finalize_turn(state_obj, action)
-          continue
-        elif mission_race_result == "previewed":
-          continue
+        if optional_race_blocked:
+          info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='mission racing')}")
         else:
-          action.func = None
-          action.options.pop("race_name", None)
-          action.options.pop("race_image_path", None)
-          action.options.pop("race_mission_available", None)
+          debug(f"Mission race logic entered with priority.")
+          action.func = "do_race"
+          action["race_name"] = "any"
+          action["race_image_path"] = "assets/ui/match_track.png"
+          action["race_mission_available"] = True
+          update_pre_action_phase(
+            state_obj,
+            action,
+            message="Mission race candidate detected. Preparing pre-race decision.",
+          )
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          if skill_result in ("failed", "previewed"):
+            continue
+          mission_race_result = run_action_with_review(
+            state_obj,
+            action,
+            "Mission race selected. Review before race entry.",
+            sub_phase="preview_race_selection",
+          )
+          if mission_race_result == "executed":
+            record_and_finalize_turn(state_obj, action)
+            continue
+          elif mission_race_result == "previewed":
+            continue
+          else:
+            action.func = None
+            _clear_optional_race_action_fields(action)
 
       # check and do scheduled races. Dirty version, should be cleaned up.
       action = strategy.check_scheduled_races(state_obj, action)
@@ -4436,90 +4548,90 @@ def career_lobby(dry_run_turn=False):
           continue
         else:
           action.func = None
-          action.options.pop("race_name", None)
-          action.options.pop("race_image_path", None)
+          _clear_optional_race_action_fields(action)
 
       # Trackblazer lobby "Scheduled Race" button — visual indicator on the race button area.
       if (
         action.func != "do_race"
         and state_obj.get("trackblazer_lobby_scheduled_race")
       ):
-        from core.trackblazer_item_use import _hammer_usage_state, _safe_int, _HAMMER_TIERS
-        held_quantities = {}
-        inventory = state_obj.get("trackblazer_inventory") or {}
-        for item_key in _HAMMER_TIERS:
-          held_quantities[item_key] = _safe_int(
-            (inventory.get(item_key) or {}).get("quantity"), 0
-          )
-        _, hammer_spendable = _hammer_usage_state(held_quantities)
-        total_spendable = sum(hammer_spendable.values())
-        info(
-          f"[TB_RACE] Lobby scheduled race detected. "
-          f"Hammer inventory: {held_quantities}, spendable (surplus beyond 3 reserved): {hammer_spendable}"
-        )
-        action.func = "do_race"
-        action["scheduled_race"] = True
-        action["race_name"] = "any"
-        action["trackblazer_lobby_scheduled_race"] = True
-        action["hammer_spendable"] = total_spendable
-        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
-        update_pre_action_phase(
-          state_obj,
-          action,
-          message=f"Trackblazer scheduled race button detected on lobby. Surplus hammers: {total_spendable}.",
-        )
-        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
-        if skill_result in ("failed", "previewed"):
-          continue
-        tb_sched_result = run_action_with_review(
-          state_obj,
-          action,
-          f"Trackblazer scheduled race detected (surplus hammers: {total_spendable}). Review before race entry.",
-          sub_phase="preview_race_selection",
-        )
-        if tb_sched_result == "executed":
-          record_and_finalize_turn(state_obj, action)
-          continue
-        elif tb_sched_result == "previewed":
-          continue
+        if optional_race_blocked:
+          info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='scheduled racing')}")
         else:
-          action.func = None
-          action.options.pop("race_name", None)
-          action.options.pop("scheduled_race", None)
-          action.options.pop("trackblazer_lobby_scheduled_race", None)
-          action.options.pop("hammer_spendable", None)
+          from core.trackblazer_item_use import _hammer_usage_state, _safe_int, _HAMMER_TIERS
+          held_quantities = {}
+          inventory = state_obj.get("trackblazer_inventory") or {}
+          for item_key in _HAMMER_TIERS:
+            held_quantities[item_key] = _safe_int(
+              (inventory.get(item_key) or {}).get("quantity"), 0
+            )
+          _, hammer_spendable = _hammer_usage_state(held_quantities)
+          total_spendable = sum(hammer_spendable.values())
+          info(
+            f"[TB_RACE] Lobby scheduled race detected. "
+            f"Hammer inventory: {held_quantities}, spendable (surplus beyond 3 reserved): {hammer_spendable}"
+          )
+          action.func = "do_race"
+          action["scheduled_race"] = True
+          action["race_name"] = "any"
+          action["trackblazer_lobby_scheduled_race"] = True
+          action["hammer_spendable"] = total_spendable
+          action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+          update_pre_action_phase(
+            state_obj,
+            action,
+            message=f"Trackblazer scheduled race button detected on lobby. Surplus hammers: {total_spendable}.",
+          )
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          if skill_result in ("failed", "previewed"):
+            continue
+          tb_sched_result = run_action_with_review(
+            state_obj,
+            action,
+            f"Trackblazer scheduled race detected (surplus hammers: {total_spendable}). Review before race entry.",
+            sub_phase="preview_race_selection",
+          )
+          if tb_sched_result == "executed":
+            record_and_finalize_turn(state_obj, action)
+            continue
+          elif tb_sched_result == "previewed":
+            continue
+          else:
+            action.func = None
+            _clear_optional_race_action_fields(action)
 
       if (not config.PRIORITIZE_MISSIONS_OVER_G1) and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
-        debug(f"Mission race logic entered.")
-        action.func = "do_race"
-        action["race_name"] = "any"
-        action["race_image_path"] = "assets/ui/match_track.png"
-        action["prioritize_missions_over_g1"] = config.PRIORITIZE_MISSIONS_OVER_G1
-        action["race_mission_available"] = True
-        update_pre_action_phase(
-          state_obj,
-          action,
-          message="Mission race candidate detected. Preparing pre-race decision.",
-        )
-        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
-        if skill_result in ("failed", "previewed"):
-          continue
-        mission_race_result = run_action_with_review(
-          state_obj,
-          action,
-          "Mission race selected. Review before race entry.",
-          sub_phase="preview_race_selection",
-        )
-        if mission_race_result == "executed":
-          record_and_finalize_turn(state_obj, action)
-          continue
-        elif mission_race_result == "previewed":
-          continue
+        if optional_race_blocked:
+          info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='mission racing')}")
         else:
-          action.func = None
-          action.options.pop("race_name", None)
-          action.options.pop("race_image_path", None)
-          action.options.pop("race_mission_available", None)
+          debug(f"Mission race logic entered.")
+          action.func = "do_race"
+          action["race_name"] = "any"
+          action["race_image_path"] = "assets/ui/match_track.png"
+          action["prioritize_missions_over_g1"] = config.PRIORITIZE_MISSIONS_OVER_G1
+          action["race_mission_available"] = True
+          update_pre_action_phase(
+            state_obj,
+            action,
+            message="Mission race candidate detected. Preparing pre-race decision.",
+          )
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          if skill_result in ("failed", "previewed"):
+            continue
+          mission_race_result = run_action_with_review(
+            state_obj,
+            action,
+            "Mission race selected. Review before race entry.",
+            sub_phase="preview_race_selection",
+          )
+          if mission_race_result == "executed":
+            record_and_finalize_turn(state_obj, action)
+            continue
+          elif mission_race_result == "previewed":
+            continue
+          else:
+            action.func = None
+            _clear_optional_race_action_fields(action)
 
       # check and do goal races. Dirty version, should be cleaned up.
       if not "Achieved" in state_obj["criteria"]:
@@ -4547,6 +4659,7 @@ def career_lobby(dry_run_turn=False):
             continue
           else:
             action.func = None
+            _clear_optional_race_action_fields(action)
 
       training_function_name = strategy.get_training_template(state_obj)['training_function']
 
@@ -4707,6 +4820,32 @@ def career_lobby(dry_run_turn=False):
               f"training_total={race_decision.get('training_total_stats')} | "
               f"supports={race_decision.get('training_supports')}"
             ),
+          )
+
+      optional_race_blocked, race_gate = _operator_race_gate_blocks_optional_races(state_obj)
+      if (
+        optional_race_blocked
+        and action.func == "do_race"
+        and not action.get("is_race_day")
+        and not action.get("trackblazer_climax_race_day")
+      ):
+        blocked_reason = _operator_race_gate_message(race_gate)
+        if _revert_optional_race_to_fallback(action):
+          action["trackblazer_race_decision"] = {
+            "should_race": False,
+            "reason": blocked_reason,
+            "race_name": race_gate.get("selected_race"),
+            "race_available": False,
+            "prefer_rival_race": False,
+          }
+          info(f"[RACE_GATE] {blocked_reason} Reverted to {_action_func(action)} before review.")
+          update_operator_snapshot(
+            state_obj,
+            action,
+            phase="evaluating_strategy",
+            message=blocked_reason,
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes="operator_race_gate_veto",
           )
 
       if state_obj["turn"] == "Race Day" or state_obj.get("trackblazer_climax_race_day"):
