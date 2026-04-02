@@ -468,16 +468,16 @@
     6
   ],
   "FULL_STATS_STATUS_BBOX": [
-    69,
-    486,
-    738,
-    518
+    29,
+    839,
+    749,
+    1349
   ],
   "FULL_STATS_STATUS_REGION": [
-    69,
-    486,
-    669,
-    32
+    29,
+    839,
+    720,
+    510
   ],
   "FULL_STATS_APTITUDE_BBOX": [
     185,
@@ -623,6 +623,18 @@
     723,
     1053
   ],
+  "MANT_INVENTORY_SCROLLSWIPE_BBOX": [
+    1170,
+    360,
+    1290,
+    800
+  ],
+  "MANT_INVENTORY_SCROLLSWIPE_REGION": [
+    1170,
+    360,
+    120,
+    440
+  ],
   "MANT_INVENTORY_SCROLLBAR_BBOX": [
     736,
     248,
@@ -754,6 +766,18 @@
     1036,
     19,
     31
+  ],
+  "TRACKBLAZER_CLIMAX_RACE_RESULT_BBOX": [
+    771,
+    78,
+    1124,
+    240
+  ],
+  "TRACKBLAZER_CLIMAX_RACE_RESULT_REGION": [
+    771,
+    78,
+    353,
+    162
   ],
   "TRACKBLAZER_COMPLETE_CAREER_BBOX": [
     560,

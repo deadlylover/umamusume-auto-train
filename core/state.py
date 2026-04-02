@@ -11,14 +11,14 @@ from utils.log import info, warning, error, debug, debug_window, args
 
 from utils.screenshot import enhanced_screenshot, enhance_image_for_ocr, binarize_between_colors, crop_after_plus_component, clean_noise, custom_grabcut
 from core.ocr import extract_text, extract_number, extract_allowed_text, reader
-from core.recognizer import count_pixels_of_color, find_color_of_pixel, closest_color
+from core.recognizer import count_pixels_of_color, find_color_of_pixel, closest_color, compare_brightness
 from utils.tools import click, sleep, get_secs, check_race_suitability, get_aptitude_index
 import utils.device_action_wrapper as device_action
 import utils.pyautogui_actions as pyautogui_actions
 import core.bot as bot
 from core.platform.window_focus import apply_configured_recognition_geometry
 
-from utils.shared import CleanDefaultDict
+from utils.shared import CleanDefaultDict, read_status_effects_from_current_full_stats
 import core.config as config
 import utils.constants as constants
 from collections import defaultdict
@@ -399,6 +399,64 @@ def _close_full_stats():
     warning("[STATE] Failed to close full stats via close/back buttons.")
   return False
 
+
+def _find_infirmary_button_match():
+  screenshot = device_action.screenshot(region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+  infirmary_matches = device_action.match_template(
+    "assets/buttons/infirmary_btn.png",
+    screenshot,
+    threshold=0.85,
+  )
+  if not infirmary_matches:
+    return None
+  return infirmary_matches[0]
+
+
+def _is_infirmary_button_active():
+  infirmary_match = _find_infirmary_button_match()
+  if infirmary_match is None:
+    return False
+  infirmary_screen_image = device_action.screenshot_match(
+    match=infirmary_match,
+    region=constants.SCREEN_BOTTOM_BBOX,
+  )
+  return compare_brightness(
+    template_path="assets/buttons/infirmary_btn.png",
+    other=infirmary_screen_image,
+  )
+
+
+def _collect_lobby_status_effects(state_object):
+  state_object["status_effect_names"] = []
+  state_object["status_effect_severity"] = 0
+  state_object["infirmary_available"] = False
+
+  if not _is_infirmary_button_active():
+    return
+
+  state_object["infirmary_available"] = True
+  if config.VERBOSE_ACTIONS:
+    info("[STATE] Infirmary button is active; opening full stats to read status effects.")
+  if not device_action.locate_and_click(
+    "assets/buttons/full_stats.png",
+    min_search_time=get_secs(1),
+    region_ltrb=constants.SCREEN_MIDDLE_BBOX,
+  ):
+    warning("[STATE] Full stats button not found; skipping status-effect OCR.")
+    return
+
+  sleep(0.5)
+  _status_text, status_effect_names, total_severity = read_status_effects_from_current_full_stats()
+  state_object["status_effect_names"] = status_effect_names
+  state_object["status_effect_severity"] = total_severity
+
+  closed = _close_full_stats()
+  if config.VERBOSE_ACTIONS:
+    info(
+      f"[STATE] Status effects detected: {status_effect_names} "
+      f"(severity={total_severity}, closed={closed})"
+    )
+
 def collect_main_state():
   global aptitudes_cache
   clear_runtime_ocr_debug()
@@ -468,6 +526,7 @@ def collect_main_state():
   energy_level, max_energy = get_energy_level()
   state_object["energy_level"] = energy_level
   state_object["max_energy"] = max_energy
+  _collect_lobby_status_effects(state_object)
 
   #find a better way to do this
   if device_action.locate("assets/ui/recreation_with.png"):

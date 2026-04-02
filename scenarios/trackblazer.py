@@ -43,6 +43,9 @@ _STRICT_ITEM_THRESHOLDS = {
     "stamina_ankle_weights": 0.88,
     "power_ankle_weights": 0.88,
     "guts_ankle_weights": 0.88,
+    "coaching_megaphone": 0.89,
+    "motivating_megaphone": 0.89,
+    "empowering_megaphone": 0.89,
 }
 _ITEM_ROW_CLUSTER_TOLERANCE = 28
 _ITEM_CLUSTER_PADDING = 10
@@ -89,18 +92,34 @@ _FAMILY_COLOR_TIEBREAK_MARGIN = 0.025
 _CLEAT_HAMMER_HEAD_ROI = (0.48, 0.24, 0.24, 0.24)
 _CLEAT_HAMMER_GOLD_HUE_RANGE = (12, 38)
 _CLEAT_HAMMER_COLOR_MIN_DELTA = 0.04
-# Megaphone spark disambiguation — the three megaphones differ in the number
-# of yellow lightning-bolt sparks radiating from the horn.
-# ROI covers the left half and top 80% of the icon (where sparks cluster).
-_MEGAPHONE_SPARK_ROI = (0.0, 0.0, 0.50, 0.80)
-# Expected white-spark-pixel ratios (sat<50, val>220) in the spark ROI.
-_MEGAPHONE_SPARK_CENTERS = {
-    "coaching_megaphone":   0.044,
-    "motivating_megaphone": 0.060,
-    "empowering_megaphone": 0.075,
+# Megaphone multi-feature disambiguation — the three megaphones share an
+# identical body shape but differ in the number/density of yellow
+# lightning-bolt sparks radiating from the horn. A single pixel-ratio
+# feature cannot reliably separate coaching from motivating, so we use
+# three complementary features measured in different sub-regions:
+#   F0  yellow_BL     — yellow pixel ratio in bottom-left quadrant
+#                       (inversely correlated with spark density — coaching
+#                       has more yellow concentrated in the body/bottom)
+#   F1  white_UR      — white highlight ratio in upper-right quadrant
+#                       (spark-tip highlights, increases with spark count)
+#   F2  high_sat_top  — high-saturation pixel ratio in the top half
+#                       (captures overall spark intensity/spread)
+# Classification uses L2 distance to calibration centres in this 3-D
+# feature space.  Minimum pairwise centre distance is ~0.049 (coaching ↔
+# motivating), giving comfortable margin for real-screenshot noise.
+_MEGAPHONE_FEATURE_CENTERS = {
+    "coaching_megaphone":   (0.6369, 0.0215, 0.0457),
+    "motivating_megaphone": (0.5917, 0.0444, 0.0661),
+    "empowering_megaphone": (0.5108, 0.0553, 0.1012),
 }
-# If the observed ratio is farther than this from all centres, abstain.
-_MEGAPHONE_SPARK_MAX_DIST = 0.018
+# If the observed feature vector is farther than this from all centres,
+# abstain (the icon is too noisy or not a megaphone variant).
+_MEGAPHONE_FEATURE_MAX_DIST = 0.045
+_MEGAPHONE_FEATURE_MIN_GAP = 0.015
+# Megaphone features are only allowed to override template scores when the
+# family candidates are already close enough to be a real tie. When raw
+# template matching has a clear winner, trust it.
+_MEGAPHONE_TEMPLATE_TIE_MARGIN = 0.03
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -1057,52 +1076,128 @@ def _cleat_hammer_color_vote(bgr_crop, candidates):
     return best_candidate
 
 
-def _megaphone_spark_vote(icon_crop, candidates):
-    """Pick megaphone variant by spark density in the upper-left region.
+def _megaphone_feature_vote(icon_crop, candidates):
+    """Return a confident megaphone variant vote from icon-only features.
 
     The three megaphones share an identical body shape but differ in the
-    number/density of yellow lightning-bolt sparks radiating from the horn:
-        coaching    → fewest sparks  (lowest white-pixel ratio)
-        motivating  → medium sparks
-        empowering  → most sparks   (highest white-pixel ratio)
+    number/density of yellow lightning-bolt sparks radiating from the horn.
+    We measure three features in different sub-regions of the icon and
+    classify by L2 distance to calibration centres:
+
+        F0  yellow_BL     — yellow ratio in bottom-left quadrant
+        F1  white_UR      — white highlight ratio in upper-right quadrant
+        F2  high_sat_top  — high-saturation ratio in the top half
 
     *icon_crop* must be the matched icon region (not the padded cluster
     crop), so that surrounding inventory content does not pollute the
     measurement.
 
-    Returns the candidate whose expected spark density best matches the
-    observation, or ``None`` if the signal is too ambiguous.
+    Returns a payload containing the winning candidate and confidence
+    metrics, or ``None`` if the signal is too noisy / ambiguous.
     """
-    spark_crop = _relative_crop(icon_crop, *_MEGAPHONE_SPARK_ROI)
-    if spark_crop is None or getattr(spark_crop, "size", 0) == 0:
+    if icon_crop is None or getattr(icon_crop, "size", 0) == 0:
         return None
-    hsv = cv2.cvtColor(spark_crop, cv2.COLOR_RGB2HSV)
-    sat = hsv[:, :, 1]
-    val = hsv[:, :, 2]
+    h, w = icon_crop.shape[:2]
+    # Trim 2px from each edge to avoid background bleed from crop jitter.
+    trim = min(2, h // 6, w // 6)
+    if trim > 0:
+        icon_crop = icon_crop[trim:h - trim, trim:w - trim]
+        h, w = icon_crop.shape[:2]
+    if h < 4 or w < 4:
+        return None
+    hsv = cv2.cvtColor(icon_crop, cv2.COLOR_RGB2HSV)
 
-    # Spark highlights: low saturation + high value (white / near-white)
-    spark_mask = (sat < 50) & (val > 220)
-    spark_ratio = float(spark_mask.mean())
+    # F0: yellow pixel ratio in bottom-left quadrant
+    bl = hsv[h // 2:, :w // 2]
+    yellow_bl = float(((bl[:, :, 0] >= 15) & (bl[:, :, 0] <= 35) & (bl[:, :, 1] > 120)).mean())
 
-    best_candidate = None
-    best_dist = float("inf")
+    # F1: white highlight ratio in upper-right quadrant
+    ur = hsv[:h // 2, w // 2:]
+    white_ur = float(((ur[:, :, 1] < 50) & (ur[:, :, 2] > 220)).mean())
+
+    # F2: high-saturation pixel ratio in the top half
+    top = hsv[:h // 2]
+    high_sat_top = float((top[:, :, 1] > 180).mean())
+
+    obs = np.array([yellow_bl, white_ur, high_sat_top])
+
+    ranked_candidates = []
     for cand in candidates:
-        center = _MEGAPHONE_SPARK_CENTERS.get(cand["item_name"])
+        center = _MEGAPHONE_FEATURE_CENTERS.get(cand["item_name"])
         if center is None:
             continue
-        dist = abs(spark_ratio - center)
-        if dist < best_dist:
-            best_dist = dist
-            best_candidate = cand
+        dist = float(np.linalg.norm(obs - np.array(center)))
+        ranked_candidates.append((dist, cand))
+    if not ranked_candidates:
+        return None
+    ranked_candidates.sort(key=lambda entry: entry[0])
+    best_dist, best_candidate = ranked_candidates[0]
+    runner_up_dist = ranked_candidates[1][0] if len(ranked_candidates) > 1 else float("inf")
+    confidence_gap = runner_up_dist - best_dist
 
     debug(
-        f"[TB_COLOR] megaphone spark_ratio={spark_ratio:.4f} "
+        f"[TB_COLOR] megaphone features=[{yellow_bl:.4f},{white_ur:.4f},{high_sat_top:.4f}] "
         f"→ {best_candidate['item_name'] if best_candidate else '?'} "
-        f"(dist={best_dist:.4f})"
+        f"(dist={best_dist:.4f}, gap={confidence_gap:.4f})"
     )
-    if best_dist > _MEGAPHONE_SPARK_MAX_DIST:
+    if best_dist > _MEGAPHONE_FEATURE_MAX_DIST:
         return None
-    return best_candidate
+    if confidence_gap < _MEGAPHONE_FEATURE_MIN_GAP:
+        return None
+    return {
+        "candidate": best_candidate,
+        "best_dist": float(best_dist),
+        "runner_up_dist": float(runner_up_dist),
+        "confidence_gap": float(confidence_gap),
+        "features": (float(yellow_bl), float(white_ur), float(high_sat_top)),
+    }
+
+
+def _resolve_megaphone_candidate(best, candidates, screenshot):
+    """Apply megaphone features only as a conservative tie-break.
+
+    Raw template matching remains the primary signal. The feature vote is
+    only allowed to override when the top two template scores are already
+    close enough to indicate a real ambiguity, and the feature vote itself
+    is clearly separated from the runner-up centre.
+    """
+    if best is None or screenshot is None or len(candidates or []) < 2:
+        return best
+
+    ordered_candidates = sorted(candidates, key=lambda candidate: candidate["score"], reverse=True)
+    score_gap = float(ordered_candidates[0]["score"] - ordered_candidates[1]["score"])
+    if score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN:
+        debug(
+            f"[TB_FAMILY] Megaphone template winner kept: {best['item_name']}({best['score']:.4f}) "
+            f"score_gap={score_gap:.4f}"
+        )
+        return best
+
+    bx, by, bw, bh = best["match"]
+    icon_crop = screenshot[by:by + bh, bx:bx + bw].copy()
+    feature_vote = _megaphone_feature_vote(icon_crop, ordered_candidates)
+    if feature_vote is None:
+        debug(
+            f"[TB_FAMILY] Megaphone feature vote abstained: {best['item_name']}({best['score']:.4f}) "
+            f"score_gap={score_gap:.4f}"
+        )
+        return best
+
+    feature_winner = feature_vote["candidate"]
+    if feature_winner["item_name"] != best["item_name"]:
+        debug(
+            f"[TB_FAMILY] Megaphone feature override: {best['item_name']}({best['score']:.4f}) "
+            f"→ {feature_winner['item_name']}({feature_winner['score']:.4f}) "
+            f"score_gap={score_gap:.4f} feature_gap={feature_vote['confidence_gap']:.4f} "
+            f"best_dist={feature_vote['best_dist']:.4f}"
+        )
+        return feature_winner
+    debug(
+        f"[TB_FAMILY] Megaphone feature confirmed: {best['item_name']}({best['score']:.4f}) "
+        f"score_gap={score_gap:.4f} feature_gap={feature_vote['confidence_gap']:.4f} "
+        f"best_dist={feature_vote['best_dist']:.4f}"
+    )
+    return best
 
 
 def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
@@ -1161,19 +1256,7 @@ def _resolve_family_cluster(cluster, family_items, screenshot, threshold):
             )
             best = color_winner
     if any(c["item_name"].endswith("_megaphone") for c in passing_candidates):
-        # Extract the precise icon region from the screenshot (not the padded
-        # cluster crop) so surrounding inventory content doesn't pollute the
-        # spark-density measurement.
-        bx, by, bw, bh = best["match"]
-        icon_crop = screenshot[by:by + bh, bx:bx + bw].copy()
-        spark_winner = _megaphone_spark_vote(icon_crop, passing_candidates)
-        if spark_winner is not None and spark_winner["item_name"] != best["item_name"]:
-            debug(
-                f"[TB_FAMILY] Megaphone spark tiebreak: {best['item_name']}({best['score']:.4f}) "
-                f"→ {spark_winner['item_name']}({spark_winner['score']:.4f}) "
-                f"margin={best['score'] - spark_winner['score']:.4f}"
-            )
-            best = spark_winner
+        best = _resolve_megaphone_candidate(best, passing_candidates, screenshot)
     return best
 
 

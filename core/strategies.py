@@ -38,6 +38,7 @@ class Strategy:
     action = self.get_action(state, training_template, action)
 
     action["energy_level"] = state["energy_level"]
+    action["date_event_available"] = state.get("date_event_available")
     # Store the actual training function used (may be overridden by scoring mode)
     import core.bot as _bot
     if constants.SCENARIO_NAME in ("mant", "trackblazer") and _bot.get_trackblazer_scoring_mode() == "stat_focused":
@@ -117,6 +118,24 @@ class Strategy:
       "valid": not invalid_reasons,
       "invalid_reasons": invalid_reasons,
     }
+
+  @staticmethod
+  def _trackblazer_blocks_generic_recreation(state):
+    return constants.SCENARIO_NAME in ("mant", "trackblazer") and not state.get("date_event_available")
+
+  @staticmethod
+  def _trackblazer_has_condition_cure_item(state):
+    if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+      return False
+    status_effect_names = list(state.get("status_effect_names") or [])
+    if not status_effect_names:
+      return False
+    held_quantities = (state.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
+    if int(held_quantities.get("miracle_cure", 0) or 0) > 0:
+      return True
+    if "Skin Outbreak" in status_effect_names and int(held_quantities.get("rich_hand_cream", 0) or 0) > 0:
+      return True
+    return False
 
   def get_training_template(self, state):
     if not self.first_decision_done:
@@ -226,8 +245,22 @@ class Strategy:
     # add screen bottom bbox x, y to match x, y so that we can take the image of it below
     infirmary_screen_image = device_action.screenshot_match(match=infirmary_matches[0], region=constants.SCREEN_BOTTOM_BBOX)
     if compare_brightness(template_path="assets/buttons/infirmary_btn.png", other=infirmary_screen_image):
-      status_effect_names, total_severity = check_status_effects()
-      state["status_effect_names"] = status_effect_names
+      status_effect_names = list(state.get("status_effect_names") or [])
+      total_severity = int(state.get("status_effect_severity") or 0)
+      if not status_effect_names and total_severity <= 0:
+        status_effect_names, total_severity = check_status_effects()
+        state["status_effect_names"] = status_effect_names
+        state["status_effect_severity"] = total_severity
+
+      if self._trackblazer_has_condition_cure_item(state):
+        info(
+          f"Trackblazer condition detected {status_effect_names}; "
+          f"prefer held cure item over infirmary."
+        )
+        # TODO: add infirmary fallback when no scheduled race is pending and no
+        # curative Trackblazer item is available.
+        return action
+
       missing_energy = state["max_energy"] - state["energy_level"]
       if total_severity >= config.MINIMUM_CONDITION_SEVERITY:
         if not action.func:
@@ -244,6 +277,9 @@ class Strategy:
 
   def check_recreation(self, state, action):
     action["can_mood_increase"] = False
+    if self._trackblazer_blocks_generic_recreation(state):
+      debug("Skipping recreation in Trackblazer because no friend date event is available.")
+      return action
     if (
       constants.SCENARIO_NAME in ("mant", "trackblazer")
       and state.get("wit_failure_gate_blocked")

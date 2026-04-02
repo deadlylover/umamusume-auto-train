@@ -1,4 +1,7 @@
 # shared classes and functions
+import difflib
+import re
+
 from utils.screenshot import enhanced_screenshot
 from core.ocr import extract_text
 import utils.device_action_wrapper as device_action
@@ -202,28 +205,77 @@ def get_race_type():
   debug(f"Race info text: {race_info_text}")
   return race_info_text
 
+
+def _normalize_status_text(text):
+  return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _compact_status_text(text):
+  return re.sub(r"[^a-z0-9]+", "", _normalize_status_text(text))
+
+
+def _extract_status_effect_matches(status_effects_text, fuzzy_threshold=0.78):
+  normalized_text = _normalize_status_text(status_effects_text)
+  compact_text = _compact_status_text(status_effects_text)
+  normalized_words = re.sub(r"[^a-z0-9]+", " ", normalized_text).split()
+  matches = []
+
+  for status_name in constants.BAD_STATUS_EFFECTS:
+    normalized_name = _normalize_status_text(status_name)
+    compact_name = _compact_status_text(status_name)
+    if not compact_name:
+      continue
+    if compact_name in compact_text:
+      matches.append(status_name)
+      debug(f"[STATUS] Exact status match: '{status_name}'")
+      continue
+
+    name_words = normalized_name.split()
+    candidate_windows = set()
+    for window_size in range(max(1, len(name_words) - 1), len(name_words) + 2):
+      if window_size > len(normalized_words):
+        continue
+      for index in range(len(normalized_words) - window_size + 1):
+        candidate_windows.add(" ".join(normalized_words[index:index + window_size]))
+
+    best_score = 0.0
+    best_candidate = ""
+    for candidate in candidate_windows:
+      score = max(
+        difflib.SequenceMatcher(None, candidate, normalized_name).ratio(),
+        difflib.SequenceMatcher(None, _compact_status_text(candidate), compact_name).ratio(),
+      )
+      if score > best_score:
+        best_score = score
+        best_candidate = candidate
+
+    if best_score >= fuzzy_threshold:
+      matches.append(status_name)
+      debug(
+        f"[STATUS] Fuzzy status match: '{status_name}' from '{best_candidate}' "
+        f"(score={best_score:.3f})"
+      )
+
+  return matches
+
+
+def read_status_effects_from_current_full_stats():
+  status_effects_screen = enhanced_screenshot(constants.FULL_STATS_STATUS_REGION)
+  status_effects_text = extract_text(status_effects_screen)
+  debug(f"Status effects text: {status_effects_text}")
+  matches = _extract_status_effect_matches(status_effects_text)
+  total_severity = sum(constants.BAD_STATUS_EFFECTS[k]["Severity"] for k in matches)
+  debug(f"Matches: {matches}, severity: {total_severity}")
+  return status_effects_text, matches, total_severity
+
 def check_status_effects():
   if not device_action.locate_and_click("assets/buttons/full_stats.png", min_search_time=get_secs(1), region_ltrb=constants.SCREEN_MIDDLE_BBOX):
     error("Couldn't click full stats button. Going back.")
     return [], 0
   sleep(0.5)
   status_effects_screen = enhanced_screenshot(constants.FULL_STATS_STATUS_REGION)
-
   screen = np.array(status_effects_screen)  # currently grayscale
   screen = cv2.cvtColor(screen, cv2.COLOR_GRAY2BGR)  # convert to 3-channel BGR for display
-
-  status_effects_text = extract_text(status_effects_screen)
-  debug(f"Status effects text: {status_effects_text}")
-
-  normalized_text = status_effects_text.lower().replace(" ", "")
-
-  matches = [
-      k for k in constants.BAD_STATUS_EFFECTS
-      if k.lower().replace(" ", "") in normalized_text
-  ]
-
-  total_severity = sum(constants.BAD_STATUS_EFFECTS[k]["Severity"] for k in matches)
-
-  debug(f"Matches: {matches}, severity: {total_severity}")
+  _status_effects_text, matches, total_severity = read_status_effects_from_current_full_stats()
   device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(1), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
   return matches, total_severity

@@ -100,6 +100,15 @@ event_progress_templates = [
 
 
 def do_recreation(options=None):
+  if options is None:
+    options = {}
+  if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    date_event_available = options.get("date_event_available")
+    if date_event_available is None:
+      date_event_available = bool(device_action.locate("assets/ui/recreation_with.png"))
+    if not date_event_available:
+      info("[RECREATION] Trackblazer recreation blocked because no friend date event is available.")
+      return False
   recreation_btn = device_action.locate("assets/buttons/recreation_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
 
   if recreation_btn:
@@ -134,12 +143,19 @@ def do_recreation(options=None):
         break
       
     debug(f"Available recreation: {available_recreation}")  
-    device_action.click(target=available_recreation, duration=0.15)
+    if not available_recreation:
+      warning("[RECREATION] Recreation menu opened but no valid friend event target was identified.")
+      return False
+    if not device_action.click(target=available_recreation, duration=0.15):
+      warning("[RECREATION] Failed to click the selected recreation target.")
+      return False
   else:
     debug(f"No recreation button found, clicking rest summer button")
     recreation_summer_btn = device_action.locate("assets/buttons/rest_summer_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
     if recreation_summer_btn:
-      device_action.click(target=recreation_summer_btn, duration=0.15)
+      if not device_action.click(target=recreation_summer_btn, duration=0.15):
+        warning("[RECREATION] Failed to click the summer recreation fallback button.")
+        return False
     else:
       return False
   
