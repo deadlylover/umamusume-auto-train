@@ -2,7 +2,6 @@
 # Shared state variables for the bot, accessible across modules
 
 import datetime
-import json
 import os
 import threading
 import time
@@ -145,10 +144,6 @@ def _trace_ts(ts=None):
   return datetime.datetime.fromtimestamp(target).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f %Z")
 
 
-def _json_text(value):
-  return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True, default=str)
-
-
 def _turn_trace_summary_line(snapshot):
   summary = snapshot.get("state_summary") or {}
   selected_action = snapshot.get("selected_action") or {}
@@ -173,21 +168,84 @@ def _turn_trace_summary_line(snapshot):
   )
 
 
+def _trace_value(value):
+  if value in (None, "", [], (), {}):
+    return "-"
+  if isinstance(value, bool):
+    return "yes" if value else "no"
+  if isinstance(value, float):
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+  if isinstance(value, (list, tuple)):
+    return ", ".join(str(item) for item in value) if value else "-"
+  return str(value)
+
+
+def _trace_click_line(index, click):
+  if not isinstance(click, dict):
+    return f"  {index}. {_trace_value(click)}"
+  parts = [f"  {index}. {click.get('label') or 'click'}"]
+  if click.get("template"):
+    parts.append(f"template={click['template']}")
+  if click.get("region_key"):
+    parts.append(f"region={click['region_key']}")
+  if click.get("note"):
+    parts.append(f"note={click['note']}")
+  return " | ".join(parts)
+
+
+def _trace_training_line(index, training):
+  if not isinstance(training, dict):
+    return f"  {index}. {_trace_value(training)}"
+  score_tuple = training.get("score_tuple") or []
+  score = score_tuple[0] if score_tuple else None
+  parts = [
+    f"  {index}. {training.get('name') or 'unknown'}",
+    f"score={_trace_value(score)}",
+    f"fail={_trace_value(training.get('failure'))}%",
+    f"supports={_trace_value(training.get('total_supports'))}",
+  ]
+  rainbows = training.get("total_rainbow_friends")
+  if rainbows not in (None, ""):
+    parts.append(f"rainbows={_trace_value(rainbows)}")
+  gains = training.get("stat_gains") or {}
+  if gains:
+    gain_text = ", ".join(f"{stat}+{value}" for stat, value in gains.items() if value)
+    if gain_text:
+      parts.append(f"gains={gain_text}")
+  if training.get("filtered_out"):
+    parts.append(f"filtered={_trace_value(training.get('excluded_reason'))}")
+  return " | ".join(parts)
+
+
+def _trace_action_line(name, value):
+  if isinstance(value, dict):
+    scalar_parts = []
+    for key, item in value.items():
+      if isinstance(item, (dict, list, tuple)):
+        continue
+      scalar_parts.append(f"{key}={_trace_value(item)}")
+    if scalar_parts:
+      return f"  - {name}: " + " | ".join(scalar_parts)
+    return f"  - {name}:"
+  if isinstance(value, (list, tuple)):
+    if not value:
+      return f"  - {name}: none"
+    item_text = "; ".join(_trace_value(item) for item in value)
+    return f"  - {name}: {item_text}"
+  return f"  - {name}: {_trace_value(value)}"
+
+
 def _format_trace_snapshot(snapshot, sequence, ts):
   lines = []
   turn_label = snapshot.get("turn_label") or "unknown turn"
+  runtime_state = get_runtime_state()
   selected_action = snapshot.get("selected_action") or {}
   lines.append(f"[SNAPSHOT {sequence:03d}] {_trace_ts(ts)}")
-  lines.append(f"Turn: {turn_label}")
-  lines.append(f"Scenario: {snapshot.get('scenario_name') or 'unknown'}")
   lines.append(
-    f"Phase: {selected_action.get('phase') or get_runtime_state().get('phase') or '?'}"
+    f"Turn: {turn_label} | phase={runtime_state.get('phase') or '?'} | "
+    f"sub={snapshot.get('sub_phase') or runtime_state.get('sub_phase') or '?'} | "
+    f"intent={snapshot.get('execution_intent') or runtime_state.get('execution_intent') or '?'}"
   )
-  runtime_state = get_runtime_state()
-  lines[-1] = f"Phase: {runtime_state.get('phase') or '?'}"
-  lines.append(f"Sub-phase: {snapshot.get('sub_phase') or runtime_state.get('sub_phase') or '?'}")
-  lines.append(f"Status: {runtime_state.get('status') or '?'}")
-  lines.append(f"Intent: {snapshot.get('execution_intent') or runtime_state.get('execution_intent') or '?'}")
   message = runtime_state.get("message") or ""
   error_text = runtime_state.get("error") or ""
   if message:
@@ -202,21 +260,21 @@ def _format_trace_snapshot(snapshot, sequence, ts):
   lines.append(
     "Available Actions: " + (", ".join(str(value) for value in available_actions) if available_actions else "none")
   )
-  lines.append("")
-  lines.append("State Summary JSON:")
-  lines.append(_json_text(snapshot.get("state_summary") or {}))
-  lines.append("")
-  lines.append("Selected Action JSON:")
-  lines.append(_json_text(selected_action))
-  lines.append("")
-  lines.append("Ranked Trainings JSON:")
-  lines.append(_json_text(snapshot.get("ranked_trainings") or []))
-  lines.append("")
-  lines.append("Planned Actions JSON:")
-  lines.append(_json_text(snapshot.get("planned_actions") or {}))
-  lines.append("")
-  lines.append("Planned Clicks JSON:")
-  lines.append(_json_text(snapshot.get("planned_clicks") or []))
+  ranked_trainings = snapshot.get("ranked_trainings") or []
+  if ranked_trainings:
+    lines.append("Top Trainings:")
+    for index, training in enumerate(ranked_trainings[:5], start=1):
+      lines.append(_trace_training_line(index, training))
+  planned_actions = snapshot.get("planned_actions") or {}
+  if planned_actions:
+    lines.append("Planned Actions:")
+    for name, value in planned_actions.items():
+      lines.append(_trace_action_line(name, value))
+  planned_clicks = snapshot.get("planned_clicks") or []
+  if planned_clicks:
+    lines.append("Planned Clicks:")
+    for index, click in enumerate(planned_clicks, start=1):
+      lines.append(_trace_click_line(index, click))
   lines.append("")
   lines.append("---")
   lines.append("")
@@ -225,21 +283,24 @@ def _format_trace_snapshot(snapshot, sequence, ts):
 
 def _format_trace_event(entry, sequence):
   ts = entry.get("_ts", time.time())
-  lines = []
-  lines.append(f"[EVENT {sequence:03d}] {_trace_ts(ts)}")
-  lines.append(f"Turn: {entry.get('turn_label') or turn_trace_current_turn_label or 'unknown turn'}")
-  lines.append(f"Phase: {entry.get('phase') or '?'}")
-  lines.append(f"Sub-phase: {entry.get('sub_phase') or '?'}")
-  lines.append(
-    f"Event: {entry.get('event') or '?'} | Asset: {entry.get('asset') or '?'} | "
-    f"Result: {entry.get('result') or '?'} | Context: {entry.get('context') or '?'}"
+  turn_label = entry.get("turn_label") or turn_trace_current_turn_label or "unknown turn"
+  line = (
+    f"[EVENT {sequence:03d}] {_trace_ts(ts)} | {turn_label} | "
+    f"{entry.get('event') or '?'} {entry.get('asset') or '?'} -> {entry.get('result') or '?'}"
   )
-  lines.append("Event Payload JSON:")
-  lines.append(_json_text(entry))
-  lines.append("")
-  lines.append("---")
-  lines.append("")
-  return "\n".join(lines)
+  context = entry.get("context")
+  if context:
+    line += f" | ctx={context}"
+  phase = entry.get("phase")
+  sub_phase = entry.get("sub_phase")
+  if phase:
+    line += f" | phase={phase}"
+  if sub_phase and sub_phase != phase:
+    line += f" | sub={sub_phase}"
+  note = entry.get("note") or entry.get("reason") or ""
+  if note:
+    line += f" | note={note}"
+  return line + "\n"
 
 
 def _write_turn_trace_text_unlocked(text):

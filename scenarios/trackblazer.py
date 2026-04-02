@@ -2619,7 +2619,11 @@ def scan_trackblazer_shop_inventory(
 
     rows = sorted(rows, key=lambda entry: entry["row_center_y"])
     visible_items = [entry["item_name"] for entry in rows]
-    purchasable_items = [entry["item_name"] for entry in rows if not entry.get("purchased")]
+    purchasable_items = [
+        entry["item_name"]
+        for entry in rows
+        if not entry.get("purchased") and entry.get("checkbox_target")
+    ]
 
     purchased_items = [entry["item_name"] for entry in rows if entry.get("purchased")]
     timing = {

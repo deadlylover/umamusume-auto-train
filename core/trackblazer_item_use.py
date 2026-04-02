@@ -640,7 +640,11 @@ def _current_held_quantity(item_key, inventory, held_quantities):
 def _training_snapshot(training_name, training_data):
   training_data = training_data if isinstance(training_data, dict) else {}
   stat_gains = training_data.get("stat_gains") or {}
-  total_stat_gain = sum(_safe_int(value, 0) for value in stat_gains.values())
+  total_stat_gain = sum(
+    _safe_int(value, 0)
+    for stat_name, value in stat_gains.items()
+    if stat_name != "sp"
+  )
   return {
     "training_name": training_name,
     "failure": _safe_int(training_data.get("failure"), 0),
@@ -875,7 +879,11 @@ def _usage_context(state_obj, action):
   training_data = training_data if isinstance(training_data, dict) else {}
   training_name = action.get("training_name") if hasattr(action, "get") else None
   stat_gains = training_data.get("stat_gains") or {}
-  total_stat_gain = sum(_safe_int(value, 0) for value in stat_gains.values())
+  total_stat_gain = sum(
+    _safe_int(value, 0)
+    for stat_name, value in stat_gains.items()
+    if stat_name != "sp"
+  )
   matching_stat_gain = _safe_int(stat_gains.get(training_name), 0)
   score_tuple = training_data.get("score_tuple") or (0.0, 0)
   timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))

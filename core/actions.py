@@ -175,7 +175,11 @@ def skip_turn(options=None):
   return do_training(options)
 
 def do_rest(options=None):
-  if config.NEVER_REST_ENERGY > 0 and options["energy_level"] > config.NEVER_REST_ENERGY:
+  if (
+    config.NEVER_REST_ENERGY > 0
+    and options["energy_level"] > config.NEVER_REST_ENERGY
+    and not options.get("disable_skip_turn_fallback")
+  ):
     info(f"Wanted to rest when energy was above {config.NEVER_REST_ENERGY}, training wit instead.")
     return skip_turn(options)
   rest_btn = device_action.locate("assets/buttons/rest_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)

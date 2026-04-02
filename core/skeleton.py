@@ -1852,6 +1852,29 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   }
 
 
+def _trackblazer_action_failure_should_block_retry(state_obj, action):
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return False
+  if not hasattr(action, "get"):
+    return False
+
+  planned_items = list(action.get("trackblazer_pre_action_items") or [])
+  inventory_flow = state_obj.get("trackblazer_inventory_flow") or {}
+  inventory_reason = str(inventory_flow.get("reason") or "").strip()
+  if planned_items and inventory_reason in {
+    "failed_to_open_inventory",
+    "failed_to_close_inventory",
+    "inventory_did_not_close_after_confirm",
+    "required_items_not_actionable",
+  }:
+    return True
+
+  shop_flow = state_obj.get("trackblazer_shop_flow") or {}
+  if shop_flow.get("entered") and not shop_flow.get("closed"):
+    return True
+
+  return False
+
 _LOBBY_ANCHOR_TEMPLATES = (
   "assets/buttons/training_btn.png",
   "assets/buttons/rest_btn.png",
@@ -2934,6 +2957,9 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
 
 
 def _run_trackblazer_shop_purchases(state_obj, action):
+  # Recompute against the current state so execute mode does not use a stale
+  # pre-review shop plan after a refresh, recovery, or overlay mismatch.
+  _attach_trackblazer_pre_action_item_plan(state_obj, action)
   planned_buys = list(action.get("trackblazer_shop_buy_plan") or [])
   if not planned_buys:
     return {"status": "skipped"}
@@ -3477,7 +3503,7 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         ocr_debug=ocr_debug,
         planned_clicks=planned_clicks,
       )
-      return "failed"
+      return "blocked"
     # Shop purchase failure is non-fatal — log it and continue with the
     # main action.  The shop close is handled by the finally block in
     # execute_trackblazer_shop_purchases so we should be back at the lobby.
@@ -3507,19 +3533,48 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         ocr_debug=ocr_debug,
         planned_clicks=planned_clicks,
       )
-      return "failed"
+      return "blocked"
   pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
   if pre_action_item_result.get("status") == "failed":
+    failure_reason = pre_action_item_result.get("reason") or "trackblazer_pre_action_items_failed"
+    if failure_reason in {
+      "failed_to_open_inventory",
+      "failed_to_close_inventory",
+      "required_items_not_actionable",
+    }:
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="collecting_main_state",
+        message="Pre-action item flow failed; retrying the turn before choosing a fallback action.",
+        sub_phase="reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      _push_turn_retry_debug(
+        state_obj,
+        reason="Pre-action item flow failed before the main action; retrying the same turn.",
+        reasons=[failure_reason],
+        before_phase="executing_action",
+        context="post_item_use_failure_retry",
+        event="turn_retry",
+        result="reassess",
+        sub_phase="reassess_after_item_use",
+        phase="executing_action",
+      )
+      return "reassess"
     update_operator_snapshot(
       state_obj,
       action,
       phase="recovering",
       status="error",
-      error_text=f"Pre-action item use failed: {pre_action_item_result.get('reason')}",
+      error_text=f"Pre-action item use failed: {failure_reason}",
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
+    if _trackblazer_action_failure_should_block_retry(state_obj, action):
+      return "blocked"
     return "failed"
   if pre_action_item_result.get("status") == "reassess":
     update_operator_snapshot(
@@ -3560,7 +3615,7 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         ocr_debug=ocr_debug,
         planned_clicks=planned_clicks,
       )
-      return "failed"
+      return "blocked"
   # Run pre_run_hook (e.g. rival scout) now — after items are consumed and
   # any reassess has already returned.  This ensures energy rescue → reassess
   # completes before we open the race list.
@@ -4777,6 +4832,8 @@ def career_lobby(dry_run_turn=False):
           continue
         elif action_result == "reassess":
           continue
+        elif action_result == "blocked":
+          continue
         elif action_result != "executed":
           _push_turn_retry_debug(
             state_obj,
@@ -4802,6 +4859,12 @@ def career_lobby(dry_run_turn=False):
             sleep(1)
             info(f"Trying action: {function_name}")
             action.func = function_name
+            if function_name == "do_rest":
+              action["disable_skip_turn_fallback"] = True
+            else:
+              action.options.pop("disable_skip_turn_fallback", None)
+            if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+              action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
             update_pre_action_phase(
               state_obj,
               action,
@@ -4818,6 +4881,9 @@ def career_lobby(dry_run_turn=False):
               executed_action = True
               break
             if retry_result == "reassess":
+              executed_action = False
+              break
+            if retry_result == "blocked":
               executed_action = False
               break
             if retry_result == "previewed":

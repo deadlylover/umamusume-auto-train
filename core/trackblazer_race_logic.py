@@ -57,7 +57,9 @@ def _total_stat_gain(action):
 
   total = 0
   found = False
-  for value in stat_gains.values():
+  for stat_name, value in stat_gains.items():
+    if stat_name == "sp":
+      continue
     normalized = _safe_int(value)
     if normalized is None:
       continue
