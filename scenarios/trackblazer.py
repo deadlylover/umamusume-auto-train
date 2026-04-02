@@ -1156,6 +1156,33 @@ def _megaphone_pixel_vote(icon_crop, item_names):
     }
 
 
+def _score_megaphone_icon_crop(icon_crop, item_names):
+    """Score all megaphone templates directly against a single icon crop."""
+    if icon_crop is None or getattr(icon_crop, "size", 0) == 0:
+        return []
+    effective_scale = device_action._effective_template_scale(_INVERSE_GLOBAL_SCALE)
+    scored = []
+    for item_name in item_names:
+        template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+        if not template_path:
+            continue
+        match = device_action.best_template_match(
+            template_path,
+            icon_crop,
+            template_scales=[effective_scale],
+        )
+        if match is None:
+            continue
+        scored.append(
+            {
+                "item_name": item_name,
+                "score": float(match["score"]),
+            }
+        )
+    scored.sort(key=lambda candidate: candidate["score"], reverse=True)
+    return scored
+
+
 def _resolve_megaphone_candidate(best, candidates, screenshot):
     """Apply megaphone pixel verification on top of template matching.
 
@@ -1164,14 +1191,20 @@ def _resolve_megaphone_candidate(best, candidates, screenshot):
     differ between megaphone variants. If that verifier does not produce a
     confident agreement, only very high-confidence template wins are kept.
     """
-    if best is None or screenshot is None or len(candidates or []) < 2:
+    if best is None or screenshot is None:
         return best
 
-    ordered_candidates = sorted(candidates, key=lambda candidate: candidate["score"], reverse=True)
-    score_gap = float(ordered_candidates[0]["score"] - ordered_candidates[1]["score"])
+    family_items = tuple(_ITEM_VARIANT_FAMILY_MAP.get(best["item_name"], (best["item_name"],)))
     bx, by, bw, bh = best["match"]
     icon_crop = screenshot[by:by + bh, bx:bx + bw].copy()
-    pixel_vote = _megaphone_pixel_vote(icon_crop, [candidate["item_name"] for candidate in ordered_candidates])
+    ordered_candidates = _score_megaphone_icon_crop(icon_crop, family_items)
+    if not ordered_candidates:
+        return None
+    score_gap = (
+        float(ordered_candidates[0]["score"] - ordered_candidates[1]["score"])
+        if len(ordered_candidates) > 1 else float("inf")
+    )
+    pixel_vote = _megaphone_pixel_vote(icon_crop, list(family_items))
     if pixel_vote is None:
         if best["score"] >= _MEGAPHONE_TEMPLATE_HIGH_CONFIDENCE_SCORE and score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN:
             debug(
@@ -1185,28 +1218,35 @@ def _resolve_megaphone_candidate(best, candidates, screenshot):
         )
         return None
 
-    pixel_winner = next(
-        (candidate for candidate in ordered_candidates if candidate["item_name"] == pixel_vote["item_name"]),
+    pixel_winner_name = pixel_vote["item_name"]
+    if not pixel_winner_name:
+        return None
+    pixel_winner_score = next(
+        (candidate["score"] for candidate in ordered_candidates if candidate["item_name"] == pixel_winner_name),
         None,
     )
-    if pixel_winner is None:
+    if pixel_winner_score is None:
         return None
-    if pixel_winner["item_name"] != best["item_name"]:
+    if pixel_winner_name != best["item_name"]:
         if score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN and best["score"] >= _MEGAPHONE_TEMPLATE_HIGH_CONFIDENCE_SCORE:
             debug(
                 f"[TB_FAMILY] Megaphone verifier disagreed but template is high-confidence: "
                 f"{best['item_name']}({best['score']:.4f}) "
-                f"pixel={pixel_winner['item_name']} mad={pixel_vote['best_mad']:.3f} "
+                f"pixel={pixel_winner_name} mad={pixel_vote['best_mad']:.3f} "
                 f"gap={pixel_vote['confidence_gap']:.3f}"
             )
             return best
         debug(
             f"[TB_FAMILY] Megaphone pixel override: {best['item_name']}({best['score']:.4f}) "
-            f"→ {pixel_winner['item_name']}({pixel_winner['score']:.4f}) "
+            f"→ {pixel_winner_name}({pixel_winner_score:.4f}) "
             f"score_gap={score_gap:.4f} pixel_gap={pixel_vote['confidence_gap']:.3f} "
             f"mad={pixel_vote['best_mad']:.3f}"
         )
-        return pixel_winner
+        winner = dict(best)
+        winner["item_name"] = pixel_winner_name
+        winner["score"] = float(pixel_winner_score)
+        winner["threshold"] = _item_threshold(pixel_winner_name, 0.8)
+        return winner
     debug(
         f"[TB_FAMILY] Megaphone pixel confirmed: {best['item_name']}({best['score']:.4f}) "
         f"score_gap={score_gap:.4f} pixel_gap={pixel_vote['confidence_gap']:.3f} "
