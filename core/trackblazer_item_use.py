@@ -102,6 +102,9 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "wit_failure_gate_min_rainbows": 1,
   "wit_failure_gate_high_energy_pct": 80,
   "strong_training_score_threshold": 40,
+  "prefer_rest_on_zero_energy_optional_race": True,
+  "allow_zero_energy_optional_race_with_vita": True,
+  "allow_zero_energy_optional_race_with_recovery_items": True,
 }
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -337,6 +340,18 @@ def _normalize_training_behavior_settings(raw_settings=None):
     "strong_training_score_threshold": _normalize_quantity(
       raw_settings.get("strong_training_score_threshold"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
+    ),
+    "prefer_rest_on_zero_energy_optional_race": _safe_bool(
+      raw_settings.get("prefer_rest_on_zero_energy_optional_race"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["prefer_rest_on_zero_energy_optional_race"],
+    ),
+    "allow_zero_energy_optional_race_with_vita": _safe_bool(
+      raw_settings.get("allow_zero_energy_optional_race_with_vita"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["allow_zero_energy_optional_race_with_vita"],
+    ),
+    "allow_zero_energy_optional_race_with_recovery_items": _safe_bool(
+      raw_settings.get("allow_zero_energy_optional_race_with_recovery_items"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["allow_zero_energy_optional_race_with_recovery_items"],
     ),
   }
 
@@ -875,6 +890,7 @@ def _usage_context(state_obj, action):
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   held_quantities = dict(inventory_summary.get("held_quantities") or {})
+  training_behavior = get_training_behavior_settings()
   training_data = action.get("training_data") if hasattr(action, "get") else {}
   training_data = training_data if isinstance(training_data, dict) else {}
   training_name = action.get("training_name") if hasattr(action, "get") else None
@@ -901,6 +917,7 @@ def _usage_context(state_obj, action):
   failure_rate = _safe_int(training_data.get("failure"), 0)
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
+  energy_ratio = energy_level / max(max_energy, 1)
   safe_energy_target = max_energy * 0.60
   total_held_vita_restore = 0
   for item_key in _VITA_ITEM_KEYS:
@@ -909,6 +926,10 @@ def _usage_context(state_obj, action):
       continue
     total_held_vita_restore += _ENERGY_RESTORE_VALUES.get(item_key, 0) * held_quantity
   held_reset_whistles = _current_held_quantity("reset_whistle", inventory, held_quantities)
+  held_recovery_cover = (
+    _current_held_quantity("miracle_cure", inventory, held_quantities)
+    + _current_held_quantity("rich_hand_cream", inventory, held_quantities)
+  )
   climax_commit_thresholds = _climax_commit_thresholds(held_reset_whistles)
   climax_committed_training = bool(
     getattr(action, "func", None) == "do_training"
@@ -1021,6 +1042,22 @@ def _usage_context(state_obj, action):
       "score": score_value,
     },
   )
+  optional_race_action = bool(
+    getattr(action, "func", None) == "do_race"
+    and not action.get("scheduled_race")
+    and not action.get("trackblazer_lobby_scheduled_race")
+    and not action.get("is_race_day")
+    and not action.get("trackblazer_climax_race_day")
+  )
+  zero_energy_optional_race = optional_race_action and energy_ratio <= 0.02
+  race_low_energy_vita_rescue = bool(
+    zero_energy_optional_race
+    and training_behavior.get("allow_zero_energy_optional_race_with_vita")
+    and any(
+      _safe_int(held_quantities.get(item_key), 0) > 0
+      for item_key in _ENERGY_ITEM_KEYS
+    )
+  )
   return {
     "timeline_label": timeline_label,
     "timeline_index": timeline_index,
@@ -1072,6 +1109,9 @@ def _usage_context(state_obj, action):
     "is_tsc": climax_window,
     "trackblazer_buff_active": bool(state_obj.get("trackblazer_buff_active")),
     "allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
+    "zero_energy_optional_race": zero_energy_optional_race,
+    "race_low_energy_vita_rescue": race_low_energy_vita_rescue,
+    "held_recovery_cover_available": held_recovery_cover > 0,
   }
 
 
@@ -1157,6 +1197,15 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
       candidates = non_energy
   elif energy_candidates:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
+    if context.get("race_low_energy_vita_rescue"):
+      energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
+      kept_energy = [energy_candidates[0]]
+      for entry in energy_candidates[1:]:
+        entry.pop("candidate_score", None)
+        entry["reason"] = "one energy item is enough for the zero-energy rival-race safeguard"
+        deferred.append(entry)
+      candidates = non_energy + kept_energy
+      return candidates, deferred, kept_energy
     if context.get("energy_rescue"):
       required_restore = _min_restore_needed_for_ratio(
         context.get("energy_level"),
@@ -1680,6 +1729,13 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     }
 
   if usage_group == "energy":
+    if context.get("race_low_energy_vita_rescue"):
+      return {
+        "candidate_score": 520 + priority_score,
+        "reason": "zero-energy optional race safeguard: use one energy item before rival race",
+        "reserved_quantity": reserve_quantity,
+        "use_now": True,
+      }
     # Energy rescue: a strong training is blocked only by high failure and we
     # hold energy items that could fix it.  Allow energy items even when the
     # current action is not training (e.g. race fallback) — the reassess pass

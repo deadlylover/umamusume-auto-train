@@ -10,7 +10,10 @@ import utils.constants as constants
 import core.bot as bot
 import core.config as config
 from core.race_selector import get_race_gate_for_turn_label
-from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
+from core.trackblazer_item_use import (
+  get_training_behavior_settings,
+  get_training_behavior_strong_training_score_threshold,
+)
 from utils.log import debug, info, warning
 
 
@@ -28,7 +31,20 @@ _SUMMER_WINDOWS = (
 _WEAK_TRAINING_THRESHOLD = 35
 _JUNIOR_THREE_SUPPORT_MIN_SUPPORTS = 3
 _MIN_RACE_ENERGY_PCT = 0.05
+_ZERO_ENERGY_OPTIONAL_RACE_PCT = 0.02
 _GRADE_ORDER = ("G1", "G2", "G3", "OP", "Pre-OP")
+_ZERO_ENERGY_OPTIONAL_RACE_VITA_KEYS = (
+  "vita_65",
+  "vita_40",
+  "vita_20",
+  "royal_kale_juice",
+  "energy_drink_max",
+  "energy_drink_max_ex",
+)
+_ZERO_ENERGY_OPTIONAL_RACE_RECOVERY_KEYS = (
+  "miracle_cure",
+  "rich_hand_cream",
+)
 
 
 def _safe_int(value):
@@ -47,6 +63,66 @@ def _safe_float(value):
 
 def _is_summer(year):
   return str(year or "") in _SUMMER_WINDOWS
+
+
+def _optional_race_low_energy_override(state_obj):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  training_behavior = get_training_behavior_settings(
+    getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None)
+  )
+  energy_level = _safe_float(state_obj.get("energy_level"))
+  max_energy = _safe_float(state_obj.get("max_energy"))
+  if energy_level is None or max_energy is None or max_energy <= 0:
+    return {
+      "low_energy": False,
+      "energy_pct": 0.0,
+      "prefer_rest": False,
+      "allow_race": False,
+      "reason": "",
+    }
+
+  energy_pct = energy_level / max(max_energy, 1.0)
+  low_energy = energy_pct <= _ZERO_ENERGY_OPTIONAL_RACE_PCT
+  held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
+  has_vita = any(
+    (_safe_int(held_quantities.get(item_key)) or 0) > 0
+    for item_key in _ZERO_ENERGY_OPTIONAL_RACE_VITA_KEYS
+  )
+  has_recovery_cover = any(
+    (_safe_int(held_quantities.get(item_key)) or 0) > 0
+    for item_key in _ZERO_ENERGY_OPTIONAL_RACE_RECOVERY_KEYS
+  )
+  allow_vita = bool(
+    low_energy
+    and training_behavior.get("allow_zero_energy_optional_race_with_vita")
+    and has_vita
+  )
+  allow_recovery = bool(
+    low_energy
+    and training_behavior.get("allow_zero_energy_optional_race_with_recovery_items")
+    and has_recovery_cover
+  )
+  allow_race = allow_vita or allow_recovery
+  prefer_rest = bool(
+    low_energy
+    and training_behavior.get("prefer_rest_on_zero_energy_optional_race")
+    and not allow_race
+  )
+  if allow_vita:
+    reason = "zero-energy optional race override: held Vita/energy item can cover the rival race"
+  elif allow_recovery:
+    reason = "zero-energy optional race override: held Miracle Cure / Rich Hand Cream allows rival race"
+  elif prefer_rest:
+    reason = "zero-energy optional race safeguard: prefer rest over an unscheduled rival race"
+  else:
+    reason = ""
+  return {
+    "low_energy": low_energy,
+    "energy_pct": energy_pct,
+    "prefer_rest": prefer_rest,
+    "allow_race": allow_race,
+    "reason": reason,
+  }
 
 
 def _total_stat_gain(action):
@@ -203,6 +279,10 @@ def _strong_training_score_threshold():
   return get_training_behavior_strong_training_score_threshold()
 
 
+def get_optional_race_low_energy_override(state_obj):
+  return _optional_race_low_energy_override(state_obj)
+
+
 def evaluate_trackblazer_race(state_obj, action):
   """Return a structured Trackblazer race-vs-training decision payload.
 
@@ -329,26 +409,41 @@ def evaluate_trackblazer_race(state_obj, action):
     )
 
   # Rival indicator is present.  Gate on minimum energy.
+  low_energy_reason_suffix = ""
   has_energy, energy_pct = _has_race_energy(state_obj)
   if not has_energy:
-    return _decision(
-      should_race=False,
-      reason=(
+    low_energy_override = _optional_race_low_energy_override(state_obj)
+    if low_energy_override.get("low_energy") and low_energy_override.get("allow_race"):
+      low_energy_reason_suffix = f"; {low_energy_override.get('reason')}"
+      info(
+        f"[TB_RACE] Allowing low-energy optional race at {energy_pct:.0%}: "
+        f"{low_energy_override.get('reason')}"
+      )
+    else:
+      reason = (
         f"Rival indicator on screen but energy too low to race "
         f"({energy_pct:.0%} < {_MIN_RACE_ENERGY_PCT:.0%})"
-      ),
-      training_total_stats=training_stats,
-      training_score=training_score,
-      training_supports=training_supports,
-      is_summer=summer,
-      g1_forced=False,
-      prefer_rival_race=False,
-      race_tier_target=None,
-      race_name=None,
-      race_available=False,
-      rival_indicator=True,
-      race_tier_info=race_info,
-    )
+      )
+      if low_energy_override.get("prefer_rest"):
+        reason = (
+          f"{low_energy_override.get('reason')} "
+          f"({energy_pct:.0%} energy, no configured recovery cover)"
+        )
+      return _decision(
+        should_race=False,
+        reason=reason,
+        training_total_stats=training_stats,
+        training_score=training_score,
+        training_supports=training_supports,
+        is_summer=summer,
+        g1_forced=False,
+        prefer_rival_race=False,
+        race_tier_target=None,
+        race_name=None,
+        race_available=False,
+        rival_indicator=True,
+        race_tier_info=race_info,
+      )
 
   # If the strategy already chose rest (all trainings blocked by failure
   # chance or energy), racing is strictly better than resting — it gains
@@ -359,7 +454,7 @@ def evaluate_trackblazer_race(state_obj, action):
       should_race=True,
       reason=(
         "Rival present and action is rest — racing is better than resting "
-        "(all trainings likely blocked by failure chance)"
+        f"(all trainings likely blocked by failure chance){low_energy_reason_suffix}"
       ),
       training_total_stats=training_stats,
       training_score=_training_score(action),
@@ -430,6 +525,7 @@ def evaluate_trackblazer_race(state_obj, action):
         reason=(
           f"Summer, but rival present and training is weak "
           f"({training_stats} < {_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
+          f"{low_energy_reason_suffix}"
         ),
         training_total_stats=training_stats,
         training_supports=training_supports,
@@ -466,6 +562,7 @@ def evaluate_trackblazer_race(state_obj, action):
       reason=(
         f"Rival present with weak training ({training_stats} < "
         f"{_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
+        f"{low_energy_reason_suffix}"
       ),
       training_total_stats=training_stats,
       training_score=training_score,

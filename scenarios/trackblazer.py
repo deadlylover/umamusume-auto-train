@@ -92,34 +92,19 @@ _FAMILY_COLOR_TIEBREAK_MARGIN = 0.025
 _CLEAT_HAMMER_HEAD_ROI = (0.48, 0.24, 0.24, 0.24)
 _CLEAT_HAMMER_GOLD_HUE_RANGE = (12, 38)
 _CLEAT_HAMMER_COLOR_MIN_DELTA = 0.04
-# Megaphone multi-feature disambiguation — the three megaphones share an
-# identical body shape but differ in the number/density of yellow
-# lightning-bolt sparks radiating from the horn. A single pixel-ratio
-# feature cannot reliably separate coaching from motivating, so we use
-# three complementary features measured in different sub-regions:
-#   F0  yellow_BL     — yellow pixel ratio in bottom-left quadrant
-#                       (inversely correlated with spark density — coaching
-#                       has more yellow concentrated in the body/bottom)
-#   F1  white_UR      — white highlight ratio in upper-right quadrant
-#                       (spark-tip highlights, increases with spark count)
-#   F2  high_sat_top  — high-saturation pixel ratio in the top half
-#                       (captures overall spark intensity/spread)
-# Classification uses L2 distance to calibration centres in this 3-D
-# feature space.  Minimum pairwise centre distance is ~0.049 (coaching ↔
-# motivating), giving comfortable margin for real-screenshot noise.
-_MEGAPHONE_FEATURE_CENTERS = {
-    "coaching_megaphone":   (0.6369, 0.0215, 0.0457),
-    "motivating_megaphone": (0.5917, 0.0444, 0.0661),
-    "empowering_megaphone": (0.5108, 0.0553, 0.1012),
-}
-# If the observed feature vector is farther than this from all centres,
-# abstain (the icon is too noisy or not a megaphone variant).
-_MEGAPHONE_FEATURE_MAX_DIST = 0.045
-_MEGAPHONE_FEATURE_MIN_GAP = 0.015
-# Megaphone features are only allowed to override template scores when the
-# family candidates are already close enough to be a real tie. When raw
-# template matching has a clear winner, trust it.
+# Megaphone disambiguation uses a template-first policy plus a masked pixel
+# verifier. The templates already separate the three variants reasonably
+# well after cropping, but coaching vs motivating can still be too close to
+# trust on score alone. The pixel verifier compares the matched live icon to
+# all three resized megaphone templates, but only over discriminative pixels
+# where the templates materially differ from each other.
+_MEGAPHONE_PIXEL_MASK_DIFF_THRESHOLD = 18.0
+_MEGAPHONE_PIXEL_MAX_MAD = 24.0
+_MEGAPHONE_PIXEL_MIN_GAP = 6.0
 _MEGAPHONE_TEMPLATE_TIE_MARGIN = 0.03
+_MEGAPHONE_TEMPLATE_HIGH_CONFIDENCE_SCORE = 0.95
+_MEGAPHONE_TEMPLATE_IMAGE_CACHE = {}
+_MEGAPHONE_PIXEL_MASK_CACHE = {}
 _ITEM_VARIANT_FAMILIES = (
     ("megaphone", (
         "motivating_megaphone",
@@ -1076,126 +1061,156 @@ def _cleat_hammer_color_vote(bgr_crop, candidates):
     return best_candidate
 
 
-def _megaphone_feature_vote(icon_crop, candidates):
-    """Return a confident megaphone variant vote from icon-only features.
+def _load_megaphone_template_rgb(item_name):
+    cached = _MEGAPHONE_TEMPLATE_IMAGE_CACHE.get(item_name)
+    if cached is not None:
+        return cached
+    template_path = constants.TRACKBLAZER_ITEM_TEMPLATES.get(item_name)
+    if not template_path:
+        return None
+    img = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    _MEGAPHONE_TEMPLATE_IMAGE_CACHE[item_name] = rgb
+    return rgb
 
-    The three megaphones share an identical body shape but differ in the
-    number/density of yellow lightning-bolt sparks radiating from the horn.
-    We measure three features in different sub-regions of the icon and
-    classify by L2 distance to calibration centres:
 
-        F0  yellow_BL     — yellow ratio in bottom-left quadrant
-        F1  white_UR      — white highlight ratio in upper-right quadrant
-        F2  high_sat_top  — high-saturation ratio in the top half
+def _megaphone_pixel_mask(width, height, item_names):
+    cache_key = (int(width), int(height), tuple(sorted(item_names)))
+    cached = _MEGAPHONE_PIXEL_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        resized_templates = {}
+        for item_name in item_names:
+            template = _load_megaphone_template_rgb(item_name)
+            if template is None:
+                continue
+            resized_templates[item_name] = cv2.resize(
+                template,
+                (int(width), int(height)),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        return cached, resized_templates
+    resized_templates = {}
+    for item_name in item_names:
+        template = _load_megaphone_template_rgb(item_name)
+        if template is None:
+            continue
+        resized_templates[item_name] = cv2.resize(
+            template,
+            (int(width), int(height)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    names = sorted(resized_templates)
+    if len(names) < 2:
+        return None, resized_templates
+    pairwise_diffs = []
+    for index, name_a in enumerate(names):
+        for name_b in names[index + 1:]:
+            diff = np.abs(
+                resized_templates[name_a].astype(np.int16)
+                - resized_templates[name_b].astype(np.int16)
+            ).mean(axis=2)
+            pairwise_diffs.append(diff)
+    mask = np.stack(pairwise_diffs, axis=0).max(axis=0) > _MEGAPHONE_PIXEL_MASK_DIFF_THRESHOLD
+    _MEGAPHONE_PIXEL_MASK_CACHE[cache_key] = mask
+    return mask, resized_templates
 
-    *icon_crop* must be the matched icon region (not the padded cluster
-    crop), so that surrounding inventory content does not pollute the
-    measurement.
 
-    Returns a payload containing the winning candidate and confidence
-    metrics, or ``None`` if the signal is too noisy / ambiguous.
-    """
+def _megaphone_pixel_vote(icon_crop, item_names):
+    """Return a confident megaphone vote using discriminative-pixel MAD."""
     if icon_crop is None or getattr(icon_crop, "size", 0) == 0:
         return None
-    h, w = icon_crop.shape[:2]
-    # Trim 2px from each edge to avoid background bleed from crop jitter.
-    trim = min(2, h // 6, w // 6)
-    if trim > 0:
-        icon_crop = icon_crop[trim:h - trim, trim:w - trim]
-        h, w = icon_crop.shape[:2]
-    if h < 4 or w < 4:
+    height, width = icon_crop.shape[:2]
+    if height < 8 or width < 8:
         return None
-    hsv = cv2.cvtColor(icon_crop, cv2.COLOR_RGB2HSV)
-
-    # F0: yellow pixel ratio in bottom-left quadrant
-    bl = hsv[h // 2:, :w // 2]
-    yellow_bl = float(((bl[:, :, 0] >= 15) & (bl[:, :, 0] <= 35) & (bl[:, :, 1] > 120)).mean())
-
-    # F1: white highlight ratio in upper-right quadrant
-    ur = hsv[:h // 2, w // 2:]
-    white_ur = float(((ur[:, :, 1] < 50) & (ur[:, :, 2] > 220)).mean())
-
-    # F2: high-saturation pixel ratio in the top half
-    top = hsv[:h // 2]
-    high_sat_top = float((top[:, :, 1] > 180).mean())
-
-    obs = np.array([yellow_bl, white_ur, high_sat_top])
-
-    ranked_candidates = []
-    for cand in candidates:
-        center = _MEGAPHONE_FEATURE_CENTERS.get(cand["item_name"])
-        if center is None:
-            continue
-        dist = float(np.linalg.norm(obs - np.array(center)))
-        ranked_candidates.append((dist, cand))
-    if not ranked_candidates:
+    mask, resized_templates = _megaphone_pixel_mask(width, height, item_names)
+    if mask is None or not resized_templates:
         return None
-    ranked_candidates.sort(key=lambda entry: entry[0])
-    best_dist, best_candidate = ranked_candidates[0]
-    runner_up_dist = ranked_candidates[1][0] if len(ranked_candidates) > 1 else float("inf")
-    confidence_gap = runner_up_dist - best_dist
-
+    live = icon_crop.astype(np.int16)
+    ranked_scores = []
+    for item_name, template in resized_templates.items():
+        diff = np.abs(live - template.astype(np.int16)).mean(axis=2)
+        mad = float(diff[mask].mean()) if mask.any() else float(diff.mean())
+        ranked_scores.append((mad, item_name))
+    if not ranked_scores:
+        return None
+    ranked_scores.sort(key=lambda entry: entry[0])
+    best_mad, best_name = ranked_scores[0]
+    runner_up_mad = ranked_scores[1][0] if len(ranked_scores) > 1 else float("inf")
+    confidence_gap = runner_up_mad - best_mad
     debug(
-        f"[TB_COLOR] megaphone features=[{yellow_bl:.4f},{white_ur:.4f},{high_sat_top:.4f}] "
-        f"→ {best_candidate['item_name'] if best_candidate else '?'} "
-        f"(dist={best_dist:.4f}, gap={confidence_gap:.4f})"
+        f"[TB_COLOR] megaphone pixel_vote winner={best_name} "
+        f"mad={best_mad:.3f} gap={confidence_gap:.3f}"
     )
-    if best_dist > _MEGAPHONE_FEATURE_MAX_DIST:
+    if best_mad > _MEGAPHONE_PIXEL_MAX_MAD:
         return None
-    if confidence_gap < _MEGAPHONE_FEATURE_MIN_GAP:
+    if confidence_gap < _MEGAPHONE_PIXEL_MIN_GAP:
         return None
     return {
-        "candidate": best_candidate,
-        "best_dist": float(best_dist),
-        "runner_up_dist": float(runner_up_dist),
+        "item_name": best_name,
+        "best_mad": float(best_mad),
+        "runner_up_mad": float(runner_up_mad),
         "confidence_gap": float(confidence_gap),
-        "features": (float(yellow_bl), float(white_ur), float(high_sat_top)),
+        "mask_ratio": float(mask.mean()),
     }
 
 
 def _resolve_megaphone_candidate(best, candidates, screenshot):
-    """Apply megaphone features only as a conservative tie-break.
+    """Apply megaphone pixel verification on top of template matching.
 
-    Raw template matching remains the primary signal. The feature vote is
-    only allowed to override when the top two template scores are already
-    close enough to indicate a real ambiguity, and the feature vote itself
-    is clearly separated from the runner-up centre.
+    Raw template matching remains the primary signal. The pixel verifier is
+    used to confirm the chosen icon over only the pixels that materially
+    differ between megaphone variants. If that verifier does not produce a
+    confident agreement, only very high-confidence template wins are kept.
     """
     if best is None or screenshot is None or len(candidates or []) < 2:
         return best
 
     ordered_candidates = sorted(candidates, key=lambda candidate: candidate["score"], reverse=True)
     score_gap = float(ordered_candidates[0]["score"] - ordered_candidates[1]["score"])
-    if score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN:
-        debug(
-            f"[TB_FAMILY] Megaphone template winner kept: {best['item_name']}({best['score']:.4f}) "
-            f"score_gap={score_gap:.4f}"
-        )
-        return best
-
     bx, by, bw, bh = best["match"]
     icon_crop = screenshot[by:by + bh, bx:bx + bw].copy()
-    feature_vote = _megaphone_feature_vote(icon_crop, ordered_candidates)
-    if feature_vote is None:
+    pixel_vote = _megaphone_pixel_vote(icon_crop, [candidate["item_name"] for candidate in ordered_candidates])
+    if pixel_vote is None:
+        if best["score"] >= _MEGAPHONE_TEMPLATE_HIGH_CONFIDENCE_SCORE and score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN:
+            debug(
+                f"[TB_FAMILY] Megaphone template-only keep: {best['item_name']}({best['score']:.4f}) "
+                f"score_gap={score_gap:.4f}"
+            )
+            return best
         debug(
-            f"[TB_FAMILY] Megaphone feature vote abstained: {best['item_name']}({best['score']:.4f}) "
+            f"[TB_FAMILY] Megaphone verifier abstained: {best['item_name']}({best['score']:.4f}) "
             f"score_gap={score_gap:.4f}"
         )
-        return best
+        return None
 
-    feature_winner = feature_vote["candidate"]
-    if feature_winner["item_name"] != best["item_name"]:
+    pixel_winner = next(
+        (candidate for candidate in ordered_candidates if candidate["item_name"] == pixel_vote["item_name"]),
+        None,
+    )
+    if pixel_winner is None:
+        return None
+    if pixel_winner["item_name"] != best["item_name"]:
+        if score_gap > _MEGAPHONE_TEMPLATE_TIE_MARGIN and best["score"] >= _MEGAPHONE_TEMPLATE_HIGH_CONFIDENCE_SCORE:
+            debug(
+                f"[TB_FAMILY] Megaphone verifier disagreed but template is high-confidence: "
+                f"{best['item_name']}({best['score']:.4f}) "
+                f"pixel={pixel_winner['item_name']} mad={pixel_vote['best_mad']:.3f} "
+                f"gap={pixel_vote['confidence_gap']:.3f}"
+            )
+            return best
         debug(
-            f"[TB_FAMILY] Megaphone feature override: {best['item_name']}({best['score']:.4f}) "
-            f"→ {feature_winner['item_name']}({feature_winner['score']:.4f}) "
-            f"score_gap={score_gap:.4f} feature_gap={feature_vote['confidence_gap']:.4f} "
-            f"best_dist={feature_vote['best_dist']:.4f}"
+            f"[TB_FAMILY] Megaphone pixel override: {best['item_name']}({best['score']:.4f}) "
+            f"→ {pixel_winner['item_name']}({pixel_winner['score']:.4f}) "
+            f"score_gap={score_gap:.4f} pixel_gap={pixel_vote['confidence_gap']:.3f} "
+            f"mad={pixel_vote['best_mad']:.3f}"
         )
-        return feature_winner
+        return pixel_winner
     debug(
-        f"[TB_FAMILY] Megaphone feature confirmed: {best['item_name']}({best['score']:.4f}) "
-        f"score_gap={score_gap:.4f} feature_gap={feature_vote['confidence_gap']:.4f} "
-        f"best_dist={feature_vote['best_dist']:.4f}"
+        f"[TB_FAMILY] Megaphone pixel confirmed: {best['item_name']}({best['score']:.4f}) "
+        f"score_gap={score_gap:.4f} pixel_gap={pixel_vote['confidence_gap']:.3f} "
+        f"mad={pixel_vote['best_mad']:.3f}"
     )
     return best
 

@@ -2,6 +2,7 @@ import core.trainings
 import utils.constants as constants
 import core.config as config
 from core.race_selector import get_race_gate_for_turn_label
+from core.trackblazer_race_logic import get_optional_race_low_energy_override
 from utils.shared import check_status_effects
 from core.actions import Action
 from core.recognizer import compare_brightness
@@ -447,19 +448,35 @@ class Strategy:
     if constants.SCENARIO_NAME in ("mant", "trackblazer"):
       min_score = self._get_min_score(action)
       blocked, gate = _optional_race_blocked(state)
+      low_energy_override = get_optional_race_low_energy_override(state)
       if (
         not blocked
         and
         training_score <= min_score
         and state["turn"] != "Race Day"
       ):
+        if low_energy_override.get("prefer_rest"):
+          action.func = "do_rest"
+          info(
+            f"[ENERGY_MGMT] → TRACKBLAZER REST: {low_energy_override.get('reason')} "
+            f"(training score {training_score} <= {min_score})"
+          )
+          return action
         action["_rival_fallback_func"] = "do_training"
         action["_rival_fallback_training_name"] = action.get("training_name")
         action["_rival_fallback_training_data"] = action.get("training_data")
         action.func = "do_race"
         action["race_name"] = "any"
         action["prefer_rival_race"] = True
-        info(f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) at or below minimum ({min_score}), attempting rival race for bonus stats")
+        race_reason = (
+          low_energy_override.get("reason")
+          if low_energy_override.get("allow_race") else
+          "attempting rival race for bonus stats"
+        )
+        info(
+          f"[ENERGY_MGMT] → TRACKBLAZER RIVAL RACE: Training score ({training_score}) "
+          f"at or below minimum ({min_score}), {race_reason}"
+        )
       else:
         if blocked:
           debug(

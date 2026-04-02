@@ -163,6 +163,9 @@ class OperatorConsole:
     self._wit_gate_supports_var = None
     self._wit_gate_rainbows_var = None
     self._wit_gate_energy_var = None
+    self._zero_energy_optional_race_rest_var = None
+    self._zero_energy_optional_race_vita_var = None
+    self._zero_energy_optional_race_recovery_var = None
     self._start_bot_button = None
     self._stop_bot_button = None
     self._pause_button = None
@@ -3269,7 +3272,7 @@ class OperatorConsole:
     window = tk.Toplevel(self._root)
     window.title("Training Behavior")
     window.configure(bg="#101418")
-    window.geometry("500x500")
+    window.geometry("760x560")
     window.resizable(False, False)
     window.bind(
       "<Destroy>",
@@ -3403,6 +3406,65 @@ class OperatorConsole:
       wraplength=640,
     ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
+    optional_race_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    optional_race_frame.pack(fill=tk.X)
+    tk.Label(
+      optional_race_frame,
+      text="Zero-energy optional race",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).pack(anchor="w", pady=(0, 4))
+    self._zero_energy_optional_race_rest_var = tk.BooleanVar(
+      value=bool(training_behavior.get("prefer_rest_on_zero_energy_optional_race", True))
+    )
+    tk.Checkbutton(
+      optional_race_frame,
+      text="Prefer rest over fallback rival race at 2% energy or lower",
+      variable=self._zero_energy_optional_race_rest_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(anchor="w")
+    self._zero_energy_optional_race_vita_var = tk.BooleanVar(
+      value=bool(training_behavior.get("allow_zero_energy_optional_race_with_vita", True))
+    )
+    tk.Checkbutton(
+      optional_race_frame,
+      text="Allow zero-energy rival race if a Vita / energy item is held",
+      variable=self._zero_energy_optional_race_vita_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(anchor="w")
+    self._zero_energy_optional_race_recovery_var = tk.BooleanVar(
+      value=bool(training_behavior.get("allow_zero_energy_optional_race_with_recovery_items", True))
+    )
+    tk.Checkbutton(
+      optional_race_frame,
+      text="Allow zero-energy rival race if Miracle Cure or Rich Hand Cream is held",
+      variable=self._zero_energy_optional_race_recovery_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(anchor="w")
+    tk.Label(
+      optional_race_frame,
+      text="Scheduled races still ignore this safety gate. Vita cover stages one energy item before the rival race.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).pack(anchor="w", pady=(4, 0))
+
     bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     bond_frame.pack(fill=tk.X)
     self._bond_boost_var = tk.BooleanVar(value=bot.get_trackblazer_bond_boost_enabled())
@@ -3492,6 +3554,12 @@ class OperatorConsole:
       self._wit_gate_energy_var.set(str(behavior.get("wit_failure_gate_high_energy_pct", 80)))
     if self._strong_training_score_threshold_var is not None:
       self._strong_training_score_threshold_var.set(str(behavior.get("strong_training_score_threshold", 40)))
+    if self._zero_energy_optional_race_rest_var is not None:
+      self._zero_energy_optional_race_rest_var.set(bool(behavior.get("prefer_rest_on_zero_energy_optional_race", True)))
+    if self._zero_energy_optional_race_vita_var is not None:
+      self._zero_energy_optional_race_vita_var.set(bool(behavior.get("allow_zero_energy_optional_race_with_vita", True)))
+    if self._zero_energy_optional_race_recovery_var is not None:
+      self._zero_energy_optional_race_recovery_var.set(bool(behavior.get("allow_zero_energy_optional_race_with_recovery_items", True)))
 
   def _save_stat_weights(self):
     weights = {}
@@ -3541,6 +3609,12 @@ class OperatorConsole:
         training_behavior["strong_training_score_threshold"] = max(0, int(threshold_text))
       except ValueError:
         pass
+    if self._zero_energy_optional_race_rest_var is not None:
+      training_behavior["prefer_rest_on_zero_energy_optional_race"] = bool(self._zero_energy_optional_race_rest_var.get())
+    if self._zero_energy_optional_race_vita_var is not None:
+      training_behavior["allow_zero_energy_optional_race_with_vita"] = bool(self._zero_energy_optional_race_vita_var.get())
+    if self._zero_energy_optional_race_recovery_var is not None:
+      training_behavior["allow_zero_energy_optional_race_with_recovery_items"] = bool(self._zero_energy_optional_race_recovery_var.get())
 
     policy = {
       "version": int(current_policy.get("version", 1)),
