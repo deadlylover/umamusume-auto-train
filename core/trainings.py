@@ -407,23 +407,39 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
         _tb_items_bypass_failure = True
         info("Trackblazer failure bypass: good luck charm available")
       else:
-        from core.trackblazer_item_use import _ENERGY_RESTORE_VALUES
-        energy_level = state.get("energy_level", 0)
-        max_energy = state.get("max_energy", 0)
-        if max_energy > 0:
-          safe_threshold = max_energy * 0.50
-          # Find the smallest held energy restore that brings us above the safe threshold
-          held_restores = sorted(
-            rv for ik, rv in _ENERGY_RESTORE_VALUES.items()
-            if held_quantities.get(ik, 0) > 0 and rv > 0
+        from core.trackblazer_item_use import _ENERGY_RESTORE_VALUES, get_save_vita_for_summer, _SUMMER_WINDOWS, _past_final_summer
+        from core.trackblazer_shop import policy_context
+        save_vita = get_save_vita_for_summer()
+        timeline = policy_context(year=state.get("year"), turn=state.get("turn"))
+        is_summer = (timeline.get("timeline_label") or "") in _SUMMER_WINDOWS
+        past_summer = _past_final_summer(timeline.get("timeline_index"))
+        # When saving Vitas for summer and it's not summer (and not past the
+        # final summer window), energy items won't actually be used — don't
+        # let high-fail trainings through on a promise the item planner won't
+        # honour.
+        if save_vita and not is_summer and not past_summer:
+          info(
+            "Trackblazer failure bypass: energy items held but save_vita_for_summer "
+            f"is active and not in summer window ({timeline.get('timeline_label')}); "
+            "skipping energy-based bypass"
           )
-          for restore in held_restores:
-            projected_energy = min(energy_level + restore, max_energy)
-            if projected_energy >= safe_threshold:
-              _tb_items_bypass_failure = True
-              projected_pct = projected_energy / max_energy
-              info(f"Trackblazer failure bypass: energy item +{restore} clears fails ({energy_level:.0f}+{restore} = {projected_energy:.0f}/{max_energy:.0f} = {projected_pct:.0%})")
-              break
+        else:
+          energy_level = state.get("energy_level", 0)
+          max_energy = state.get("max_energy", 0)
+          if max_energy > 0:
+            safe_threshold = max_energy * 0.50
+            # Find the smallest held energy restore that brings us above the safe threshold
+            held_restores = sorted(
+              rv for ik, rv in _ENERGY_RESTORE_VALUES.items()
+              if held_quantities.get(ik, 0) > 0 and rv > 0
+            )
+            for restore in held_restores:
+              projected_energy = min(energy_level + restore, max_energy)
+              if projected_energy >= safe_threshold:
+                _tb_items_bypass_failure = True
+                projected_pct = projected_energy / max_energy
+                info(f"Trackblazer failure bypass: energy item +{restore} clears fails ({energy_level:.0f}+{restore} = {projected_energy:.0f}/{max_energy:.0f} = {projected_pct:.0%})")
+                break
 
   for training_name, training_data in training_results.items():
     if constants.SCENARIO_NAME in ("mant", "trackblazer") and training_name == "wit":

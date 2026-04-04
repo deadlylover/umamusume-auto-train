@@ -150,6 +150,7 @@ class OperatorConsole:
     self._shop_policy_window = None
     self._shop_policy_rows = []
     self._shop_policy_context_var = None
+    self._shop_policy_catalog_timing_var = None
     self._shop_policy_canvas = None
     self._shop_policy_body = None
     self._item_policy_window = None
@@ -166,6 +167,7 @@ class OperatorConsole:
     self._zero_energy_optional_race_rest_var = None
     self._zero_energy_optional_race_vita_var = None
     self._zero_energy_optional_race_recovery_var = None
+    self._save_vita_for_summer_var = None
     self._start_bot_button = None
     self._stop_bot_button = None
     self._pause_button = None
@@ -2754,9 +2756,22 @@ class OperatorConsole:
       anchor="w",
       justify="left",
     ).grid(row=0, column=0, sticky="w")
-    tk.Button(header, text="Reload", command=self._refresh_trackblazer_shop_policy_window).grid(row=0, column=1, padx=(8, 0))
-    tk.Button(header, text="Reset Defaults", command=self._reset_trackblazer_shop_policy_defaults).grid(row=0, column=2, padx=(8, 0))
-    tk.Button(header, text="Save", command=self._save_trackblazer_shop_policy_from_window).grid(row=0, column=3, padx=(8, 0))
+    saved_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
+    self._shop_policy_catalog_timing_var = tk.BooleanVar(value=saved_policy.get("catalog_timing_overrides", True))
+    tk.Checkbutton(
+      header,
+      text="Catalog timing overrides",
+      variable=self._shop_policy_catalog_timing_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="#d6dde5",
+      command=self._refresh_trackblazer_shop_policy_window,
+    ).grid(row=0, column=1, padx=(12, 0))
+    tk.Button(header, text="Reload", command=self._reload_trackblazer_shop_policy_window).grid(row=0, column=2, padx=(8, 0))
+    tk.Button(header, text="Reset Defaults", command=self._reset_trackblazer_shop_policy_defaults).grid(row=0, column=3, padx=(8, 0))
+    tk.Button(header, text="Save", command=self._save_trackblazer_shop_policy_from_window).grid(row=0, column=4, padx=(8, 0))
 
     body_frame = tk.Frame(window, bg="#101418")
     body_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -2857,8 +2872,15 @@ class OperatorConsole:
     self._shop_policy_window = None
     self._shop_policy_rows = []
     self._shop_policy_context_var = None
+    self._shop_policy_catalog_timing_var = None
     self._shop_policy_canvas = None
     self._shop_policy_body = None
+
+  def _reload_trackblazer_shop_policy_window(self):
+    if self._shop_policy_catalog_timing_var is not None:
+      saved_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
+      self._shop_policy_catalog_timing_var.set(saved_policy.get("catalog_timing_overrides", True))
+    self._refresh_trackblazer_shop_policy_window()
 
   def _clear_trackblazer_item_policy_window(self):
     self._item_policy_window = None
@@ -2906,8 +2928,11 @@ class OperatorConsole:
       ).grid(row=0, column=column, sticky="ew", padx=1, pady=(0, 4))
 
     normalized_policy = normalize_shop_policy(getattr(config, "TRACKBLAZER_SHOP_POLICY", None))
+    preview_policy = dict(normalized_policy)
+    if self._shop_policy_catalog_timing_var is not None:
+      preview_policy["catalog_timing_overrides"] = self._shop_policy_catalog_timing_var.get()
     items = get_effective_shop_items(
-      policy=normalized_policy,
+      policy=preview_policy,
       year=context.get("year"),
       turn=context.get("turn"),
     )
@@ -3150,8 +3175,12 @@ class OperatorConsole:
       item_policy["max_quantity"] = max_quantity
       items[key] = item_policy
 
+    catalog_timing = current_policy.get("catalog_timing_overrides", True)
+    if self._shop_policy_catalog_timing_var is not None:
+      catalog_timing = self._shop_policy_catalog_timing_var.get()
     policy = {
       "version": int(current_policy.get("version", 1)),
+      "catalog_timing_overrides": catalog_timing,
       "items": items,
     }
     if not self._persist_config_value("trackblazer.shop_policy", policy):
@@ -3465,6 +3494,43 @@ class OperatorConsole:
       wraplength=700,
     ).pack(anchor="w", pady=(4, 0))
 
+    vita_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    vita_frame.pack(fill=tk.X)
+    tk.Label(
+      vita_frame,
+      text="Energy item conservation",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).pack(anchor="w", pady=(0, 4))
+    self._save_vita_for_summer_var = tk.BooleanVar(
+      value=bool(training_behavior.get("save_vita_for_summer", True))
+    )
+    tk.Checkbutton(
+      vita_frame,
+      text="Save Vita items for summer burst windows",
+      variable=self._save_vita_for_summer_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(anchor="w")
+    tk.Label(
+      vita_frame,
+      text=(
+        "When enabled, Vita items are deferred outside summer windows (Early Jul \u2013 Late Aug). "
+        "High-fail trainings that need energy to clear failure will be skipped in favor of rest or racing. "
+        "Disable to allow Vita use year-round for strong trainings."
+      ),
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).pack(anchor="w", pady=(4, 0))
+
     bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     bond_frame.pack(fill=tk.X)
     self._bond_boost_var = tk.BooleanVar(value=bot.get_trackblazer_bond_boost_enabled())
@@ -3615,6 +3681,8 @@ class OperatorConsole:
       training_behavior["allow_zero_energy_optional_race_with_vita"] = bool(self._zero_energy_optional_race_vita_var.get())
     if self._zero_energy_optional_race_recovery_var is not None:
       training_behavior["allow_zero_energy_optional_race_with_recovery_items"] = bool(self._zero_energy_optional_race_recovery_var.get())
+    if self._save_vita_for_summer_var is not None:
+      training_behavior["save_vita_for_summer"] = bool(self._save_vita_for_summer_var.get())
 
     policy = {
       "version": int(current_policy.get("version", 1)),

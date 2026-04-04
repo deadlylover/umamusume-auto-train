@@ -102,6 +102,7 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "wit_failure_gate_min_rainbows": 1,
   "wit_failure_gate_high_energy_pct": 80,
   "strong_training_score_threshold": 40,
+  "save_vita_for_summer": True,
   "prefer_rest_on_zero_energy_optional_race": True,
   "allow_zero_energy_optional_race_with_vita": True,
   "allow_zero_energy_optional_race_with_recovery_items": True,
@@ -341,6 +342,10 @@ def _normalize_training_behavior_settings(raw_settings=None):
       raw_settings.get("strong_training_score_threshold"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
     ),
+    "save_vita_for_summer": _safe_bool(
+      raw_settings.get("save_vita_for_summer"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
+    ),
     "prefer_rest_on_zero_energy_optional_race": _safe_bool(
       raw_settings.get("prefer_rest_on_zero_energy_optional_race"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["prefer_rest_on_zero_energy_optional_race"],
@@ -365,6 +370,14 @@ def get_training_behavior_settings(policy=None):
   return deepcopy(
     (policy.get("settings") or {}).get("training_behavior")
     or _DEFAULT_TRAINING_BEHAVIOR_SETTINGS
+  )
+
+
+def get_save_vita_for_summer(policy=None):
+  training_behavior = get_training_behavior_settings(policy)
+  return _safe_bool(
+    training_behavior.get("save_vita_for_summer"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
   )
 
 
@@ -1095,6 +1108,7 @@ def _usage_context(state_obj, action):
     "affordable_shop_energy_available": any(item_key in _ENERGY_ITEM_KEYS for item_key in affordable_shop_support_keys),
     "affordable_shop_charm_available": "good_luck_charm" in affordable_shop_support_keys,
     "has_followup_failsafe": bool(held_support_keys or affordable_shop_support_keys),
+    "energy_natively_sufficient": energy_ratio >= 0.60,
     "high_value_training": high_value_training,
     "very_high_value_training": very_high_value_training,
     "committed_value_training": committed_value_training,
@@ -1112,6 +1126,10 @@ def _usage_context(state_obj, action):
     "zero_energy_optional_race": zero_energy_optional_race,
     "race_low_energy_vita_rescue": race_low_energy_vita_rescue,
     "held_recovery_cover_available": held_recovery_cover > 0,
+    "save_vita_for_summer": _safe_bool(
+      training_behavior.get("save_vita_for_summer"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
+    ),
   }
 
 
@@ -1673,7 +1691,10 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return {
         "defer_reason": "save for summer burst windows",
       }
-    if not context["has_followup_failsafe"]:
+    if (
+      not context["has_followup_failsafe"]
+      and not context.get("energy_natively_sufficient")
+    ):
       return {
         "defer_reason": "save whistle until energy or a Good-Luck Charm is available",
       }
@@ -1708,7 +1729,9 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
           "reroll the board, then recheck trainings before committing",
           "climax training turn" if context.get("climax_window") else "summer reroll",
           target_hint or "current board is too weak or too unsafe to commit",
-          "shuffle support cards while follow-up recovery/fail-safe coverage exists",
+          "energy natively sufficient for safe reroll" if (
+            context.get("energy_natively_sufficient") and not context["has_followup_failsafe"]
+          ) else "shuffle support cards while follow-up recovery/fail-safe coverage exists",
           *support_reasons,
         ] if part
       ),
@@ -1766,6 +1789,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       item_key.startswith("vita_")
       and not context["summer_window"]
       and not context.get("summer_conservation_bypass")
+      and context.get("save_vita_for_summer", True)
     ):
       return {
         "defer_reason": "save Vita for summer burst windows",
@@ -1913,6 +1937,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "held_support_item_names": context.get("held_support_item_names"),
       "affordable_shop_support_item_names": context.get("affordable_shop_support_item_names"),
       "energy_rescue": context.get("energy_rescue"),
+      "energy_natively_sufficient": context.get("energy_natively_sufficient"),
       "summer_reroll_target_name": context.get("summer_reroll_target_name"),
       "summer_reroll_target_failure": context.get("summer_reroll_target_failure"),
       "commit_training_after_items": context.get("commit_training_after_items"),

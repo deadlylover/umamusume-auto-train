@@ -1858,6 +1858,13 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     # depend on the post-whistle board, so defer them to the reassess pass
     # where they'll be re-planned against the new training state.
     candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
+  elif any(entry.get("usage_group") == "energy" for entry in candidates):
+    # Energy items change fail rate, so a reassess will happen. Defer burst
+    # items (megaphones, stat-specific burst) to the reassess pass — they
+    # should only be committed once we've confirmed the training is still
+    # viable after the energy change.
+    _BURST_GROUPS = ("training_burst", "training_burst_specific")
+    candidates = [entry for entry in candidates if entry.get("usage_group") not in _BURST_GROUPS]
   candidates = _order_trackblazer_pre_action_items(candidates)
   item_context = item_use_plan.get("context") or {}
   action["trackblazer_pre_action_items"] = candidates

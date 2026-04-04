@@ -464,6 +464,15 @@ TRACKBLAZER_SHOP_CATALOG = [
     "default_priority": "MED",
     "default_max_quantity": 2,
     "notes": "Useful when bond pace is lagging.",
+    "timing_overrides": [
+      {
+        "label": "Post Classic Summer bond saturation",
+        "start": "Classic Year Early Sep",
+        "priority_delta": -2,
+        "sort_bonus": -2000,
+        "note": "Bond items lose value after Classic Summer; most bonds are already capped.",
+      },
+    ],
   },
   {
     "key": "yumy_cat_food",
@@ -708,6 +717,7 @@ def get_default_shop_policy():
     }
   return {
     "version": 1,
+    "catalog_timing_overrides": True,
     "items": items,
   }
 
@@ -729,8 +739,13 @@ def normalize_shop_policy(raw_policy=None):
       "timing_overrides": deepcopy(override_item.get("timing_overrides", default_item["timing_overrides"]) or []),
     }
 
+  catalog_timing = raw_policy.get("catalog_timing_overrides")
+  if not isinstance(catalog_timing, bool):
+    catalog_timing = base_policy["catalog_timing_overrides"]
+
   return {
     "version": int(raw_policy.get("version", base_policy["version"])),
+    "catalog_timing_overrides": catalog_timing,
     "items": normalized_items,
   }
 
@@ -827,6 +842,7 @@ def _rule_matches(rule, timeline_index):
 def get_effective_shop_items(policy=None, year=None, turn=None):
   normalized_policy = normalize_shop_policy(policy)
   context = policy_context(year=year, turn=turn)
+  use_catalog_timing = normalized_policy.get("catalog_timing_overrides", True)
   effective_items = []
 
   for entry in get_shop_catalog():
@@ -836,20 +852,21 @@ def get_effective_shop_items(policy=None, year=None, turn=None):
     sort_score = _PRIORITY_SORT_BASE[base_priority] - int(entry.get("sort_rank", 0))
     active_rules = []
 
-    for rule in item_policy.get("timing_overrides") or []:
-      if not _rule_matches(rule, context["timeline_index"]):
-        continue
-      delta = int(rule.get("priority_delta", 0) or 0)
-      priority_index = _clamp_priority_index(priority_index + delta)
-      sort_score += int(rule.get("sort_bonus", delta * 100) or 0)
-      active_rules.append(
-        {
-          "label": str(rule.get("label") or "timing_override"),
-          "note": str(rule.get("note") or ""),
-          "priority_delta": delta,
-          "sort_bonus": int(rule.get("sort_bonus", delta * 100) or 0),
-        }
-      )
+    if use_catalog_timing:
+      for rule in item_policy.get("timing_overrides") or []:
+        if not _rule_matches(rule, context["timeline_index"]):
+          continue
+        delta = int(rule.get("priority_delta", 0) or 0)
+        priority_index = _clamp_priority_index(priority_index + delta)
+        sort_score += int(rule.get("sort_bonus", delta * 100) or 0)
+        active_rules.append(
+          {
+            "label": str(rule.get("label") or "timing_override"),
+            "note": str(rule.get("note") or ""),
+            "priority_delta": delta,
+            "sort_bonus": int(rule.get("sort_bonus", delta * 100) or 0),
+          }
+        )
 
     effective_priority = PRIORITY_LEVELS[priority_index]
     effective_items.append(
