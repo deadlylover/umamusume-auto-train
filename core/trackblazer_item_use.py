@@ -78,6 +78,7 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
 _ENERGY_RESCUE_TARGET_RATIO = 0.55
+_ZERO_ENERGY_SCHEDULED_RACE_PCT = 0.02
 # Keep this aligned with the Trackblazer optional-race gate: spending energy to
 # "rescue" a training only makes sense if the reassess pass would still keep
 # that training over an optional rival race.
@@ -106,6 +107,11 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "prefer_rest_on_zero_energy_optional_race": True,
   "allow_zero_energy_optional_race_with_vita": True,
   "allow_zero_energy_optional_race_with_recovery_items": True,
+  "race_lookahead_enabled": True,
+  "race_lookahead_conserve_threshold": 60,
+  "race_lookahead_exceptional_score": 40,
+  "back_to_back_scheduled_race_vita_enabled": True,
+  "back_to_back_scheduled_race_vita_threshold_pct": 2,
 }
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -357,6 +363,32 @@ def _normalize_training_behavior_settings(raw_settings=None):
     "allow_zero_energy_optional_race_with_recovery_items": _safe_bool(
       raw_settings.get("allow_zero_energy_optional_race_with_recovery_items"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["allow_zero_energy_optional_race_with_recovery_items"],
+    ),
+    "race_lookahead_enabled": _safe_bool(
+      raw_settings.get("race_lookahead_enabled"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["race_lookahead_enabled"],
+    ),
+    "race_lookahead_conserve_threshold": min(
+      100,
+      _normalize_quantity(
+        raw_settings.get("race_lookahead_conserve_threshold"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["race_lookahead_conserve_threshold"],
+      ),
+    ),
+    "race_lookahead_exceptional_score": _normalize_quantity(
+      raw_settings.get("race_lookahead_exceptional_score"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["race_lookahead_exceptional_score"],
+    ),
+    "back_to_back_scheduled_race_vita_enabled": _safe_bool(
+      raw_settings.get("back_to_back_scheduled_race_vita_enabled"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["back_to_back_scheduled_race_vita_enabled"],
+    ),
+    "back_to_back_scheduled_race_vita_threshold_pct": min(
+      100,
+      _normalize_quantity(
+        raw_settings.get("back_to_back_scheduled_race_vita_threshold_pct"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["back_to_back_scheduled_race_vita_threshold_pct"],
+      ),
     ),
   }
 
@@ -665,6 +697,56 @@ def _current_held_quantity(item_key, inventory, held_quantities):
   return 0
 
 
+def _resolve_action_func(action):
+  action_func = getattr(action, "func", None)
+  if action_func is not None:
+    return action_func
+  if hasattr(action, "get"):
+    return action.get("func")
+  return None
+
+
+def _spendable_item_quantity(
+  item_key,
+  held_quantity,
+  effective_items_by_key,
+  *,
+  summer_window=False,
+  summer_conservation_bypass=False,
+  save_vita_for_summer=True,
+):
+  held_quantity = _safe_int(held_quantity, 0)
+  reserve_quantity = _safe_int(
+    (effective_items_by_key.get(item_key) or {}).get("reserve_quantity"),
+    0,
+  )
+  spendable_quantity = max(0, held_quantity - reserve_quantity)
+  if spendable_quantity <= 0:
+    return 0
+  if (
+    item_key.startswith("vita_")
+    and not summer_window
+    and not summer_conservation_bypass
+    and save_vita_for_summer
+  ):
+    return 0
+  return spendable_quantity
+
+
+def _smallest_held_vita_item(inventory, held_quantities):
+  candidates = []
+  for item_key in _VITA_ITEM_KEYS:
+    held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
+    restore = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    if held_quantity <= 0 or restore <= 0:
+      continue
+    candidates.append((restore, item_key))
+  if not candidates:
+    return None
+  candidates.sort()
+  return candidates[0][1]
+
+
 def _training_snapshot(training_name, training_data):
   training_data = training_data if isinstance(training_data, dict) else {}
   stat_gains = training_data.get("stat_gains") or {}
@@ -898,12 +980,22 @@ def _hammer_usage_state(held_quantities):
   return reserved_counts, spendable_counts
 
 
-def _usage_context(state_obj, action):
+def _usage_context(state_obj, action, policy=None):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
+  normalized_policy = normalize_item_use_policy(policy)
   inventory = state_obj.get("trackblazer_inventory") or {}
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   held_quantities = dict(inventory_summary.get("held_quantities") or {})
-  training_behavior = get_training_behavior_settings()
+  training_behavior = get_training_behavior_settings(normalized_policy)
+  effective_items_by_key = {
+    entry["key"]: entry
+    for entry in get_effective_item_use_items(
+      policy=normalized_policy,
+      year=state_obj.get("year"),
+      turn=state_obj.get("turn"),
+    )
+  }
+  action_func = _resolve_action_func(action)
   training_data = action.get("training_data") if hasattr(action, "get") else {}
   training_data = training_data if isinstance(training_data, dict) else {}
   training_name = action.get("training_name") if hasattr(action, "get") else None
@@ -925,6 +1017,11 @@ def _usage_context(state_obj, action):
   # Stop hoarding "save for summer" items when no summer windows remain, or
   # when the current board is already a high-value (>50) commitment.
   summer_conservation_bypass = past_final_summer or score_over_50
+  summer_window = timeline_label in _SUMMER_WINDOWS
+  save_vita_for_summer = _safe_bool(
+    training_behavior.get("save_vita_for_summer"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
+  )
   rainbow_count = _safe_int(training_data.get("total_rainbow_friends"), 0)
   support_count = _safe_int(training_data.get("total_supports"), 0)
   failure_rate = _safe_int(training_data.get("failure"), 0)
@@ -933,11 +1030,22 @@ def _usage_context(state_obj, action):
   energy_ratio = energy_level / max(max_energy, 1)
   safe_energy_target = max_energy * 0.60
   total_held_vita_restore = 0
+  spendable_vita_restore_total = 0
   for item_key in _VITA_ITEM_KEYS:
     held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
     if held_quantity <= 0:
       continue
-    total_held_vita_restore += _ENERGY_RESTORE_VALUES.get(item_key, 0) * held_quantity
+    restore_value = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    total_held_vita_restore += restore_value * held_quantity
+    spendable_quantity = _spendable_item_quantity(
+      item_key,
+      held_quantity,
+      effective_items_by_key,
+      summer_window=summer_window,
+      summer_conservation_bypass=summer_conservation_bypass,
+      save_vita_for_summer=save_vita_for_summer,
+    )
+    spendable_vita_restore_total += restore_value * spendable_quantity
   held_reset_whistles = _current_held_quantity("reset_whistle", inventory, held_quantities)
   held_recovery_cover = (
     _current_held_quantity("miracle_cure", inventory, held_quantities)
@@ -945,7 +1053,7 @@ def _usage_context(state_obj, action):
   )
   climax_commit_thresholds = _climax_commit_thresholds(held_reset_whistles)
   climax_committed_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and climax_window
     and (
       score_value >= climax_commit_thresholds["score"]
@@ -962,7 +1070,7 @@ def _usage_context(state_obj, action):
     )
   )
   strong_burst_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and (
       climax_committed_training
       if climax_window else
@@ -974,15 +1082,15 @@ def _usage_context(state_obj, action):
     )
   )
   weak_summer_training = bool(
-    getattr(action, "func", None) == "do_training"
-    and timeline_label in _SUMMER_WINDOWS
+    action_func == "do_training"
+    and summer_window
     and rainbow_count <= 0
     and matching_stat_gain < 20
     and total_stat_gain < 20
     and score_value < 5.0
   )
   weak_climax_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and climax_window
     and not climax_committed_training
   )
@@ -1008,7 +1116,7 @@ def _usage_context(state_obj, action):
   held_support_keys = {entry["key"] for entry in held_support_items}
   affordable_shop_support_keys = {entry["key"] for entry in affordable_shop_support_items}
   high_value_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and (
       score_value >= 20.0
       or matching_stat_gain >= 10
@@ -1017,7 +1125,7 @@ def _usage_context(state_obj, action):
     )
   )
   very_high_value_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and (
       score_value >= 30.0
       or matching_stat_gain >= 14
@@ -1026,7 +1134,7 @@ def _usage_context(state_obj, action):
     )
   )
   committed_value_training = bool(
-    getattr(action, "func", None) == "do_training"
+    action_func == "do_training"
     and (
       score_value >= 35.0
       or matching_stat_gain >= 25
@@ -1039,7 +1147,7 @@ def _usage_context(state_obj, action):
     strong_burst_training
     or committed_value_training
     or (
-      getattr(action, "func", None) == "do_training"
+      action_func == "do_training"
       and (failure_rate <= 0 or failure_bypassed_by_items)
       and (
         climax_committed_training
@@ -1056,11 +1164,18 @@ def _usage_context(state_obj, action):
     },
   )
   optional_race_action = bool(
-    getattr(action, "func", None) == "do_race"
+    action_func == "do_race"
     and not action.get("scheduled_race")
     and not action.get("trackblazer_lobby_scheduled_race")
     and not action.get("is_race_day")
     and not action.get("trackblazer_climax_race_day")
+  )
+  scheduled_race_action = bool(
+    action_func == "do_race"
+    and (
+      action.get("scheduled_race")
+      or action.get("trackblazer_lobby_scheduled_race")
+    )
   )
   zero_energy_optional_race = optional_race_action and energy_ratio <= 0.02
   race_low_energy_vita_rescue = bool(
@@ -1071,6 +1186,29 @@ def _usage_context(state_obj, action):
       for item_key in _ENERGY_ITEM_KEYS
     )
   )
+  scheduled_race_vita_enabled = bool(
+    training_behavior.get("back_to_back_scheduled_race_vita_enabled", True)
+  )
+  scheduled_race_vita_threshold_pct = _safe_int(
+    training_behavior.get("back_to_back_scheduled_race_vita_threshold_pct"),
+    int(_ZERO_ENERGY_SCHEDULED_RACE_PCT * 100),
+  ) or int(_ZERO_ENERGY_SCHEDULED_RACE_PCT * 100)
+  race_lookahead = action.get("trackblazer_race_lookahead") if hasattr(action, "get") else {}
+  race_lookahead = race_lookahead if isinstance(race_lookahead, dict) else {}
+  scheduled_race_low_energy_vita_item_key = (
+    _smallest_held_vita_item(inventory, held_quantities)
+    if (
+      scheduled_race_action
+      and scheduled_race_vita_enabled
+      and race_lookahead.get("conserve")
+      and energy_ratio <= (scheduled_race_vita_threshold_pct / 100.0)
+    ) else
+    None
+  )
+  race_lookahead_energy_item_key = (
+    action.get("trackblazer_race_lookahead_energy_item_key")
+    if hasattr(action, "get") else None
+  )
   return {
     "timeline_label": timeline_label,
     "timeline_index": timeline_index,
@@ -1078,7 +1216,7 @@ def _usage_context(state_obj, action):
     "climax_window": climax_window,
     "summer_conservation_bypass": summer_conservation_bypass,
     "score_over_50": score_over_50,
-    "summer_window": timeline_label in _SUMMER_WINDOWS,
+    "summer_window": summer_window,
     "current_mood": str(state_obj.get("current_mood") or "").upper(),
     "status_effect_names": list(state_obj.get("status_effect_names") or []),
     "energy_level": energy_level,
@@ -1086,9 +1224,11 @@ def _usage_context(state_obj, action):
     "energy_deficit": max(0, max_energy - energy_level),
     "safe_energy_target": safe_energy_target,
     "held_vita_restore_total": total_held_vita_restore,
+    "spendable_vita_restore_total": spendable_vita_restore_total,
     "held_reset_whistles": held_reset_whistles,
     "held_vita_reaches_safe_energy": (energy_level + total_held_vita_restore) >= safe_energy_target,
-    "action_func": getattr(action, "func", None),
+    "spendable_vita_reaches_safe_energy": (energy_level + spendable_vita_restore_total) >= safe_energy_target,
+    "action_func": action_func,
     "training_name": training_name,
     "training_score": score_value,
     "stat_gains": stat_gains,
@@ -1125,11 +1265,14 @@ def _usage_context(state_obj, action):
     "allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
     "zero_energy_optional_race": zero_energy_optional_race,
     "race_low_energy_vita_rescue": race_low_energy_vita_rescue,
+    "scheduled_race_low_energy_vita_item_key": scheduled_race_low_energy_vita_item_key,
+    "scheduled_race_low_energy_vita_threshold_pct": scheduled_race_vita_threshold_pct,
+    "race_lookahead_active": bool(race_lookahead.get("conserve")),
+    "race_lookahead_energy_item_key": race_lookahead_energy_item_key,
+    "race_lookahead_safe_energy_target": _safe_int(race_lookahead.get("safe_energy_target"), 0),
+    "race_lookahead_reason": str(race_lookahead.get("reason") or ""),
     "held_recovery_cover_available": held_recovery_cover > 0,
-    "save_vita_for_summer": _safe_bool(
-      training_behavior.get("save_vita_for_summer"),
-      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
-    ),
+    "save_vita_for_summer": save_vita_for_summer,
   }
 
 
@@ -1195,13 +1338,13 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   kept_energy = []
   if energy_candidates and charm_planned:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
-    if context.get("held_vita_reaches_safe_energy"):
+    if context.get("spendable_vita_reaches_safe_energy"):
       kept_non_energy = []
       for entry in non_energy:
         if entry.get("key") == "good_luck_charm":
           entry.pop("candidate_score", None)
           entry["reason"] = (
-            "held Vita can lift energy to the 60% safe zone; prefer energy over charm"
+            "spendable held Vita can lift energy to the 60% safe zone; prefer energy over charm"
           )
           deferred.append(entry)
           continue
@@ -1752,6 +1895,30 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     }
 
   if usage_group == "energy":
+    scheduled_race_vita_item_key = context.get("scheduled_race_low_energy_vita_item_key")
+    if scheduled_race_vita_item_key:
+      if item_key != scheduled_race_vita_item_key:
+        return {
+          "defer_reason": f"scheduled race low-energy safeguard selected {scheduled_race_vita_item_key}",
+        }
+      return {
+        "candidate_score": 550 + priority_score,
+        "reason": "back-to-back scheduled race low-energy safeguard: OCR reads near 0 energy, stage one Vita before racing",
+        "reserved_quantity": reserve_quantity,
+        "use_now": True,
+      }
+    required_lookahead_item_key = context.get("race_lookahead_energy_item_key")
+    if required_lookahead_item_key:
+      if item_key != required_lookahead_item_key:
+        return {
+          "defer_reason": f"race lookahead selected {required_lookahead_item_key} for the scheduled race gauntlet",
+        }
+      return {
+        "candidate_score": 560 + priority_score,
+        "reason": context.get("race_lookahead_reason") or "race lookahead safeguard before consecutive scheduled races",
+        "reserved_quantity": reserve_quantity,
+        "use_now": True,
+      }
     if context.get("race_low_energy_vita_rescue"):
       return {
         "candidate_score": 520 + priority_score,
@@ -1830,11 +1997,11 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
         return {
           "defer_reason": f"no fail risk (fail {context['failure_rate']}% <= 5%); charm would be greyed out",
         }
-      if context.get("held_vita_reaches_safe_energy"):
+      if context.get("spendable_vita_reaches_safe_energy"):
         return {
           "defer_reason": (
-            f"held Vita can raise energy to at least 60% "
-            f"({context['energy_level']}+{context.get('held_vita_restore_total', 0)}"
+            f"spendable held Vita can raise energy to at least 60% "
+            f"({context['energy_level']}+{context.get('spendable_vita_restore_total', 0)}"
             f" >= {int(context.get('safe_energy_target', 0))}); prefer energy over charm"
           ),
         }
@@ -1865,7 +2032,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
   inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
   held_quantities = dict(inventory_summary.get("held_quantities") or {})
   normalized_policy = normalize_item_use_policy(policy)
-  context = _usage_context(state_obj, action)
+  context = _usage_context(state_obj, action, policy=normalized_policy)
   effective_items = get_effective_item_use_items(
     policy=normalized_policy,
     year=state_obj.get("year"),
@@ -1919,6 +2086,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "current_mood": context.get("current_mood"),
       "energy_level": context.get("energy_level"),
       "max_energy": context.get("max_energy"),
+      "spendable_vita_restore_total": context.get("spendable_vita_restore_total"),
       "training_name": context.get("training_name"),
       "training_score": context.get("training_score"),
       "matching_stat_gain": context.get("matching_stat_gain"),
@@ -1945,4 +2113,23 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     },
     "candidates": candidates[: max(0, int(limit))],
     "deferred": deferred[: max(0, int(limit))],
+  }
+
+
+def get_planned_failure_bypass_items(policy=None, state_obj=None, action=None, limit=8):
+  plan = plan_item_usage(
+    policy=policy,
+    state_obj=state_obj,
+    action=action,
+    limit=limit,
+  )
+  candidates = [
+    dict(entry)
+    for entry in (plan.get("candidates") or [])
+    if entry.get("usage_group") == "energy" or entry.get("key") == "good_luck_charm"
+  ]
+  return {
+    "context": dict(plan.get("context") or {}),
+    "candidates": candidates,
+    "can_bypass": bool(candidates),
   }

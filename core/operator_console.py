@@ -164,6 +164,11 @@ class OperatorConsole:
     self._wit_gate_supports_var = None
     self._wit_gate_rainbows_var = None
     self._wit_gate_energy_var = None
+    self._race_lookahead_enabled_var = None
+    self._race_lookahead_threshold_var = None
+    self._race_lookahead_score_var = None
+    self._scheduled_race_vita_enabled_var = None
+    self._scheduled_race_vita_threshold_var = None
     self._zero_energy_optional_race_rest_var = None
     self._zero_energy_optional_race_vita_var = None
     self._zero_energy_optional_race_recovery_var = None
@@ -1391,32 +1396,44 @@ class OperatorConsole:
 
   def _format_trackblazer_race_lines(self, selected_action):
     decision = selected_action.get("trackblazer_race_decision") or {}
-    if not isinstance(decision, dict) or not decision:
-      return []
+    lookahead = selected_action.get("trackblazer_race_lookahead") or {}
+    lines = []
+    if isinstance(decision, dict) and decision:
+      outcome = "race" if decision.get("should_race") else "train"
+      parts = [f"Race Gate: {outcome}"]
+      target = decision.get("race_tier_target")
+      if target:
+        parts.append(f"target {target}")
+      race_name = decision.get("race_name")
+      if race_name:
+        parts.append(f"race {race_name}")
+      training_total = decision.get("training_total_stats")
+      if training_total is not None:
+        parts.append(f"training_total {training_total}")
+      training_score = decision.get("training_score")
+      if training_score is not None:
+        parts.append(f"training_score {training_score}")
+      if decision.get("rival_indicator"):
+        parts.append("rival yes")
+      if decision.get("is_summer"):
+        parts.append("summer yes")
 
-    outcome = "race" if decision.get("should_race") else "train"
-    parts = [f"Race Gate: {outcome}"]
-    target = decision.get("race_tier_target")
-    if target:
-      parts.append(f"target {target}")
-    race_name = decision.get("race_name")
-    if race_name:
-      parts.append(f"race {race_name}")
-    training_total = decision.get("training_total_stats")
-    if training_total is not None:
-      parts.append(f"training_total {training_total}")
-    training_score = decision.get("training_score")
-    if training_score is not None:
-      parts.append(f"training_score {training_score}")
-    if decision.get("rival_indicator"):
-      parts.append("rival yes")
-    if decision.get("is_summer"):
-      parts.append("summer yes")
-
-    lines = [" | ".join(parts)]
-    reason = decision.get("reason")
-    if reason:
-      lines.append(f"Race Gate Reason: {reason}")
+      lines.append(" | ".join(parts))
+      reason = decision.get("reason")
+      if reason:
+        lines.append(f"Race Gate Reason: {reason}")
+    if isinstance(lookahead, dict) and lookahead.get("conserve"):
+      parts = [
+        "Race Lookahead: conserve",
+        f"target {lookahead.get('safe_energy_target', '?')}/{lookahead.get('max_energy', '?')}",
+      ]
+      energy_item_key = lookahead.get("energy_item_key")
+      if energy_item_key:
+        parts.append(f"item {energy_item_key}")
+      lines.append(" | ".join(parts))
+      reason = lookahead.get("reason")
+      if reason:
+        lines.append(f"Race Lookahead Reason: {reason}")
     return lines
 
   def _format_trackblazer_race_entry_lines(self, planned):
@@ -3301,7 +3318,7 @@ class OperatorConsole:
     window = tk.Toplevel(self._root)
     window.title("Training Behavior")
     window.configure(bg="#101418")
-    window.geometry("760x560")
+    window.geometry("760x720")
     window.resizable(False, False)
     window.bind(
       "<Destroy>",
@@ -3494,6 +3511,132 @@ class OperatorConsole:
       wraplength=700,
     ).pack(anchor="w", pady=(4, 0))
 
+    race_lookahead_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    race_lookahead_frame.pack(fill=tk.X)
+    tk.Label(
+      race_lookahead_frame,
+      text="Race lookahead energy conservation",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    self._race_lookahead_enabled_var = tk.BooleanVar(
+      value=bool(training_behavior.get("race_lookahead_enabled", True))
+    )
+    tk.Checkbutton(
+      race_lookahead_frame,
+      text="Conserve energy before back-to-back scheduled races",
+      variable=self._race_lookahead_enabled_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).grid(row=1, column=0, columnspan=6, sticky="w")
+    tk.Label(
+      race_lookahead_frame,
+      text="Energy threshold %",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    self._race_lookahead_threshold_var = tk.StringVar(
+      value=str(training_behavior.get("race_lookahead_conserve_threshold", 60))
+    )
+    tk.Spinbox(
+      race_lookahead_frame,
+      from_=0,
+      to=100,
+      width=5,
+      textvariable=self._race_lookahead_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=1, sticky="w", pady=2)
+    tk.Label(
+      race_lookahead_frame,
+      text="Min exceptional training score",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=2, sticky="e", padx=(12, 4), pady=2)
+    self._race_lookahead_score_var = tk.StringVar(
+      value=str(training_behavior.get("race_lookahead_exceptional_score", 40))
+    )
+    tk.Spinbox(
+      race_lookahead_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._race_lookahead_score_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=3, sticky="w", pady=2)
+    tk.Label(
+      race_lookahead_frame,
+      text="When enabled, the bot rests before consecutive scheduled races unless training score exceeds the threshold and native energy or one held Vita can still cover the race sequence. Year-end Late Dec races do not trigger this guard.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+
+    scheduled_race_vita_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    scheduled_race_vita_frame.pack(fill=tk.X)
+    tk.Label(
+      scheduled_race_vita_frame,
+      text="Back-to-back race Vita safeguard",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    self._scheduled_race_vita_enabled_var = tk.BooleanVar(
+      value=bool(training_behavior.get("back_to_back_scheduled_race_vita_enabled", True))
+    )
+    tk.Checkbutton(
+      scheduled_race_vita_frame,
+      text="Use one Vita before a scheduled race when OCR reads near 0 energy and another scheduled race follows",
+      variable=self._scheduled_race_vita_enabled_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).grid(row=1, column=0, columnspan=6, sticky="w")
+    tk.Label(
+      scheduled_race_vita_frame,
+      text="Near-0 threshold %",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    self._scheduled_race_vita_threshold_var = tk.StringVar(
+      value=str(training_behavior.get("back_to_back_scheduled_race_vita_threshold_pct", 2))
+    )
+    tk.Spinbox(
+      scheduled_race_vita_frame,
+      from_=0,
+      to=20,
+      width=5,
+      textvariable=self._scheduled_race_vita_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=1, sticky="w", pady=2)
+    tk.Label(
+      scheduled_race_vita_frame,
+      text="This does not fire on lone scheduled races or on fallback bad-training races. It only covers the first leg of an immediate back-to-back scheduled sequence.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+
     vita_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     vita_frame.pack(fill=tk.X)
     tk.Label(
@@ -3620,12 +3763,24 @@ class OperatorConsole:
       self._wit_gate_energy_var.set(str(behavior.get("wit_failure_gate_high_energy_pct", 80)))
     if self._strong_training_score_threshold_var is not None:
       self._strong_training_score_threshold_var.set(str(behavior.get("strong_training_score_threshold", 40)))
+    if self._race_lookahead_enabled_var is not None:
+      self._race_lookahead_enabled_var.set(bool(behavior.get("race_lookahead_enabled", True)))
+    if self._race_lookahead_threshold_var is not None:
+      self._race_lookahead_threshold_var.set(str(behavior.get("race_lookahead_conserve_threshold", 60)))
+    if self._race_lookahead_score_var is not None:
+      self._race_lookahead_score_var.set(str(behavior.get("race_lookahead_exceptional_score", 40)))
+    if self._scheduled_race_vita_enabled_var is not None:
+      self._scheduled_race_vita_enabled_var.set(bool(behavior.get("back_to_back_scheduled_race_vita_enabled", True)))
+    if self._scheduled_race_vita_threshold_var is not None:
+      self._scheduled_race_vita_threshold_var.set(str(behavior.get("back_to_back_scheduled_race_vita_threshold_pct", 2)))
     if self._zero_energy_optional_race_rest_var is not None:
       self._zero_energy_optional_race_rest_var.set(bool(behavior.get("prefer_rest_on_zero_energy_optional_race", True)))
     if self._zero_energy_optional_race_vita_var is not None:
       self._zero_energy_optional_race_vita_var.set(bool(behavior.get("allow_zero_energy_optional_race_with_vita", True)))
     if self._zero_energy_optional_race_recovery_var is not None:
       self._zero_energy_optional_race_recovery_var.set(bool(behavior.get("allow_zero_energy_optional_race_with_recovery_items", True)))
+    if self._save_vita_for_summer_var is not None:
+      self._save_vita_for_summer_var.set(bool(behavior.get("save_vita_for_summer", True)))
 
   def _save_stat_weights(self):
     weights = {}
@@ -3673,6 +3828,28 @@ class OperatorConsole:
       threshold_text = str(self._strong_training_score_threshold_var.get() or "").strip()
       try:
         training_behavior["strong_training_score_threshold"] = max(0, int(threshold_text))
+      except ValueError:
+        pass
+    if self._race_lookahead_enabled_var is not None:
+      training_behavior["race_lookahead_enabled"] = bool(self._race_lookahead_enabled_var.get())
+    if self._race_lookahead_threshold_var is not None:
+      threshold_text = str(self._race_lookahead_threshold_var.get() or "").strip()
+      try:
+        training_behavior["race_lookahead_conserve_threshold"] = min(100, max(0, int(threshold_text)))
+      except ValueError:
+        pass
+    if self._race_lookahead_score_var is not None:
+      score_text = str(self._race_lookahead_score_var.get() or "").strip()
+      try:
+        training_behavior["race_lookahead_exceptional_score"] = max(0, int(score_text))
+      except ValueError:
+        pass
+    if self._scheduled_race_vita_enabled_var is not None:
+      training_behavior["back_to_back_scheduled_race_vita_enabled"] = bool(self._scheduled_race_vita_enabled_var.get())
+    if self._scheduled_race_vita_threshold_var is not None:
+      threshold_text = str(self._scheduled_race_vita_threshold_var.get() or "").strip()
+      try:
+        training_behavior["back_to_back_scheduled_race_vita_threshold_pct"] = min(100, max(0, int(threshold_text)))
       except ValueError:
         pass
     if self._zero_energy_optional_race_rest_var is not None:

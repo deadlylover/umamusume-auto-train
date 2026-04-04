@@ -2,7 +2,10 @@ import core.trainings
 import utils.constants as constants
 import core.config as config
 from core.race_selector import get_race_gate_for_turn_label
-from core.trackblazer_race_logic import get_optional_race_low_energy_override
+from core.trackblazer_race_logic import (
+  get_optional_race_low_energy_override,
+  get_race_lookahead_energy_advice,
+)
 from utils.shared import check_status_effects
 from core.actions import Action
 from core.recognizer import compare_brightness
@@ -404,6 +407,11 @@ class Strategy:
         action.available_actions.insert(0, "do_race")
       action["race_name"] = best_race_name
       action["scheduled_race"] = True
+      action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
+        state,
+        getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      )
+      action["trackblazer_race_lookahead_energy_item_key"] = None
       info(f"Scheduled race found: {best_race_name}")
 
     return action
@@ -449,6 +457,44 @@ class Strategy:
       min_score = self._get_min_score(action)
       blocked, gate = _optional_race_blocked(state)
       low_energy_override = get_optional_race_low_energy_override(state)
+      action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
+        state,
+        getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      )
+      action["trackblazer_race_lookahead_energy_item_key"] = None
+      race_lookahead = action["trackblazer_race_lookahead"]
+      if race_lookahead.get("conserve") and state["turn"] != "Race Day":
+        exceptional_threshold = race_lookahead.get("train_if_exceptional_threshold", 40)
+        if training_score >= exceptional_threshold and race_lookahead.get("can_train_and_race"):
+          if race_lookahead.get("energy_item_required"):
+            action["trackblazer_race_lookahead_energy_item_key"] = race_lookahead.get("energy_item_key")
+            info(
+              f"[RACE_LOOKAHEAD] Keeping training ({training_score}) before scheduled race gauntlet; "
+              f"stage Vita {race_lookahead.get('energy_item_key')} to cover the {race_lookahead.get('safe_energy_target')}"
+              f"/{race_lookahead.get('max_energy')} energy target"
+            )
+          else:
+            info(
+              f"[RACE_LOOKAHEAD] Keeping training ({training_score}) before scheduled race gauntlet; "
+              f"native energy already covers the {race_lookahead.get('safe_energy_target')}"
+              f"/{race_lookahead.get('max_energy')} target"
+            )
+          return action
+
+        action.func = "do_rest"
+        action["disable_skip_turn_fallback"] = True
+        if training_score >= exceptional_threshold:
+          info(
+            f"[RACE_LOOKAHEAD] Resting despite exceptional training ({training_score}); "
+            f"{race_lookahead.get('reason')}"
+          )
+        else:
+          info(
+            f"[RACE_LOOKAHEAD] Resting before scheduled race gauntlet; "
+            f"training score {training_score} < {exceptional_threshold}. {race_lookahead.get('reason')}"
+          )
+        return action
+
       if (
         not blocked
         and

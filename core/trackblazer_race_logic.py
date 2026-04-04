@@ -9,8 +9,10 @@ main loop can log, preview, and act on.
 import utils.constants as constants
 import core.bot as bot
 import core.config as config
-from core.race_selector import get_race_gate_for_turn_label
+from core.race_selector import get_race_gate_for_turn_label, normalize_operator_race_selector
 from core.trackblazer_item_use import (
+  _ENERGY_RESTORE_VALUES,
+  _VITA_ITEM_KEYS,
   get_training_behavior_settings,
   get_training_behavior_strong_training_score_threshold,
 )
@@ -45,13 +47,20 @@ _ZERO_ENERGY_OPTIONAL_RACE_RECOVERY_KEYS = (
   "miracle_cure",
   "rich_hand_cream",
 )
+_RACE_LOOKAHEAD_WINDOW = 3
+_RACE_LOOKAHEAD_SAFE_ENERGY_PCT = 0.60
+_RACE_LOOKAHEAD_YEAR_END_EXEMPT_TURNS = {
+  "Junior Year Late Dec",
+  "Classic Year Late Dec",
+  "Senior Year Late Dec",
+}
 
 
-def _safe_int(value):
+def _safe_int(value, default=None):
   try:
     return int(value)
   except (TypeError, ValueError):
-    return None
+    return default
 
 
 def _safe_float(value):
@@ -59,6 +68,35 @@ def _safe_float(value):
     return float(value)
   except (TypeError, ValueError):
     return None
+
+
+def _safe_energy_restore_item(held_quantities, current_energy, target_energy):
+  held_quantities = held_quantities if isinstance(held_quantities, dict) else {}
+  current_energy = _safe_int(current_energy) or 0
+  target_energy = _safe_int(target_energy) or 0
+
+  matching_items = []
+  for item_key in _VITA_ITEM_KEYS:
+    restore_value = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    if restore_value <= 0:
+      continue
+    if (_safe_int(held_quantities.get(item_key)) or 0) <= 0:
+      continue
+    projected_energy = current_energy + restore_value
+    if projected_energy < target_energy:
+      continue
+    matching_items.append((projected_energy, restore_value, item_key))
+
+  if not matching_items:
+    return None
+
+  matching_items.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+  _, restore_value, item_key = matching_items[0]
+  return {
+    "item_key": item_key,
+    "restore_value": restore_value,
+    "projected_energy": current_energy + restore_value,
+  }
 
 
 def _is_summer(year):
@@ -281,6 +319,144 @@ def _strong_training_score_threshold():
 
 def get_optional_race_low_energy_override(state_obj):
   return _optional_race_low_energy_override(state_obj)
+
+
+def get_race_lookahead_energy_advice(state_obj, selector=None):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  selector = normalize_operator_race_selector(selector)
+  training_behavior = get_training_behavior_settings(
+    getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None)
+  )
+  current_turn_label = str(state_obj.get("year") or "").strip()
+  current_index = (
+    constants.TIMELINE.index(current_turn_label)
+    if current_turn_label in constants.TIMELINE else None
+  )
+  base_advice = {
+    "enabled": bool(training_behavior.get("race_lookahead_enabled", True)),
+    "conserve": False,
+    "current_turn": current_turn_label,
+    "upcoming_races": [],
+    "upcoming_race_count": 0,
+    "energy_costing_race_count": 0,
+    "safe_energy_threshold_pct": _safe_int(
+      training_behavior.get("race_lookahead_conserve_threshold"),
+      int(_RACE_LOOKAHEAD_SAFE_ENERGY_PCT * 100),
+    ) or int(_RACE_LOOKAHEAD_SAFE_ENERGY_PCT * 100),
+    "train_if_exceptional_threshold": _safe_int(
+      training_behavior.get("race_lookahead_exceptional_score"),
+      40,
+    ) or 40,
+    "current_energy": _safe_int(state_obj.get("energy_level")) or 0,
+    "max_energy": _safe_int(state_obj.get("max_energy")) or 0,
+    "safe_energy_target": 0,
+    "can_train_and_race": True,
+    "energy_item_required": False,
+    "energy_item_key": None,
+    "energy_item_restore": 0,
+    "reason": "",
+  }
+  if not base_advice["enabled"]:
+    base_advice["reason"] = "race lookahead disabled in training behavior"
+    return base_advice
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    base_advice["reason"] = "race lookahead only applies in Trackblazer"
+    return base_advice
+  if current_index is None:
+    base_advice["reason"] = "current turn is not on the normal training timeline"
+    return base_advice
+  if base_advice["max_energy"] <= 0:
+    base_advice["reason"] = "max energy is unknown"
+    return base_advice
+  if not selector.get("enabled"):
+    base_advice["reason"] = "operator race selector is disabled"
+    return base_advice
+
+  entry_map = {
+    (entry.get("year"), entry.get("date")): entry
+    for entry in selector.get("dates", [])
+    if isinstance(entry, dict)
+  }
+  upcoming_races = []
+  for offset in range(1, _RACE_LOOKAHEAD_WINDOW + 1):
+    timeline_index = current_index + offset
+    if timeline_index >= len(constants.TIMELINE):
+      break
+    turn_label = constants.TIMELINE[timeline_index]
+    matching_entry = None
+    for key, entry in entry_map.items():
+      if f"{key[0]} {key[1]}".strip() == turn_label:
+        matching_entry = entry
+        break
+    if not matching_entry:
+      break
+    if not matching_entry.get("race_allowed", True):
+      break
+    race_name = str(matching_entry.get("name") or "").strip()
+    if not race_name:
+      break
+    year_end_exempt = turn_label in _RACE_LOOKAHEAD_YEAR_END_EXEMPT_TURNS
+    upcoming_races.append(
+      {
+        "turn_label": turn_label,
+        "race_name": race_name,
+        "year_end_exempt": year_end_exempt,
+      }
+    )
+
+  base_advice["upcoming_races"] = upcoming_races
+  base_advice["upcoming_race_count"] = len(upcoming_races)
+  base_advice["energy_costing_race_count"] = sum(
+    0 if race.get("year_end_exempt") else 1
+    for race in upcoming_races
+  )
+  if base_advice["upcoming_race_count"] < 2:
+    base_advice["reason"] = "no immediate back-to-back scheduled races"
+    return base_advice
+  if base_advice["energy_costing_race_count"] < 2:
+    base_advice["reason"] = "back-to-back includes a year-end exempt race; no extra conservation needed"
+    return base_advice
+
+  max_energy = max(base_advice["max_energy"], 0)
+  safe_energy_target = int(round(max_energy * (base_advice["safe_energy_threshold_pct"] / 100.0)))
+  base_advice["safe_energy_target"] = safe_energy_target
+  energy_item = _safe_energy_restore_item(
+    (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {},
+    base_advice["current_energy"],
+    safe_energy_target,
+  )
+  has_native_energy = base_advice["current_energy"] >= safe_energy_target
+  can_train_and_race = has_native_energy or bool(energy_item)
+  base_advice["can_train_and_race"] = can_train_and_race
+  if energy_item and not has_native_energy:
+    base_advice["energy_item_required"] = True
+    base_advice["energy_item_key"] = energy_item["item_key"]
+    base_advice["energy_item_restore"] = energy_item["restore_value"]
+
+  upcoming_labels = ", ".join(
+    f"{race['turn_label']} ({race['race_name']})"
+    for race in upcoming_races
+  )
+  if can_train_and_race:
+    if base_advice["energy_item_required"]:
+      base_advice["reason"] = (
+        f"back-to-back scheduled races ahead: {upcoming_labels}; "
+        f"training is only safe if {energy_item['item_key']} is used to reach "
+        f"{safe_energy_target}/{max_energy} energy"
+      )
+    else:
+      base_advice["reason"] = (
+        f"back-to-back scheduled races ahead: {upcoming_labels}; "
+        f"current energy already meets the {safe_energy_target}/{max_energy} safety target"
+      )
+  else:
+    base_advice["reason"] = (
+      f"back-to-back scheduled races ahead: {upcoming_labels}; "
+      f"current energy {base_advice['current_energy']}/{max_energy} cannot reach "
+      f"the {safe_energy_target}/{max_energy} safety target with one held Vita"
+    )
+  base_advice["conserve"] = True
+  return base_advice
 
 
 def evaluate_trackblazer_race(state_obj, action):

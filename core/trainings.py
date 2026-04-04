@@ -5,7 +5,7 @@ import core.config as config
 from utils.shared import CleanDefaultDict
 import utils.constants as constants
 import core.bot as bot
-from core.trackblazer_item_use import should_allow_wit_training
+from core.trackblazer_item_use import should_allow_wit_training, get_planned_failure_bypass_items
 
 # Training function names:
 # max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
@@ -377,71 +377,48 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
   risk_taking_set = training_template['risk_taking_set']
   filtered_results = CleanDefaultDict()
 
-  # Trackblazer: check if held energy items / good luck charm would clear failure
-  _tb_items_bypass_failure = False
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
     state["wit_failure_gate_blocked"] = False
-    inv_summary = state.get("trackblazer_inventory_summary") or {}
-    held_quantities = dict(inv_summary.get("held_quantities") or {})
-    if not held_quantities:
-      inventory = state.get("trackblazer_inventory") or {}
-      if isinstance(inventory, dict):
-        for item_key, item_data in inventory.items():
-          if not isinstance(item_data, dict):
-            continue
-          held_quantity = item_data.get("held_quantity")
-          try:
-            held_quantity = int(held_quantity)
-          except (TypeError, ValueError):
-            held_quantity = 0
-          if held_quantity > 0:
-            held_quantities[item_key] = held_quantity
-      if held_quantities:
-        info(
-          "[TB_INV] Derived held quantities from inventory entries for training "
-          f"failure bypass: {sorted(held_quantities.keys())}"
-        )
-    if held_quantities:
-      has_charm = held_quantities.get("good_luck_charm", 0) > 0
-      if has_charm:
-        _tb_items_bypass_failure = True
-        info("Trackblazer failure bypass: good luck charm available")
-      else:
-        from core.trackblazer_item_use import _ENERGY_RESTORE_VALUES, get_save_vita_for_summer, _SUMMER_WINDOWS, _past_final_summer
-        from core.trackblazer_shop import policy_context
-        save_vita = get_save_vita_for_summer()
-        timeline = policy_context(year=state.get("year"), turn=state.get("turn"))
-        is_summer = (timeline.get("timeline_label") or "") in _SUMMER_WINDOWS
-        past_summer = _past_final_summer(timeline.get("timeline_index"))
-        # When saving Vitas for summer and it's not summer (and not past the
-        # final summer window), energy items won't actually be used — don't
-        # let high-fail trainings through on a promise the item planner won't
-        # honour.
-        if save_vita and not is_summer and not past_summer:
-          info(
-            "Trackblazer failure bypass: energy items held but save_vita_for_summer "
-            f"is active and not in summer window ({timeline.get('timeline_label')}); "
-            "skipping energy-based bypass"
-          )
-        else:
-          energy_level = state.get("energy_level", 0)
-          max_energy = state.get("max_energy", 0)
-          if max_energy > 0:
-            safe_threshold = max_energy * 0.50
-            # Find the smallest held energy restore that brings us above the safe threshold
-            held_restores = sorted(
-              rv for ik, rv in _ENERGY_RESTORE_VALUES.items()
-              if held_quantities.get(ik, 0) > 0 and rv > 0
-            )
-            for restore in held_restores:
-              projected_energy = min(energy_level + restore, max_energy)
-              if projected_energy >= safe_threshold:
-                _tb_items_bypass_failure = True
-                projected_pct = projected_energy / max_energy
-                info(f"Trackblazer failure bypass: energy item +{restore} clears fails ({energy_level:.0f}+{restore} = {projected_energy:.0f}/{max_energy:.0f} = {projected_pct:.0%})")
-                break
+  tb_failure_bypass_cache = {}
+
+  def _tb_try_allow_failure_bypass(training_name, training_data, failure_rate, failure_limit):
+    if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+      return False
+    cached = tb_failure_bypass_cache.get(training_name)
+    if cached is None:
+      preview_action = Action()
+      preview_action.func = "do_training"
+      preview_action["training_name"] = training_name
+      preview_action["training_data"] = dict(training_data or {})
+      cached = get_planned_failure_bypass_items(
+        policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+        state_obj=state,
+        action=preview_action,
+        limit=8,
+      )
+      tb_failure_bypass_cache[training_name] = cached
+    candidates = list(cached.get("candidates") or [])
+    if not candidates:
+      return False
+    training_data["failure_bypassed_by_items"] = True
+    training_data["trackblazer_failure_bypass_items"] = [
+      entry.get("key")
+      for entry in candidates
+      if entry.get("key")
+    ]
+    planned_names = ", ".join(
+      entry.get("name") or entry.get("key") or "unknown item"
+      for entry in candidates
+    )
+    info(
+      f"Allowing {training_name.upper()}: fail {failure_rate}% > {failure_limit}% "
+      f"(planned failure bypass: {planned_names})"
+    )
+    return True
 
   for training_name, training_data in training_results.items():
+    training_data.pop("failure_bypassed_by_items", None)
+    training_data.pop("trackblazer_failure_bypass_items", None)
     if constants.SCENARIO_NAME in ("mant", "trackblazer") and training_name == "wit":
       wit_allowed, wit_gate_reason = should_allow_wit_training(state, training_data, getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
       if not wit_allowed:
@@ -470,10 +447,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
       # Check failure rate with dynamic threshold
       failure_rate = int(training_data["failure"])
       if failure_rate > max_allowed_failure:
-        if _tb_items_bypass_failure:
-          training_data["failure_bypassed_by_items"] = True
-          info(f"Allowing {training_name.upper()}: fail {failure_rate}% > {max_allowed_failure}% (items expected to clear failure)")
-        else:
+        if not _tb_try_allow_failure_bypass(training_name, training_data, failure_rate, max_allowed_failure):
           if risk_increase > 0:
             debug(f"Skipping {training_name.upper()}: {failure_rate}% > {max_allowed_failure}% (base: {config.MAX_FAILURE}, bonus: +{risk_increase})")
           continue
@@ -481,10 +455,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
       # No risk taking - use base failure rate only
       failure_rate = int(training_data["failure"])
       if failure_rate > config.MAX_FAILURE:
-        if _tb_items_bypass_failure:
-          training_data["failure_bypassed_by_items"] = True
-          info(f"Allowing {training_name.upper()}: fail {failure_rate}% > {config.MAX_FAILURE}% (items expected to clear failure)")
-        else:
+        if not _tb_try_allow_failure_bypass(training_name, training_data, failure_rate, config.MAX_FAILURE):
           debug(f"Skipping {training_name.upper()}: {failure_rate}% > {config.MAX_FAILURE}% (no risk tolerance)")
           continue
 

@@ -33,7 +33,10 @@ from core.runtime_flow import (
 )
 from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items, get_priority_preview, policy_context
 from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
-from core.trackblazer_race_logic import evaluate_trackblazer_race
+from core.trackblazer_race_logic import (
+  evaluate_trackblazer_race,
+  get_race_lookahead_energy_advice,
+)
 
 pyautogui.useImageNotFoundException(False)
 
@@ -3227,6 +3230,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "pre_action_item_use": action.get("trackblazer_pre_action_items") if hasattr(action, "get") else None,
     "reassess_after_item_use": action.get("trackblazer_reassess_after_item_use") if hasattr(action, "get") else None,
     "trackblazer_race_decision": action.get("trackblazer_race_decision") if hasattr(action, "get") else None,
+    "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead") if hasattr(action, "get") else None,
   }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
@@ -4583,6 +4587,11 @@ def career_lobby(dry_run_turn=False):
           action["race_name"] = "any"
           action["trackblazer_lobby_scheduled_race"] = True
           action["hammer_spendable"] = total_spendable
+          action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
+            state_obj,
+            getattr(config, "OPERATOR_RACE_SELECTOR", None),
+          )
+          action["trackblazer_race_lookahead_energy_item_key"] = None
           action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
           update_pre_action_phase(
             state_obj,
