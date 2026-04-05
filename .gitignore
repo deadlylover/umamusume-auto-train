@@ -28,7 +28,10 @@ dist_ssr
 *.sln
 *.sw?
 config.json
-debug_captures/*
+debug_captures/
+debug_output/
+debug_output_energy_check/
+debug_output_energy_live/
 data/region_overrides.json
 
 # Reference copies and agent docs
@@ -36,4 +39,9 @@ ref/
 ref_upstream_emulator_last/
 AGENTS.md
 CLAUDE.md
+docs/
 docs/MANT_TRACKBLAZER_BRIEF_REFERENCE.md
+.claude/
+.cursor/
+.codex/
+.agents/
