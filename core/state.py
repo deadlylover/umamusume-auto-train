@@ -810,6 +810,64 @@ def _correct_failure_outliers(training_results):
   return training_results
 
 
+def _correct_stat_gain_outliers(training_results):
+  """Catch physically impossible single-stat OCR reads.
+
+  A single non-sp stat gain has an upper bound determined by the number of
+  supports and rainbow supports visible on that training. When OCR reports
+  a value far above that bound it is almost always a phantom extra digit
+  (e.g. the trainee's hair bleeding into the leftmost stat column adds a
+  trailing digit). Strip the trailing digit and, if that still fails the
+  cap, try stripping the leading digit; otherwise drop the stat entirely.
+  """
+  for name, data in training_results.items():
+    stat_gains = data.get("stat_gains")
+    if not isinstance(stat_gains, dict) or not stat_gains:
+      continue
+
+    total_supports = data.get("total_supports", 0) or 0
+    friendship = data.get("friendship_levels") or {}
+    rainbows = (friendship.get("yellow", 0) or 0) + (friendship.get("max", 0) or 0)
+    participants = total_supports + 1
+    per_stat_cap = 20 * participants + 15 * rainbows + 10
+
+    for stat, gain in list(stat_gains.items()):
+      if stat == "sp":
+        continue
+      if not isinstance(gain, (int, float)) or gain <= per_stat_cap:
+        continue
+
+      # Hair phantom is observed as a trailing digit, so strip tail first.
+      stripped = int(gain) // 10
+      if 0 < stripped <= per_stat_cap:
+        warning(
+          f"[STATE] Stat gain OCR outlier corrected: {name}/{stat} "
+          f"{int(gain)} -> {stripped} (strip_trailing, cap {per_stat_cap}, "
+          f"supports={total_supports}, rainbows={rainbows})"
+        )
+        stat_gains[stat] = stripped
+        continue
+
+      leading_stripped = int(gain) % 10
+      if 0 < leading_stripped <= per_stat_cap:
+        warning(
+          f"[STATE] Stat gain OCR outlier corrected: {name}/{stat} "
+          f"{int(gain)} -> {leading_stripped} (strip_leading, cap {per_stat_cap}, "
+          f"supports={total_supports}, rainbows={rainbows})"
+        )
+        stat_gains[stat] = leading_stripped
+        continue
+
+      warning(
+        f"[STATE] Stat gain OCR outlier dropped: {name}/{stat} "
+        f"{int(gain)} (cap {per_stat_cap}, supports={total_supports}, "
+        f"rainbows={rainbows})"
+      )
+      del stat_gains[stat]
+
+  return training_results
+
+
 def collect_training_state(state_object, training_function_name):
   check_stat_gains = False
   if (
@@ -895,6 +953,7 @@ def collect_training_state(state_object, training_function_name):
     debug(f"Training results: {training_results}")
 
     training_results = _correct_failure_outliers(training_results)
+    training_results = _correct_stat_gain_outliers(training_results)
     training_results = filter_training_lock(training_results)
     if config.VERBOSE_ACTIONS:
       info(f"[STATE] Training scan complete. Options: {list(training_results.keys())}")
