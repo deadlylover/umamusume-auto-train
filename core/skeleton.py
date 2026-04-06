@@ -1457,7 +1457,9 @@ def _build_skill_purchase_planned_clicks(context, scan_result=None, budget_plan=
       is_actionable = bool(budget_entry.get("selected"))
       if is_actionable:
         actionable_count += 1
-      label = f"Queue skill: {match_name}" if is_actionable else f"Skip skill: {target_skill}"
+      if not is_actionable:
+        continue
+      label = f"Queue skill: {match_name}"
       note_parts = [f"target={target_skill}"]
       if match_name != target_skill:
         note_parts.append(f"matched={match_name}")
@@ -1475,10 +1477,7 @@ def _build_skill_purchase_planned_clicks(context, scan_result=None, budget_plan=
         note_parts.append(f"sp_after={remaining_after}")
       covered_by = budget_entry.get("covered_by")
       if covered_by:
-        note_parts.append(f"covers={covered_by}" if is_actionable else f"covered_by={covered_by}")
-      paired_gold = budget_entry.get("paired_gold")
-      if paired_gold and not is_actionable:
-        note_parts.append(f"paired_gold={paired_gold}")
+        note_parts.append(f"covers={covered_by}")
       reason = budget_entry.get("reason") or entry.get("reason")
       if reason and reason not in {"dry_run_confirm_detected", "dry_run_complete", "selected"}:
         note_parts.append(f"status={reason}")

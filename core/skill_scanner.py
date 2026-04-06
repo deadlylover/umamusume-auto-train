@@ -79,6 +79,7 @@ _CLOSE_TEMPLATE = "assets/buttons/close_btn.png"
 _CLOSE_THRESHOLD = 0.8
 _TRACKBLAZER_SKILLS_LEARNED_THRESHOLD = 0.8
 _TRACKBLAZER_SKILLS_LEARNED_CLOSE_THRESHOLD = 0.8
+_TRACKBLAZER_SKILLS_LEARNED_CLOSE_DELAY_SECONDS = 0.5
 _LEARN_SETTLE_SECONDS = 0.5
 _CLOSE_SETTLE_SECONDS_POST_LEARN = 0.5
 
@@ -618,6 +619,18 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
                 "match_type": "exact" if best_score >= _EXACT_MATCH_THRESHOLD else "fuzzy",
             })
         elif best_match and best_score >= _FUZZY_MATCH_THRESHOLD and len(normalized) >= _FUZZY_MATCH_MIN_LENGTH:
+            # Guard: fuzzy-range matches based only on Levenshtein distance
+            # require at least 2 shared tokens. A single shared word (e.g.
+            # "corner" in description fragment "corner late" vs skill name
+            # "corner adept") is not reliable enough — descriptions contain
+            # skill-adjacent vocabulary that creates false positives.
+            best_entry = next(
+                (e for e in normalized_shortlist if e["skill_name"] == best_match), None
+            )
+            if best_entry and best_entry["skill_tokens"] and len(best_entry["skill_tokens"]) >= 2:
+                shared = _shared_skill_tokens(row_tokens, best_entry["skill_tokens"])
+                if shared < 2:
+                    continue
             matched.append({
                 **row,
                 "match_name": best_match,
@@ -1207,9 +1220,11 @@ def _click_learn_and_close():
         deadline = _time() + get_secs(2)
         learned_detected = False
         close_clicked = False
+        popup_visible_since = None
         t_popup = _time()
         while _time() < deadline:
             screenshot = _capture_live_skill_screenshot()
+            popup_visible = False
             if learned_template:
                 learned_matches = device_action.match_template(
                     learned_template,
@@ -1219,6 +1234,7 @@ def _click_learn_and_close():
                 )
                 if learned_matches:
                     learned_detected = True
+                    popup_visible = True
             if close_template:
                 close_matches = device_action.match_template(
                     close_template,
@@ -1227,14 +1243,27 @@ def _click_learn_and_close():
                     template_scaling=_INVERSE_GLOBAL_SCALE,
                 )
                 if close_matches:
-                    ui_left, ui_top, _, _ = [int(v) for v in _skill_ui_region()]
-                    match = close_matches[0]
-                    click_x = ui_left + match[0] + match[2] // 2
-                    click_y = ui_top + match[1] + match[3] // 2
-                    info(f"[SKILL] Trackblazer learned popup close at ({click_x}, {click_y})...")
-                    device_action.click(target=(click_x, click_y), duration=0.15)
-                    close_clicked = True
-                    break
+                    popup_visible = True
+            else:
+                close_matches = []
+            if popup_visible:
+                if popup_visible_since is None:
+                    popup_visible_since = _time()
+            else:
+                popup_visible_since = None
+            popup_ready = (
+                popup_visible_since is not None
+                and (_time() - popup_visible_since) >= _TRACKBLAZER_SKILLS_LEARNED_CLOSE_DELAY_SECONDS
+            )
+            if popup_ready and close_matches:
+                ui_left, ui_top, _, _ = [int(v) for v in _skill_ui_region()]
+                match = close_matches[0]
+                click_x = ui_left + match[0] + match[2] // 2
+                click_y = ui_top + match[1] + match[3] // 2
+                info(f"[SKILL] Trackblazer learned popup close at ({click_x}, {click_y})...")
+                device_action.click(target=(click_x, click_y), duration=0.15)
+                close_clicked = True
+                break
             sleep(0.15)
         result["learn_clicked"] = bool(learned_detected or close_clicked)
         result["close_clicked"] = bool(close_clicked)
