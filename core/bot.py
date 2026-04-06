@@ -73,6 +73,7 @@ trackblazer_bond_boost_enabled = True  # +10 score per blue/green friend on trai
 trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive after this turn
 trackblazer_allow_buff_override = False  # allow 60% megaphone to override active 40% buff
 skill_dry_run_enabled = False
+skill_auto_buy_skill_enabled = None
 post_action_resolution = default_post_action_resolution_state()
 turn_trace_lock = threading.Lock()
 turn_trace_path = ""
@@ -449,7 +450,8 @@ def get_runtime_state():
       "pending_trackblazer_shop_check_reason": pending_trackblazer_shop_check_reason,
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
       "trackblazer_scoring_mode": trackblazer_scoring_mode,
-      "skill_dry_run_enabled": skill_dry_run_enabled,
+      "skill_dry_run_enabled": not get_skill_auto_buy_enabled(),
+      "skill_auto_buy_skill_enabled": get_skill_auto_buy_enabled(),
       "is_bot_running": is_bot_running,
       "post_action_resolution": dict(post_action_resolution or {}),
       "backend_state": get_backend_state(),
@@ -710,16 +712,32 @@ def get_trackblazer_bond_boost_cutoff():
     return trackblazer_bond_boost_cutoff
 
 
-def set_skill_dry_run_enabled(enabled):
-  global skill_dry_run_enabled, runtime_updated_at
+def set_skill_auto_buy_enabled(enabled):
+  global skill_auto_buy_skill_enabled, skill_dry_run_enabled, runtime_updated_at
   with runtime_lock:
-    skill_dry_run_enabled = bool(enabled)
+    skill_auto_buy_skill_enabled = bool(enabled)
+    skill_dry_run_enabled = not bool(enabled)
     runtime_updated_at = time.time()
 
 
-def get_skill_dry_run_enabled():
+def get_skill_auto_buy_enabled():
+  global skill_auto_buy_skill_enabled
   with runtime_lock:
-    return skill_dry_run_enabled
+    if skill_auto_buy_skill_enabled is not None:
+      return bool(skill_auto_buy_skill_enabled)
+  try:
+    import core.config as config
+    return bool(getattr(config, "IS_AUTO_BUY_SKILL", False))
+  except Exception:
+    return False
+
+
+def set_skill_dry_run_enabled(enabled):
+  set_skill_auto_buy_enabled(enabled)
+
+
+def get_skill_dry_run_enabled():
+  return get_skill_auto_buy_enabled()
 
 
 def begin_post_action_resolution(source_action="", reason="", sub_phase=SUB_PHASE_IDLE):

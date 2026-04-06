@@ -2,13 +2,41 @@ import easyocr
 from PIL import Image
 import numpy as np
 import re
-from utils.log import debug, info
+from utils.log import debug, info, warning
 import core.config as config
 
-# Keep OCR on CPU while profiling and optimizing the scan pipeline itself.
-# EasyOCR can use Apple Silicon MPS when gpu=True, but that should stay as a
-# later opt-in once the CPU path is tuned well enough to measure cleanly.
-reader = easyocr.Reader(["en"], gpu=False)
+
+def _easyocr_gpu_supported():
+  try:
+    import torch
+  except Exception:
+    return False, "torch_unavailable"
+
+  if torch.cuda.is_available():
+    return True, "cuda"
+
+  mps_backend = getattr(torch.backends, "mps", None)
+  if mps_backend is not None and mps_backend.is_available():
+    return True, "mps"
+
+  return False, "cpu"
+
+
+def _build_easyocr_reader():
+  gpu_supported, backend = _easyocr_gpu_supported()
+  try:
+    reader_obj = easyocr.Reader(["en"], gpu=bool(gpu_supported), verbose=False)
+    info(f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} (backend={backend}).")
+    return reader_obj
+  except Exception as exc:
+    if gpu_supported:
+      warning(f"[OCR] EasyOCR GPU init failed on {backend} ({exc}); falling back to CPU.")
+    reader_obj = easyocr.Reader(["en"], gpu=False, verbose=False)
+    info(f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} (fallback=cpu).")
+    return reader_obj
+
+
+reader = _build_easyocr_reader()
 
 def _log_ocr(tag, text, allowlist, threshold):
   if getattr(config, "VERBOSE_OCR", False):

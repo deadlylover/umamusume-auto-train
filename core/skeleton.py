@@ -15,7 +15,13 @@ import utils.constants as constants
 from scenarios.unity import unity_cup_function
 from core.events import select_event
 from core.claw_machine import play_claw_machine
-from core.skill import init_skill_py, get_skill_purchase_context, update_skill_action_count
+from core.skill import (
+  get_skill_purchase_check_state,
+  get_skill_purchase_context,
+  init_skill_py,
+  mark_skill_purchase_checked,
+  update_skill_action_count,
+)
 from core.skill_scanner import collect_skill_purchase
 from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
@@ -1239,6 +1245,14 @@ def _trackblazer_pre_action_items(action):
   return []
 
 
+def _skill_purchase_plan(action):
+  if hasattr(action, "get"):
+    return dict(action.get("skill_purchase_plan") or {})
+  if isinstance(action, dict):
+    return dict(action.get("skill_purchase_plan") or {})
+  return {}
+
+
 def _trackblazer_items_require_reassess(items):
   for entry in (items or []):
     if not isinstance(entry, dict):
@@ -1291,6 +1305,8 @@ def _planned_clicks_for_action(action):
   action_func = _action_func(action)
   pre_action_items = _trackblazer_pre_action_items(action)
   shop_buy_plan = list(action.get("trackblazer_shop_buy_plan") or []) if hasattr(action, "get") else []
+  skill_purchase_plan = _skill_purchase_plan(action)
+  skill_clicks = list(skill_purchase_plan.get("planned_clicks") or [])
 
   # Shop purchase clicks (run before main action).
   shop_clicks = []
@@ -1365,10 +1381,10 @@ def _planned_clicks_for_action(action):
         )
       )
   if not action_func:
-    return shop_clicks + pre_action_clicks
+    return skill_clicks + shop_clicks + pre_action_clicks
   if action_func == "do_training":
     training_name = _action_value(action, "training_name")
-    return shop_clicks + pre_action_clicks + [
+    return skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Open training menu", "assets/buttons/training_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         f"Select training: {training_name or 'unknown'}",
@@ -1377,27 +1393,28 @@ def _planned_clicks_for_action(action):
       ),
     ]
   if action_func == "do_rest":
-    return shop_clicks + pre_action_clicks + [
+    return skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Click rest button", "assets/buttons/rest_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer rest button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_recreation":
-    return shop_clicks + pre_action_clicks + [
+    return skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Open recreation menu", "assets/buttons/recreation_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Fallback summer recreation button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
     ]
   if action_func == "do_infirmary":
-    return shop_clicks + pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
+    return skill_clicks + shop_clicks + pre_action_clicks + [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
   if action_func == "do_race":
     race_name = _action_value(action, "race_name")
     race_grade_target = _action_value(action, "race_grade_target")
     prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
+    fallback_non_rival_race = bool(_action_value(action, "fallback_non_rival_race"))
     is_race_day = bool(_action_value(action, "is_race_day"))
     is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
     scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
     if is_race_day and is_trackblazer_climax_race_day:
-      clicks = shop_clicks + pre_action_clicks + [
+      clicks = skill_clicks + shop_clicks + pre_action_clicks + [
         _planned_click(
           "Click forced Climax race button",
           constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button"),
@@ -1423,6 +1440,8 @@ def _planned_clicks_for_action(action):
           "If this warning appears after clicking Races, continue with OK for scheduled races; "
           "otherwise follow the race gate before opening the race list."
           if scheduled_race else
+          "Fallback non-rival race: cancel and revert to training if consecutive-race warning appears."
+          if fallback_non_rival_race else
           "If this warning appears after clicking Races, decide whether to continue with OK "
           "or back out with Cancel before opening the race list."
         ),
@@ -1467,7 +1486,7 @@ def _planned_clicks_for_action(action):
     ]
     return clicks
   if action_func == "buy_skill":
-    return shop_clicks + pre_action_clicks + [
+    return skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR and template scan only"),
       _planned_click("Confirm selected skills", "assets/buttons/confirm_btn.png"),
@@ -1503,7 +1522,7 @@ def _planned_clicks_for_action(action):
       _planned_click("Scan shop item rows", region_key="GAME_WINDOW_BBOX", note="Template scan for visible shop stock"),
       _planned_click("Close shop", note="Dismiss the shop overlay after scan"),
     ]
-  return pre_action_clicks
+  return skill_clicks + pre_action_clicks
 
 
 def _build_trackblazer_planned_actions(state_obj, action):
@@ -1651,6 +1670,8 @@ def _build_trackblazer_planned_actions(state_obj, action):
       "is_summer": race_decision.get("is_summer"),
       "g1_forced": race_decision.get("g1_forced"),
       "prefer_rival_race": race_decision.get("prefer_rival_race"),
+      "fallback_non_rival_race": race_decision.get("fallback_non_rival_race"),
+      "prefer_rest_over_weak_training": race_decision.get("prefer_rest_over_weak_training"),
       "forced_race_day": race_decision.get("forced_race_day"),
       "race_tier_target": race_decision.get("race_tier_target"),
       "race_name": race_decision.get("race_name"),
@@ -1680,7 +1701,9 @@ def _build_trackblazer_planned_actions(state_obj, action):
     # The race gate already filters weak signals, so should_race=True means
     # the signal was strong enough to justify racing. G1 or should_race both
     # continue; otherwise back out to the lobby.
-    if race_decision.get("g1_forced") or race_decision.get("should_race"):
+    if race_decision.get("fallback_non_rival_race"):
+      expected_branch = "return_to_lobby"
+    elif race_decision.get("g1_forced") or race_decision.get("should_race"):
       expected_branch = "continue_to_race_list"
     else:
       expected_branch = "return_to_lobby"
@@ -1877,6 +1900,135 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   # action-local and should proceed directly into the selected training.
   action["trackblazer_reassess_after_item_use"] = _trackblazer_items_require_reassess(candidates)
   return action
+
+
+def _skill_purchase_preview_key(current_action_count, context):
+  return (
+    int(current_action_count),
+    bool((context or {}).get("scheduled_g1_race")),
+    tuple((context or {}).get("shopping_list") or []),
+  )
+
+
+def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_check=False):
+  if not isinstance(state_obj, dict):
+    return "skipped"
+  if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
+    return "skipped"
+
+  existing_key = state_obj.get("skill_purchase_preview_key")
+  existing_plan = state_obj.get("skill_purchase_plan") or {}
+  if existing_key and existing_key[0] == int(current_action_count) and existing_plan:
+    action["skill_purchase_plan"] = existing_plan
+    action["skill_purchase_context"] = existing_plan.get("context") or {}
+    return "attached"
+
+  context = get_skill_purchase_context(state_obj, current_action_count, race_check=race_check, action=action)
+  state_obj["skill_purchase_check"] = {
+    **get_skill_purchase_check_state(),
+    **context,
+  }
+
+  _action_option_pop(action, "skill_purchase_plan")
+  _action_option_pop(action, "skill_purchase_context")
+
+  if not context.get("should_check"):
+    state_obj.pop("skill_purchase_plan", None)
+    state_obj.pop("skill_purchase_preview_key", None)
+    return "skipped"
+
+  preview_result = collect_skill_purchase(
+    skill_shortlist=context.get("shopping_list"),
+    trigger="automatic_preview",
+    dry_run=True,
+  )
+  preview_flow = preview_result.get("skill_purchase_flow") or {}
+  preview_scan = preview_result.get("skill_purchase_scan") or {}
+  state_obj["skill_purchase_flow"] = preview_flow
+  state_obj["skill_purchase_scan"] = preview_scan
+
+  if preview_flow.get("scanned"):
+    mark_skill_purchase_checked(
+      current_action_count,
+      selected_race=bool(context.get("scheduled_g1_race")),
+    )
+    state_obj["skill_purchase_check"] = {
+      **get_skill_purchase_check_state(),
+      **context,
+      "reason": "Skill scan complete. Purchase is queued before the main action.",
+    }
+  else:
+    state_obj["skill_purchase_check"] = {
+      **get_skill_purchase_check_state(),
+      **context,
+      "reason": preview_flow.get("reason") or context.get("reason"),
+    }
+
+  preview_key = _skill_purchase_preview_key(current_action_count, context)
+  if preview_flow.get("opened") and not preview_flow.get("closed") and not (preview_flow.get("open_result") or {}).get("already_open"):
+    state_obj.pop("skill_purchase_plan", None)
+    state_obj.pop("skill_purchase_preview_key", None)
+    return "failed"
+  if not preview_flow.get("scanned"):
+    state_obj.pop("skill_purchase_plan", None)
+    state_obj.pop("skill_purchase_preview_key", None)
+    return "skipped"
+
+  plan = {
+    "context": context,
+    "planned_clicks": list(context.get("planned_clicks") or []),
+    "preview_key": preview_key,
+  }
+  state_obj["skill_purchase_plan"] = plan
+  state_obj["skill_purchase_preview_key"] = preview_key
+  action["skill_purchase_plan"] = plan
+  action["skill_purchase_context"] = context
+  return "attached"
+
+
+def _run_skill_purchase_plan(state_obj, action, current_action_count):
+  plan = _skill_purchase_plan(action)
+  context = plan.get("context") or {}
+  if not plan or not context.get("should_check"):
+    return {"status": "skipped"}
+
+  purchase_result = collect_skill_purchase(
+    skill_shortlist=context.get("shopping_list"),
+    trigger="automatic_execute",
+    dry_run=False,
+  )
+  purchase_flow = purchase_result.get("skill_purchase_flow") or {}
+  purchase_scan = purchase_result.get("skill_purchase_scan") or {}
+  state_obj["skill_purchase_flow"] = purchase_flow
+  state_obj["skill_purchase_scan"] = purchase_scan
+  state_obj["skill_purchase_check"] = {
+    **get_skill_purchase_check_state(),
+    **context,
+    "reason": purchase_flow.get("reason") or context.get("reason"),
+  }
+
+  target_results = list(purchase_scan.get("target_results") or [])
+  purchased_any = any(entry.get("increment_click_result") for entry in target_results)
+  if purchased_any:
+    update_skill_action_count(current_action_count)
+    state_obj["skill_purchase_check"] = {
+      **get_skill_purchase_check_state(),
+      **context,
+      "reason": purchase_flow.get("reason") or "Skill purchase finalized.",
+    }
+
+  if purchase_flow.get("opened") and not purchase_flow.get("closed") and not (purchase_flow.get("open_result") or {}).get("already_open"):
+    return {
+      "status": "failed",
+      "result": purchase_result,
+      "reason": purchase_flow.get("reason") or "skill_purchase_left_page_open",
+    }
+
+  return {
+    "status": "executed",
+    "result": purchase_result,
+    "reason": purchase_flow.get("reason") or purchase_scan.get("reason") or "skill_purchase_complete",
+  }
 
 
 def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
@@ -3194,6 +3346,9 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "pending_trackblazer_shop_check_reason": bot.get_pending_trackblazer_shop_check_reason(),
     "state_validation": state_obj.get("state_validation"),
     "operator_race_gate": operator_race_gate,
+    "skill_auto_buy_skill_enabled": bot.get_skill_auto_buy_enabled(),
+    "skill_purchase_flow": state_obj.get("skill_purchase_flow"),
+    "skill_purchase_scan": state_obj.get("skill_purchase_scan"),
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
@@ -3215,6 +3370,10 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       limit=10,
     )
     state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
+  state_summary["skill_purchase_check"] = {
+    **get_skill_purchase_check_state(),
+    **(state_obj.get("skill_purchase_check") or {}),
+  }
   selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,
@@ -3523,13 +3682,14 @@ def update_operator_snapshot(
   publish_runtime_state()
 
 
-def review_action_before_execution(state_obj, action, message="Review action before execution.", sub_phase=None, ocr_debug=None, planned_clicks=None):
+def review_action_before_execution(state_obj, action, message="Review action before execution.", sub_phase=None, ocr_debug=None, planned_clicks=None, reasoning_notes=None):
   should_wait = config.EXECUTION_MODE == "semi_auto" or bot.is_pause_requested()
   update_operator_snapshot(
     state_obj,
     action,
     phase="waiting_for_confirmation",
     message=message,
+    reasoning_notes=reasoning_notes,
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
@@ -3540,6 +3700,7 @@ def review_action_before_execution(state_obj, action, message="Review action bef
       action,
       phase="executing_action",
       message="Executing approved action.",
+      reasoning_notes=reasoning_notes,
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
@@ -3568,6 +3729,7 @@ def review_action_before_execution(state_obj, action, message="Review action bef
     action,
     phase="executing_action",
     message="Executing approved action.",
+    reasoning_notes=reasoning_notes,
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
@@ -3576,13 +3738,29 @@ def review_action_before_execution(state_obj, action, message="Review action bef
 
 
 def run_action_with_review(state_obj, action, review_message, pre_run_hook=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
-  if not review_action_before_execution(state_obj, action, review_message, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks):
+  skill_plan = _skill_purchase_plan(action)
+  reasoning_notes = "Use execute mode to commit clicks. Current view shows OCR/debug and planned click targets only."
+  if skill_plan:
+    reasoning_notes = (
+      "Skill scan is complete. Continue will execute the skill purchase sub-routine first, "
+      "then continue with the rest of the turn. "
+      + reasoning_notes
+    )
+  if not review_action_before_execution(
+    state_obj,
+    action,
+    review_message,
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+    reasoning_notes=reasoning_notes,
+  ):
     return "failed"
   execution_intent = _wait_for_execute_intent(
     state_obj,
     action,
     message_prefix="Action review ready",
-    reasoning_notes="Use execute mode to commit clicks. Current view shows OCR/debug and planned click targets only.",
+    reasoning_notes=reasoning_notes,
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
@@ -3594,6 +3772,35 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     # the same open→scan→control-detect→close flow as execute mode.
     _run_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
     return "previewed"
+  skill_purchase_result = _run_skill_purchase_plan(state_obj, action, action_count)
+  if skill_purchase_result.get("status") == "failed":
+    skill_result = skill_purchase_result.get("result") or {}
+    skill_flow = (skill_result.get("skill_purchase_flow") or {})
+    if skill_flow.get("opened") and not skill_flow.get("closed"):
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text=f"Skill purchase left skills page open: {skill_purchase_result.get('reason')}",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return "blocked"
+    warning(
+      f"[SKILL] Skill purchase failed: {skill_purchase_result.get('reason')}. "
+      "Continuing with the rest of the turn."
+    )
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message=f"Skill purchase failed ({skill_purchase_result.get('reason')}); proceeding with {action.func}.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
   # Pre-action items (energy rescue, whistle, etc.) must run before the
   # pre_run_hook (rival scout) because they may trigger a reassess that
   # re-evaluates the action entirely.  Defer the hook until after items.
@@ -3791,69 +3998,15 @@ def update_pre_action_phase(state_obj, action, message=None, reasoning_notes=Non
   )
 
 
-def maybe_review_skill_purchase(state_obj, current_action_count, race_check=False):
-  context = get_skill_purchase_context(state_obj, current_action_count, race_check=race_check)
-  if not context.get("should_check"):
+def maybe_review_skill_purchase(state_obj, current_action_count, race_check=False, action=None):
+  if action is None:
     return "skipped"
-  skill_action = Action()
-  skill_action.func = "buy_skill"
-  skill_action["race_check"] = race_check
-  skill_action["shopping_list"] = context.get("shopping_list", [])
-  reasoning_notes = context.get("reason", "")
-  update_operator_snapshot(
+  return _attach_skill_purchase_plan(
     state_obj,
-    skill_action,
-    phase="pre_race" if race_check else "pre_training",
-    message="Skill purchase review ready.",
-    reasoning_notes=reasoning_notes,
-    sub_phase="evaluate_skill_purchase",
-    ocr_debug=context.get("ocr_debug"),
-    planned_clicks=context.get("planned_clicks"),
+    action,
+    current_action_count,
+    race_check=race_check,
   )
-  if not review_action_before_execution(
-    state_obj,
-    skill_action,
-    "Review skill purchase flow before execution.",
-    sub_phase="scan_skill_list",
-    ocr_debug=context.get("ocr_debug"),
-    planned_clicks=context.get("planned_clicks"),
-  ):
-    return "failed"
-  execution_intent = _wait_for_execute_intent(
-    state_obj,
-    skill_action,
-    message_prefix="Skill purchase review ready",
-    reasoning_notes=reasoning_notes,
-    sub_phase="preview_skill_purchase",
-    ocr_debug=context.get("ocr_debug"),
-    planned_clicks=context.get("planned_clicks"),
-  )
-  if execution_intent == "failed":
-    return "failed"
-  if execution_intent != "execute":
-    return "previewed"
-  update_skill_action_count(current_action_count)
-  dry_run = bot.get_skill_dry_run_enabled()
-  purchase_result = collect_skill_purchase(
-    skill_shortlist=context.get("shopping_list"),
-    trigger="automatic",
-    dry_run=dry_run,
-  )
-  purchase_flow = purchase_result.get("skill_purchase_flow", {})
-  result_message = (
-    f"Skill purchase {'dry-run' if dry_run else 'flow'} complete: {purchase_flow.get('reason', '?')}"
-  )
-  update_operator_snapshot(
-    state_obj,
-    skill_action,
-    phase="executing_action",
-    message=result_message,
-    reasoning_notes=reasoning_notes,
-    sub_phase="confirm_skill_purchase",
-    ocr_debug=context.get("ocr_debug"),
-    planned_clicks=context.get("planned_clicks"),
-  )
-  return "executed"
 
 
 def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
@@ -4478,7 +4631,7 @@ def career_lobby(dry_run_turn=False):
           action,
           message="Forced Climax race day detected. Skipping training scan and preparing race entry.",
         )
-        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
         if skill_result in ("failed", "previewed"):
           continue
         forced_race_result = run_action_with_review(
@@ -4514,7 +4667,7 @@ def career_lobby(dry_run_turn=False):
             action,
             message="Mission race candidate detected. Preparing pre-race decision.",
           )
-          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
           if skill_result in ("failed", "previewed"):
             continue
           mission_race_result = run_action_with_review(
@@ -4543,7 +4696,7 @@ def career_lobby(dry_run_turn=False):
           action,
           message="Scheduled race candidate detected. Preparing pre-race decision.",
         )
-        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
         if skill_result in ("failed", "previewed"):
           continue
         scheduled_race_result = run_action_with_review(
@@ -4598,7 +4751,7 @@ def career_lobby(dry_run_turn=False):
             action,
             message=f"Trackblazer scheduled race button detected on lobby. Surplus hammers: {total_spendable}.",
           )
-          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
           if skill_result in ("failed", "previewed"):
             continue
           tb_sched_result = run_action_with_review(
@@ -4631,7 +4784,7 @@ def career_lobby(dry_run_turn=False):
             action,
             message="Mission race candidate detected. Preparing pre-race decision.",
           )
-          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
           if skill_result in ("failed", "previewed"):
             continue
           mission_race_result = run_action_with_review(
@@ -4659,7 +4812,7 @@ def career_lobby(dry_run_turn=False):
             action,
             message="Goal race candidate detected. Preparing pre-race decision.",
           )
-          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True)
+          skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
           if skill_result in ("failed", "previewed"):
             continue
           goal_race_result = run_action_with_review(
@@ -4723,11 +4876,6 @@ def career_lobby(dry_run_turn=False):
           sub_phase="check_rival_indicator",
         )
 
-      # Review skill buying separately so OCR and planned clicks can be inspected.
-      skill_result = maybe_review_skill_purchase(state_obj, action_count)
-      if skill_result in ("failed", "previewed"):
-        continue
-
       log_encoded(f"{state_obj}", "Encoded state: ")
       info(f"State: {state_obj}")
 
@@ -4780,7 +4928,27 @@ def career_lobby(dry_run_turn=False):
         race_decision = evaluate_trackblazer_race(state_obj, action)
         action["trackblazer_race_decision"] = race_decision
 
-        if race_decision.get("should_race") and action.func != "do_race":
+        if race_decision.get("prefer_rest_over_weak_training") and action.func != "do_rest":
+          action["_rival_fallback_func"] = action.func
+          action["_rival_fallback_training_name"] = action.get("training_name")
+          action["_rival_fallback_training_data"] = action.get("training_data")
+          action.func = "do_rest"
+          action["energy_level"] = state_obj.get("energy_level", 0)
+          action["disable_skip_turn_fallback"] = True
+          info(f"[TB_RACE] Overriding to rest: {race_decision['reason']}")
+          update_operator_snapshot(
+            state_obj, action,
+            phase="evaluating_strategy",
+            message=f"Trackblazer weak-training rest: {race_decision['reason']}",
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes=(
+              f"prefer_rest=True | "
+              f"training_score={race_decision.get('training_score')} | "
+              f"training_total={race_decision.get('training_total_stats')}"
+            ),
+          )
+
+        elif race_decision.get("should_race") and action.func != "do_race":
           # Save fallback in case rival scout fails and we need to revert.
           action["_rival_fallback_func"] = action.func
           action["_rival_fallback_training_name"] = action.get("training_name")
@@ -4790,6 +4958,8 @@ def career_lobby(dry_run_turn=False):
           action["race_grade_target"] = race_decision.get("race_tier_target")
           if race_decision.get("prefer_rival_race"):
             action["prefer_rival_race"] = True
+          if race_decision.get("fallback_non_rival_race"):
+            action["fallback_non_rival_race"] = True
           info(f"[TB_RACE] Overriding to race: {race_decision['reason']}")
           update_operator_snapshot(
             state_obj, action,
@@ -4935,6 +5105,14 @@ def career_lobby(dry_run_turn=False):
         update_operator_snapshot(state_obj, action, phase="recovering", message="Skipping turn, retrying.")
         info("Skipping turn, retrying...")
       else:
+        skill_result = maybe_review_skill_purchase(
+          state_obj,
+          action_count,
+          race_check=bool(action.func == "do_race"),
+          action=action,
+        )
+        if skill_result == "failed":
+          continue
         info(f"Taking action: {action.func}")
         update_pre_action_phase(
           state_obj,
@@ -5020,6 +5198,15 @@ def career_lobby(dry_run_turn=False):
               action.options.pop("disable_skip_turn_fallback", None)
             if constants.SCENARIO_NAME in ("mant", "trackblazer"):
               action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+            skill_result = maybe_review_skill_purchase(
+              state_obj,
+              action_count,
+              race_check=bool(action.func == "do_race"),
+              action=action,
+            )
+            if skill_result == "failed":
+              executed_action = False
+              break
             update_pre_action_phase(
               state_obj,
               action,

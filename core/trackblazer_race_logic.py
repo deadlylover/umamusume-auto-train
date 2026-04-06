@@ -284,6 +284,8 @@ def _decision(**kwargs):
     "is_summer": bool(kwargs.get("is_summer", False)),
     "g1_forced": bool(kwargs.get("g1_forced", False)),
     "prefer_rival_race": bool(kwargs.get("prefer_rival_race", False)),
+    "fallback_non_rival_race": bool(kwargs.get("fallback_non_rival_race", False)),
+    "prefer_rest_over_weak_training": bool(kwargs.get("prefer_rest_over_weak_training", False)),
     "race_tier_target": kwargs.get("race_tier_target"),
     "race_name": kwargs.get("race_name"),
     "race_available": bool(kwargs.get("race_available", False)),
@@ -459,6 +461,99 @@ def get_race_lookahead_energy_advice(state_obj, selector=None):
   return base_advice
 
 
+def _weak_training_fallback_race(
+  state_obj, training_score, training_stats, training_supports, summer, race_info,
+):
+  """When training is weak and no rival indicator, prefer a schedule race or rest.
+
+  Returns a decision dict if the fallback applies, or None to fall through to
+  the default "no rival indicator" path.
+  """
+  training_behavior = get_training_behavior_settings(
+    getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None)
+  )
+  if not training_behavior.get("weak_training_fallback_race_enabled"):
+    return None
+
+  score_threshold = training_behavior.get("weak_training_fallback_race_score_threshold", 30)
+  if training_score is not None and training_score >= score_threshold:
+    return None
+
+  # Earliest turn gate: don't fallback race before this turn in the timeline.
+  earliest_turn = str(training_behavior.get("weak_training_fallback_race_earliest_turn", "Classic Year Early Sep") or "").strip()
+  if earliest_turn:
+    current_turn = str(state_obj.get("year", "") or "").strip()
+    if earliest_turn in constants.TIMELINE and current_turn in constants.TIMELINE:
+      if constants.TIMELINE.index(current_turn) < constants.TIMELINE.index(earliest_turn):
+        return None
+
+  # Summer windows have their own item-use burst logic — don't divert to a
+  # throwaway race during summer.
+  if summer:
+    return None
+
+  # Check energy: at very low energy, prefer rest over both racing and
+  # wasting a Good-Luck Charm on a weak training.
+  low_energy_rest_pct = training_behavior.get("weak_training_fallback_race_low_energy_rest_pct", 2) / 100.0
+  rest_exempt_score = training_behavior.get("weak_training_fallback_race_low_energy_rest_exempt_score", 35)
+  energy_level = _safe_float(state_obj.get("energy_level")) or 0
+  max_energy = _safe_float(state_obj.get("max_energy")) or 1
+  energy_pct = energy_level / max(max_energy, 1.0)
+
+  if energy_pct <= low_energy_rest_pct:
+    if training_score is None or training_score < rest_exempt_score:
+      return _decision(
+        should_race=False,
+        prefer_rest_over_weak_training=True,
+        reason=(
+          f"No rival, weak training (score {training_score} < {score_threshold}), "
+          f"and energy too low ({energy_pct:.0%}) to race or justify charm — prefer rest"
+        ),
+        training_total_stats=training_stats,
+        training_score=training_score,
+        training_supports=training_supports,
+        is_summer=False,
+        g1_forced=False,
+        prefer_rival_race=False,
+        race_tier_target=None,
+        race_name=None,
+        race_available=False,
+        rival_indicator=False,
+        race_tier_info=race_info,
+      )
+
+  # Need at least minimum race energy to do the fallback race.
+  has_energy, _ = _has_race_energy(state_obj)
+  if not has_energy:
+    return None
+
+  # Check if any races exist on this date (unfiltered by aptitude).
+  date_key = state_obj.get("year", "")
+  all_races_on_date = list((constants.ALL_RACES or {}).get(date_key, []) or [])
+  if not all_races_on_date:
+    return None
+
+  return _decision(
+    should_race=True,
+    fallback_non_rival_race=True,
+    reason=(
+      f"No rival, but training is weak (score {training_score} < {score_threshold}) "
+      f"— fallback to a schedule race instead"
+    ),
+    training_total_stats=training_stats,
+    training_score=training_score,
+    training_supports=training_supports,
+    is_summer=False,
+    g1_forced=False,
+    prefer_rival_race=False,
+    race_tier_target="any",
+    race_name=None,
+    race_available=True,
+    rival_indicator=False,
+    race_tier_info=race_info,
+  )
+
+
 def evaluate_trackblazer_race(state_obj, action):
   """Return a structured Trackblazer race-vs-training decision payload.
 
@@ -568,6 +663,14 @@ def evaluate_trackblazer_race(state_obj, action):
     rival_indicator = _detect_rival_available()
 
   if not rival_indicator:
+    # --- Weak-training fallback race: prefer any schedule race over a bad
+    # training turn, even without a rival indicator on screen. -----------
+    fallback_result = _weak_training_fallback_race(
+      state_obj, training_score, training_stats, training_supports, summer, race_info,
+    )
+    if fallback_result is not None:
+      return fallback_result
+
     return _decision(
       should_race=False,
       reason="No rival race indicator on screen",

@@ -112,6 +112,11 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "race_lookahead_exceptional_score": 40,
   "back_to_back_scheduled_race_vita_enabled": True,
   "back_to_back_scheduled_race_vita_threshold_pct": 2,
+  "weak_training_fallback_race_enabled": True,
+  "weak_training_fallback_race_score_threshold": 30,
+  "weak_training_fallback_race_earliest_turn": "Classic Year Early Sep",
+  "weak_training_fallback_race_low_energy_rest_pct": 2,
+  "weak_training_fallback_race_low_energy_rest_exempt_score": 35,
 }
 _ITEM_USE_OVERRIDES = {
   "empowering_megaphone": {
@@ -389,6 +394,29 @@ def _normalize_training_behavior_settings(raw_settings=None):
         raw_settings.get("back_to_back_scheduled_race_vita_threshold_pct"),
         _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["back_to_back_scheduled_race_vita_threshold_pct"],
       ),
+    ),
+    "weak_training_fallback_race_enabled": _safe_bool(
+      raw_settings.get("weak_training_fallback_race_enabled"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["weak_training_fallback_race_enabled"],
+    ),
+    "weak_training_fallback_race_score_threshold": _normalize_quantity(
+      raw_settings.get("weak_training_fallback_race_score_threshold"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["weak_training_fallback_race_score_threshold"],
+    ),
+    "weak_training_fallback_race_earliest_turn": str(
+      raw_settings.get("weak_training_fallback_race_earliest_turn")
+      or _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["weak_training_fallback_race_earliest_turn"]
+    ).strip(),
+    "weak_training_fallback_race_low_energy_rest_pct": min(
+      100,
+      _normalize_quantity(
+        raw_settings.get("weak_training_fallback_race_low_energy_rest_pct"),
+        _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["weak_training_fallback_race_low_energy_rest_pct"],
+      ),
+    ),
+    "weak_training_fallback_race_low_energy_rest_exempt_score": _normalize_quantity(
+      raw_settings.get("weak_training_fallback_race_low_energy_rest_exempt_score"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["weak_training_fallback_race_low_energy_rest_exempt_score"],
     ),
   }
 

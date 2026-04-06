@@ -254,6 +254,14 @@ TRACKBLAZER_ITEM_TEMPLATES = {
   "yumy_cat_food": "assets/trackblazer/items/yumy_cat_food.png",
 }
 
+# Skill increment button templates. The Trackblazer skill screen uses a
+# different button/background treatment, so its increment asset is matched at
+# native scale while the generic asset keeps the default global scale.
+SKILL_INCREMENT_TEMPLATES = {
+  "default": "assets/buttons/skill_increment.png",
+  "trackblazer": "assets/trackblazer/skill_increment_tb.png",
+}
+
 # Trackblazer item categories for decision logic.
 TRACKBLAZER_ITEM_CATEGORIES = {
   "aroma_diffuser": "mood",

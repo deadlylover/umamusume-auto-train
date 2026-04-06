@@ -3,6 +3,7 @@ import pyautogui
 import Levenshtein
 
 import utils.constants as constants
+from core.race_selector import get_race_gate_for_turn_label
 
 from utils.log import info, warning, error, debug
 from utils.screenshot import enhanced_screenshot, are_screenshots_same
@@ -11,12 +12,19 @@ from core.recognizer import is_btn_active, compare_brightness
 import utils.device_action_wrapper as device_action
 
 import core.config as config
+import core.bot as bot
 
 previous_action_count = -1
+previous_skill_check_action_count = -1
+previous_selected_race_skill_check_action_count = -1
+SKILL_RECHECK_TURNS = 6
+SKILL_SELECTED_RACE_RECHECK_TURNS = 3
 
 def init_skill_py():
-  global previous_action_count
+  global previous_action_count, previous_skill_check_action_count, previous_selected_race_skill_check_action_count
   previous_action_count = -1
+  previous_skill_check_action_count = -1
+  previous_selected_race_skill_check_action_count = -1
 
 
 def update_skill_action_count(action_count):
@@ -24,18 +32,54 @@ def update_skill_action_count(action_count):
   previous_action_count = action_count
 
 
-def get_skill_purchase_context(state, action_count, race_check=False):
-  global previous_action_count
+def mark_skill_purchase_checked(action_count, selected_race=False):
+  global previous_skill_check_action_count, previous_selected_race_skill_check_action_count
+  previous_skill_check_action_count = action_count
+  if selected_race:
+    previous_selected_race_skill_check_action_count = action_count
+
+
+def get_skill_purchase_check_state():
+  return {
+    "last_skill_purchase_action_count": previous_action_count,
+    "last_skill_purchase_check_action_count": previous_skill_check_action_count,
+    "last_selected_race_skill_purchase_check_action_count": previous_selected_race_skill_check_action_count,
+    "skill_recheck_turns": SKILL_RECHECK_TURNS,
+    "skill_selected_race_recheck_turns": SKILL_SELECTED_RACE_RECHECK_TURNS,
+  }
+
+
+def _trackblazer_has_scheduled_g1_race(state, action=None):
+  if not isinstance(state, dict):
+    return False
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return False
+  gate = get_race_gate_for_turn_label(state.get("year"), getattr(config, "OPERATOR_RACE_SELECTOR", None))
+  return bool(gate.get("enabled") and gate.get("race_allowed") and gate.get("selected_race"))
+
+
+def get_skill_purchase_context(state, action_count, race_check=False, action=None):
+  global previous_action_count, previous_skill_check_action_count, previous_selected_race_skill_check_action_count
   current_sp = state.get("current_stats", {}).get("sp", 0)
+  scheduled_g1_race = _trackblazer_has_scheduled_g1_race(state, action=action)
+  normal_review_due = (
+    previous_skill_check_action_count < 0
+    or (action_count - previous_skill_check_action_count) >= SKILL_RECHECK_TURNS
+  )
   result = {
     "should_check": False,
     "reason": "",
+    "auto_buy_skill_enabled": bot.get_skill_auto_buy_enabled(),
     "shopping_list": list(config.SKILL_LIST),
     "current_sp": current_sp,
     "threshold_sp": config.SKILL_PTS_CHECK,
     "race_check": race_check,
     "last_skill_purchase_action_count": previous_action_count,
-    "skill_check_turns": config.SKILL_CHECK_TURNS,
+    "last_skill_purchase_check_action_count": previous_skill_check_action_count,
+    "last_selected_race_skill_purchase_check_action_count": previous_selected_race_skill_check_action_count,
+    "skill_recheck_turns": SKILL_RECHECK_TURNS,
+    "skill_selected_race_recheck_turns": SKILL_SELECTED_RACE_RECHECK_TURNS,
+    "scheduled_g1_race": scheduled_g1_race,
     "planned_clicks": [
       {"label": "Open skills menu", "template": "assets/buttons/skills_btn.png", "region_key": "SCREEN_BOTTOM_BBOX"},
       {"label": "Scan skill rows", "region_key": "SCROLLING_SKILL_SCREEN_BBOX", "source_type": "ocr_region"},
@@ -52,38 +96,64 @@ def get_skill_purchase_context(state, action_count, race_check=False):
     ],
   }
 
-  if not config.IS_AUTO_BUY_SKILL:
-    result["reason"] = "Auto-buy skill is disabled in config."
+  if not bot.get_skill_auto_buy_enabled():
+    result["reason"] = "Auto-buy skill is disabled in the runtime toggle."
     return result
   if current_sp < config.SKILL_PTS_CHECK:
     result["reason"] = f"Skill points {current_sp} below threshold {config.SKILL_PTS_CHECK}."
+    return result
+  if race_check and scheduled_g1_race:
+    if previous_selected_race_skill_check_action_count >= 0 and (action_count - previous_selected_race_skill_check_action_count) < SKILL_SELECTED_RACE_RECHECK_TURNS:
+      turns_remaining = SKILL_SELECTED_RACE_RECHECK_TURNS - (action_count - previous_selected_race_skill_check_action_count)
+      result["reason"] = f"Selected-race skill check was already done recently; recheck in {turns_remaining} turn(s)."
+      return result
+    result["should_check"] = True
+    result["reason"] = "Checking skills before scheduled G1 race."
+    return result
+  if previous_skill_check_action_count >= 0 and (action_count - previous_skill_check_action_count) < SKILL_RECHECK_TURNS:
+    turns_remaining = SKILL_RECHECK_TURNS - (action_count - previous_skill_check_action_count)
+    result["reason"] = f"Skill purchase was already checked recently; recheck in {turns_remaining} turn(s)."
     return result
   if config.CHECK_SKILL_BEFORE_RACES and race_check and (action_count > previous_action_count):
     result["should_check"] = True
     result["reason"] = "Checking skills before race."
     return result
-  if (action_count - previous_action_count) < config.SKILL_CHECK_TURNS:
-    result["reason"] = "Not enough turns since last skill check."
+  if previous_skill_check_action_count < 0:
+    result["should_check"] = True
+    result["reason"] = "Initial skill purchase check is due."
+    return result
+  if not normal_review_due:
+    turns_remaining = SKILL_RECHECK_TURNS - (action_count - previous_skill_check_action_count)
+    result["reason"] = f"Skill purchase was already checked recently; recheck in {turns_remaining} turn(s)."
     return result
 
   result["should_check"] = True
-  result["reason"] = "Skill purchase check is due."
+  result["reason"] = "Skill purchase recheck is due."
   return result
 
 def buy_skill(state, action_count, race_check=False):
-  global previous_action_count
-  debug(f"Skill buy: {action_count}, {previous_action_count}, {race_check}")
-  if (config.IS_AUTO_BUY_SKILL and state["current_stats"]["sp"] >= config.SKILL_PTS_CHECK):
+  global previous_action_count, previous_skill_check_action_count, previous_selected_race_skill_check_action_count
+  debug(
+    f"Skill buy: action={action_count}, last_purchase={previous_action_count}, "
+    f"last_review={previous_skill_check_action_count}, race_check={race_check}"
+  )
+  if (bot.get_skill_auto_buy_enabled() and state["current_stats"]["sp"] >= config.SKILL_PTS_CHECK):
     pass
   else:
     return False
-  if config.CHECK_SKILL_BEFORE_RACES and race_check and (action_count > previous_action_count):
+  scheduled_g1_race = _trackblazer_has_scheduled_g1_race(state)
+  if race_check and scheduled_g1_race:
+    if previous_selected_race_skill_check_action_count >= 0 and (action_count - previous_selected_race_skill_check_action_count) < SKILL_SELECTED_RACE_RECHECK_TURNS:
+      info("Selected-race skill check is still on cooldown. Not trying.")
+      return False
+  elif previous_skill_check_action_count >= 0 and (action_count - previous_skill_check_action_count) < SKILL_RECHECK_TURNS:
+    info("Skill purchase review is still on cooldown. Not trying.")
+    return False
+  elif config.CHECK_SKILL_BEFORE_RACES and race_check and (action_count > previous_action_count):
     debug(f"Passed race check condition.")
     pass
-  elif (action_count - previous_action_count) < config.SKILL_CHECK_TURNS:
-    info("Hasn't been enough turns since last skill buy. Not trying.")
-    return False
 
+  mark_skill_purchase_checked(action_count, selected_race=scheduled_g1_race)
   previous_action_count = action_count
   device_action.locate_and_click("assets/buttons/skills_btn.png", min_search_time=get_secs(2))
   sleep(1)

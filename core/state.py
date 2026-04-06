@@ -1072,6 +1072,24 @@ def get_support_card_data(threshold=0.8):
 
   hint_matches = device_action.match_template("assets/icons/support_hint.png", screenshot, threshold)
 
+  def _sample_friendship_color(sample_x: int, sample_y: int, radius: int = 2):
+    """Search a tiny patch so bond-level color reads are less brittle."""
+    search_radius = max(2, radius * 4)
+    left = max(region_xywh[0], sample_x - search_radius)
+    top = max(region_xywh[1], sample_y - search_radius)
+    right = min(region_xywh[0] + region_xywh[2], sample_x + search_radius + 1)
+    bottom = min(region_xywh[1] + region_xywh[3], sample_y + search_radius + 1)
+    if right <= left or bottom <= top:
+      return find_color_of_pixel((sample_x, sample_y, sample_x + 1, sample_y + 1))
+    sample = device_action.screenshot(region_xywh=(left, top, right - left, bottom - top))
+    if sample is None or getattr(sample, "size", 0) == 0:
+      return find_color_of_pixel((sample_x, sample_y, sample_x + 1, sample_y + 1))
+    flat = sample.reshape(-1, sample.shape[-1]).astype(np.int16)
+    targets = np.array(list(constants.SUPPORT_FRIEND_LEVELS.values()), dtype=np.int16)
+    distances = np.linalg.norm(flat[:, None, :] - targets[None, :, :], axis=2)
+    best_pixel = flat[np.unravel_index(np.argmin(distances), distances.shape)[0]]
+    return best_pixel
+
   for key, icon_path in constants.SUPPORT_ICONS.items():
     matches = device_action.match_template(icon_path, screenshot, threshold)
 
@@ -1086,9 +1104,7 @@ def get_support_card_data(threshold=0.8):
       icon_to_friend_bar_distance = 77 if constants.SCENARIO_NAME in ("mant", "trackblazer") else 66
       bbox_left = region_xywh[0] + x + w // 2
       bbox_top = region_xywh[1] + y + h // 2 + icon_to_friend_bar_distance
-      wanted_pixel = (bbox_left, bbox_top, bbox_left + 1, bbox_top + 1)
-
-      friendship_level_color = find_color_of_pixel(wanted_pixel)
+      friendship_level_color = _sample_friendship_color(bbox_left, bbox_top)
       friend_level = closest_color(constants.SUPPORT_FRIEND_LEVELS, friendship_level_color)
 
       count_result[key]["friendship_levels"][friend_level] += 1

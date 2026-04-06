@@ -298,7 +298,7 @@ class OperatorConsole:
       ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
     self._trackblazer_use_items_var = tk.BooleanVar(value=bot.get_trackblazer_use_items_enabled())
-    self._skill_dry_run_var = tk.BooleanVar(value=bot.get_skill_dry_run_enabled())
+    self._skill_auto_buy_var = tk.BooleanVar(value=bot.get_skill_auto_buy_enabled())
     self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
     self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
     tk.Checkbutton(
@@ -369,15 +369,21 @@ class OperatorConsole:
     ).pack(side=tk.LEFT)
     tk.Checkbutton(
       tertiary_controls,
-      text="Dry-run skills",
-      variable=self._skill_dry_run_var,
-      command=self._toggle_skill_dry_run,
+      text="Auto-buy skill",
+      variable=self._skill_auto_buy_var,
+      command=self._toggle_skill_auto_buy,
       fg="white",
       bg="#101418",
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Label(
+      tertiary_controls,
+      text="On = override config and allow skill buys. Off = skip skill review.",
+      fg="#9aa4ad",
+      bg="#101418",
+    ).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(
       tertiary_controls,
       text="Item Policy",
@@ -884,8 +890,8 @@ class OperatorConsole:
       self._trackblazer_use_items_var.set(bool(runtime_state.get("trackblazer_use_items_enabled")))
     if self._trackblazer_scoring_mode_var is not None:
       self._trackblazer_scoring_mode_var.set(runtime_state.get("trackblazer_scoring_mode") or "stat_focused")
-    if self._skill_dry_run_var is not None:
-      self._skill_dry_run_var.set(bool(runtime_state.get("skill_dry_run_enabled")))
+    if self._skill_auto_buy_var is not None:
+      self._skill_auto_buy_var.set(bool(runtime_state.get("skill_auto_buy_skill_enabled", runtime_state.get("skill_dry_run_enabled"))))
     if self._race_selector_status_var is not None:
       self._race_selector_status_var.set(self._race_selector_status_text())
     self._message_value.set(runtime_state.get("message") or "")
@@ -1067,7 +1073,7 @@ class OperatorConsole:
     if planned:
       lines.append("")
       lines.append("Planned Actions")
-      lines.extend(self._format_planned_action_sections(planned))
+      lines.extend(self._format_planned_action_sections(planned, state_summary))
     else:
       lines.append("")
       lines.append("Planned Actions")
@@ -1239,6 +1245,12 @@ class OperatorConsole:
     if race_entry_lines:
       lines.extend(race_entry_lines)
 
+    skill_check_lines = self._format_skill_check_lines(state_summary)
+    if skill_check_lines:
+      lines.append("")
+      lines.append("Skill Check")
+      lines.extend(skill_check_lines)
+
     training_lines = self._format_training_lines(ranked_trainings, selected_action)
     if training_lines:
       lines.append("")
@@ -1391,15 +1403,85 @@ class OperatorConsole:
         else:
           parts.append("scout ran")
       else:
-        parts.append("scout deferred")
+          parts.append("scout deferred")
     return f"Race Flow: {' | '.join(parts)}" if parts else ""
+
+  def _format_skill_check_lines(self, state_summary):
+    skill_check = state_summary.get("skill_purchase_check") or {}
+    if not isinstance(skill_check, dict) or not skill_check:
+      return []
+
+    lines = []
+    skill_flow = state_summary.get("skill_purchase_flow") or {}
+    skill_scan = state_summary.get("skill_purchase_scan") or {}
+    current_sp = skill_check.get("current_sp")
+    threshold_sp = skill_check.get("threshold_sp")
+    auto_buy_enabled = skill_check.get("auto_buy_skill_enabled")
+    last_review = skill_check.get("last_skill_purchase_check_action_count")
+    last_purchase = skill_check.get("last_skill_purchase_action_count")
+    last_selected_race_review = skill_check.get("last_selected_race_skill_purchase_check_action_count")
+    recheck_turns = skill_check.get("skill_recheck_turns")
+    selected_race_recheck_turns = skill_check.get("skill_selected_race_recheck_turns")
+    scheduled_g1 = bool(skill_check.get("scheduled_g1_race"))
+    reason = skill_check.get("reason") or ""
+
+    if current_sp is not None or threshold_sp is not None:
+      lines.append(
+        f"  SP: {current_sp if current_sp is not None else '?'}"
+        f" / {threshold_sp if threshold_sp is not None else '?'}"
+      )
+    if auto_buy_enabled is not None:
+      lines.append(f"  Auto-buy skill: {'yes' if auto_buy_enabled else 'no'}")
+    if isinstance(skill_flow, dict) and skill_flow:
+      if skill_flow.get("scanned"):
+        lines.append("  Scan: scanned")
+      elif skill_flow.get("skipped"):
+        lines.append(f"  Scan: skipped ({skill_flow.get('reason') or 'unknown'})")
+      elif skill_flow.get("reason"):
+        lines.append(f"  Scan: {skill_flow.get('reason')}")
+    target_results = list(skill_scan.get("target_results") or [])
+    if target_results:
+      found = []
+      missing = []
+      for entry in target_results:
+        candidate = entry.get("candidate") or {}
+        match_name = candidate.get("match_name") or entry.get("target_skill")
+        if candidate:
+          found.append(match_name)
+        else:
+          missing.append(entry.get("target_skill") or "unknown")
+      if found:
+        lines.append(f"  Available: {', '.join(found)}")
+      if missing:
+        lines.append(f"  Missing: {', '.join(missing)}")
+    if last_review is not None or last_purchase is not None:
+      lines.append(
+        f"  Last: review {last_review if last_review is not None else '-'}"
+        f" | purchase {last_purchase if last_purchase is not None else '-'}"
+      )
+    if recheck_turns is not None:
+      lines.append(f"  Cooldown: {recheck_turns} turns")
+    if selected_race_recheck_turns is not None:
+      lines.append(
+        f"  Selected race cooldown: {selected_race_recheck_turns} turns"
+        f" | last {last_selected_race_review if last_selected_race_review is not None else '-'}"
+      )
+    lines.append(f"  Selected race bypass: {'yes' if scheduled_g1 else 'no'}")
+    if reason:
+      lines.append(f"  Status: {reason}")
+    return lines
 
   def _format_trackblazer_race_lines(self, selected_action):
     decision = selected_action.get("trackblazer_race_decision") or {}
     lookahead = selected_action.get("trackblazer_race_lookahead") or {}
     lines = []
     if isinstance(decision, dict) and decision:
-      outcome = "race" if decision.get("should_race") else "train"
+      if decision.get("prefer_rest_over_weak_training"):
+        outcome = "rest"
+      elif decision.get("should_race"):
+        outcome = "fallback_race" if decision.get("fallback_non_rival_race") else "race"
+      else:
+        outcome = "train"
       parts = [f"Race Gate: {outcome}"]
       target = decision.get("race_tier_target")
       if target:
@@ -1601,12 +1683,13 @@ class OperatorConsole:
       lines.append(" | ".join(parts))
     return lines
 
-  def _format_planned_action_sections(self, planned):
+  def _format_planned_action_sections(self, planned, state_summary):
     lines = []
     for section_name, payload in (
       ("Race Check", planned.get("race_check") or {}),
       ("Race Decision", planned.get("race_decision") or {}),
       ("Race Entry Gate", planned.get("race_entry_gate") or {}),
+      ("Skill Check", state_summary.get("skill_purchase_check") or {}),
       ("Race Scout", planned.get("race_scout") or {}),
       ("Inventory Scan", planned.get("inventory_scan") or {}),
       ("Would Use", planned.get("would_use") or []),
@@ -1617,6 +1700,8 @@ class OperatorConsole:
       lines.append(f"  {section_name}:")
       if isinstance(payload, dict):
         summary = self._format_short_mapping(payload)
+        if section_name == "Skill Check":
+          summary = self._format_skill_check_lines(state_summary)
         if summary:
           lines.extend([f"    {line}" for line in summary])
         else:
@@ -2041,15 +2126,15 @@ class OperatorConsole:
     )
     self.publish()
 
-  def _toggle_skill_dry_run(self):
-    if self._skill_dry_run_var is None:
+  def _toggle_skill_auto_buy(self):
+    if self._skill_auto_buy_var is None:
       return
-    enabled = bool(self._skill_dry_run_var.get())
-    bot.set_skill_dry_run_enabled(enabled)
+    enabled = bool(self._skill_auto_buy_var.get())
+    bot.set_skill_auto_buy_enabled(enabled)
     self._message_value.set(
-      "Skill purchase dry-run enabled (scan only, no confirm)."
+      "Skill auto-buy enabled."
       if enabled else
-      "Skill purchase live mode (will confirm + learn)."
+      "Skill auto-buy disabled."
     )
     self.publish()
 
@@ -3511,6 +3596,118 @@ class OperatorConsole:
       wraplength=700,
     ).pack(anchor="w", pady=(4, 0))
 
+    fallback_race_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    fallback_race_frame.pack(fill=tk.X)
+    tk.Label(
+      fallback_race_frame,
+      text="Weak-training fallback race",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 4))
+    self._fallback_race_enabled_var = tk.BooleanVar(
+      value=bool(training_behavior.get("weak_training_fallback_race_enabled", True))
+    )
+    tk.Checkbutton(
+      fallback_race_frame,
+      text="Prefer a schedule race over weak training when no rival indicator",
+      variable=self._fallback_race_enabled_var,
+      fg="#d6dde5",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).grid(row=1, column=0, columnspan=8, sticky="w")
+    tk.Label(
+      fallback_race_frame,
+      text="Earliest turn",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
+    earliest_turn_default = str(training_behavior.get("weak_training_fallback_race_earliest_turn", "Classic Year Early Sep"))
+    self._fallback_race_earliest_turn_var = tk.StringVar(value=earliest_turn_default)
+    earliest_turn_menu = tk.OptionMenu(
+      fallback_race_frame,
+      self._fallback_race_earliest_turn_var,
+      *constants.TIMELINE,
+    )
+    earliest_turn_menu.config(bg="#192028", fg="white", activebackground="#2d333b", activeforeground="white", highlightthickness=0, width=22)
+    earliest_turn_menu["menu"].config(bg="#192028", fg="white", activebackground="#2d333b", activeforeground="white")
+    earliest_turn_menu.grid(row=1, column=3, columnspan=3, sticky="w", pady=2)
+    tk.Label(
+      fallback_race_frame,
+      text="Score threshold",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    self._fallback_race_score_threshold_var = tk.StringVar(
+      value=str(training_behavior.get("weak_training_fallback_race_score_threshold", 30))
+    )
+    tk.Spinbox(
+      fallback_race_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._fallback_race_score_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=1, sticky="w", pady=2)
+    tk.Label(
+      fallback_race_frame,
+      text="Low-energy rest %",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=2, sticky="e", padx=(12, 4), pady=2)
+    self._fallback_race_low_energy_rest_pct_var = tk.StringVar(
+      value=str(training_behavior.get("weak_training_fallback_race_low_energy_rest_pct", 2))
+    )
+    tk.Spinbox(
+      fallback_race_frame,
+      from_=0,
+      to=100,
+      width=5,
+      textvariable=self._fallback_race_low_energy_rest_pct_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=3, sticky="w", pady=2)
+    tk.Label(
+      fallback_race_frame,
+      text="Rest exempt score",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=2, column=4, sticky="e", padx=(12, 4), pady=2)
+    self._fallback_race_rest_exempt_score_var = tk.StringVar(
+      value=str(training_behavior.get("weak_training_fallback_race_low_energy_rest_exempt_score", 35))
+    )
+    tk.Spinbox(
+      fallback_race_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._fallback_race_rest_exempt_score_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=2, column=5, sticky="w", pady=2)
+    tk.Label(
+      fallback_race_frame,
+      text="When training score is below the threshold and no rival is on screen, race any available schedule race instead. "
+           "Consecutive-race warnings always cancel. At very low energy (below rest %), prefer rest over both racing and "
+           "wasting a Good-Luck Charm on weak training — unless training score exceeds the rest exempt score.",
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+
     race_lookahead_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     race_lookahead_frame.pack(fill=tk.X)
     tk.Label(
@@ -3860,6 +4057,30 @@ class OperatorConsole:
       training_behavior["allow_zero_energy_optional_race_with_recovery_items"] = bool(self._zero_energy_optional_race_recovery_var.get())
     if self._save_vita_for_summer_var is not None:
       training_behavior["save_vita_for_summer"] = bool(self._save_vita_for_summer_var.get())
+    if self._fallback_race_enabled_var is not None:
+      training_behavior["weak_training_fallback_race_enabled"] = bool(self._fallback_race_enabled_var.get())
+    if self._fallback_race_score_threshold_var is not None:
+      threshold_text = str(self._fallback_race_score_threshold_var.get() or "").strip()
+      try:
+        training_behavior["weak_training_fallback_race_score_threshold"] = max(0, int(threshold_text))
+      except ValueError:
+        pass
+    if self._fallback_race_earliest_turn_var is not None:
+      earliest_turn = str(self._fallback_race_earliest_turn_var.get() or "").strip()
+      if earliest_turn in constants.TIMELINE:
+        training_behavior["weak_training_fallback_race_earliest_turn"] = earliest_turn
+    if self._fallback_race_low_energy_rest_pct_var is not None:
+      pct_text = str(self._fallback_race_low_energy_rest_pct_var.get() or "").strip()
+      try:
+        training_behavior["weak_training_fallback_race_low_energy_rest_pct"] = min(100, max(0, int(pct_text)))
+      except ValueError:
+        pass
+    if self._fallback_race_rest_exempt_score_var is not None:
+      score_text = str(self._fallback_race_rest_exempt_score_var.get() or "").strip()
+      try:
+        training_behavior["weak_training_fallback_race_low_energy_rest_exempt_score"] = max(0, int(score_text))
+      except ValueError:
+        pass
 
     policy = {
       "version": int(current_policy.get("version", 1)),

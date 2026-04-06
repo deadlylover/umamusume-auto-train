@@ -172,10 +172,10 @@
     }
   ],
   "skill": {
-    "is_auto_buy_skill": false,
+    "is_auto_buy_skill": true,
     "skill_check_turns": 10,
     "check_skill_before_races": false,
-    "skill_pts_check": 400,
+    "skill_pts_check": 180,
     "skill_list": [
       "Homestretch Haste",
       "Go with the Flow",

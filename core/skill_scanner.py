@@ -7,14 +7,12 @@
 import utils.constants as constants
 import utils.device_action_wrapper as device_action
 import core.config as config
-from core.ocr import extract_text
 from utils.log import info, warning, debug
 from utils.tools import get_secs, sleep
-from utils.screenshot import enhanced_screenshot
 import core.bot as bot
-from PIL import Image
 from time import time as _time
 from queue import Queue
+from functools import lru_cache
 import numpy as np
 import threading
 import re
@@ -62,6 +60,7 @@ _FUZZY_MATCH_MIN_LENGTH = 4       # Minimum skill name length for fuzzy
 _INCREMENT_MATCH_THRESHOLD = 0.65
 _INCREMENT_Y_TOLERANCE = 50       # Looser than shop — skill cards are taller
 _INCREMENT_TEMPLATE = "assets/buttons/skill_increment.png"
+_INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
 
 # Confirm detection.
 _CONFIRM_TEMPLATE = "assets/buttons/confirm_btn.png"
@@ -83,6 +82,17 @@ _EXIT_NO_LEARN_THRESHOLD = 0.8
 _OPEN_SETTLE_SECONDS = 1.0
 _CLOSE_SETTLE_SECONDS = 0.5
 _EXIT_DIALOG_SETTLE_SECONDS = 0.5
+
+# OCR tuning.
+_SKILL_OCR_CANVAS_SIZE = 1600
+_SKILL_OCR_MIN_SIZE = 12
+_SKILL_OCR_GPU_BATCH_SIZE = 8
+_SKILL_OCR_CPU_BATCH_SIZE = 1
+
+
+_SKILL_SHORTLIST_CACHE = {}
+_SKILL_MATCH_CACHE = {}
+_SKILL_MATCH_CACHE_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -194,22 +204,20 @@ def inspect_skill_scrollbar(screenshot=None):
         return result
 
     if len(crop.shape) == 3:
-        gray = np.asarray(Image.fromarray(crop).convert("L"))
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
     else:
         gray = np.asarray(crop)
     if gray.size == 0 or gray.shape[0] <= 0 or gray.shape[1] <= 0:
         return result
 
     # Find the darkest vertical lane (the scrollbar track).
-    col_mean = gray.mean(axis=0)
-    best_col = None
-    for center in range(2, gray.shape[1] - 2):
-        left = max(0, center - 2)
-        right = min(gray.shape[1], center + 3)
-        score = float(col_mean[left:right].mean())
-        if best_col is None or score < best_col[0]:
-            best_col = (score, center)
-    track_center_x = int(best_col[1]) if best_col else int(gray.shape[1] // 2)
+    col_mean = gray.mean(axis=0).astype(np.float32, copy=False)
+    if col_mean.shape[0] >= 5:
+        kernel = np.ones(5, dtype=np.float32) / 5.0
+        lane_scores = np.convolve(col_mean, kernel, mode="same")
+    else:
+        lane_scores = col_mean
+    track_center_x = int(np.argmin(lane_scores))
     left = max(0, track_center_x - _SCROLLBAR_WINDOW_HALF_WIDTH)
     right = min(gray.shape[1], track_center_x + _SCROLLBAR_WINDOW_HALF_WIDTH + 1)
     track = gray[:, left:right]
@@ -219,17 +227,12 @@ def inspect_skill_scrollbar(screenshot=None):
     mask = row_mean < threshold
 
     # Find dark segments (thumb candidates).
+    padded = np.concatenate(([False], mask, [False]))
+    transitions = np.flatnonzero(np.diff(padded.astype(np.int8)))
     segments = []
-    start = None
-    for idx, is_dark in enumerate(mask):
-        if is_dark and start is None:
-            start = idx
-        elif not is_dark and start is not None:
-            if idx - start >= _SCROLLBAR_MIN_SEGMENT_HEIGHT:
-                segments.append((start, idx - 1, float(row_mean[start:idx].mean())))
-            start = None
-    if start is not None and len(mask) - start >= _SCROLLBAR_MIN_SEGMENT_HEIGHT:
-        segments.append((start, len(mask) - 1, float(row_mean[start:].mean())))
+    for start_idx, end_idx in zip(transitions[0::2], transitions[1::2]):
+        if end_idx - start_idx >= _SCROLLBAR_MIN_SEGMENT_HEIGHT:
+            segments.append((start_idx, end_idx - 1, float(row_mean[start_idx:end_idx].mean())))
     if not segments:
         return result
 
@@ -455,11 +458,21 @@ def _extract_ocr_rows_from_name_band(screenshot):
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
 
-    # Run EasyOCR directly on the numpy crop to get bounding boxes.
-    import easyocr
     from core.ocr import reader
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#? "
-    raw_results = reader.readtext(crop, allowlist=allowlist)
+    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
+    if str(getattr(reader, "device", "cpu")) != "cpu":
+        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+    raw_results = reader.readtext(
+        crop,
+        allowlist=allowlist,
+        detail=1,
+        paragraph=False,
+        min_size=_SKILL_OCR_MIN_SIZE,
+        canvas_size=_SKILL_OCR_CANVAS_SIZE,
+        batch_size=batch_size,
+        workers=0,
+    )
 
     # Convert raw EasyOCR results to row entries with absolute Y coordinates.
     bbox_left, bbox_top, _, _ = [int(v) for v in constants.SKILL_NAME_BAND_BBOX]
@@ -487,6 +500,7 @@ def _extract_ocr_rows_from_name_band(screenshot):
     return rows
 
 
+@lru_cache(maxsize=4096)
 def _normalize_skill_text(text):
     """Normalize OCR text for matching: lowercase, strip punctuation, collapse whitespace."""
     text = text.lower().strip()
@@ -495,34 +509,77 @@ def _normalize_skill_text(text):
     return text
 
 
+def _normalize_skill_shortlist(skill_shortlist):
+    """Pre-normalize shortlist entries once per distinct shortlist."""
+    shortlist_key = tuple(skill_shortlist or [])
+    cached = _SKILL_SHORTLIST_CACHE.get(shortlist_key)
+    if cached is not None:
+        return cached
+
+    normalized = []
+    seen = set()
+    for skill_name in shortlist_key:
+        normalized_name = _normalize_skill_text(skill_name)
+        if not normalized_name or normalized_name in seen:
+            continue
+        seen.add(normalized_name)
+        normalized.append({
+            "skill_name": skill_name,
+            "skill_normalized": normalized_name,
+            "skill_compact": normalized_name.replace(" ", ""),
+            "skill_tokens": frozenset(normalized_name.split()),
+        })
+
+    cached = tuple(normalized)
+    _SKILL_SHORTLIST_CACHE[shortlist_key] = cached
+    return cached
+
+
 # ---------------------------------------------------------------------------
 # Skill matching against shortlist
 # ---------------------------------------------------------------------------
 
-def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist):
+def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortlist=None):
     """Match OCR rows against the configured skill shortlist.
 
     Uses exact match first, then conservative fuzzy matching.
     Returns a list of matched rows with match details.
     """
+    normalized_shortlist = tuple(normalized_shortlist or _normalize_skill_shortlist(skill_shortlist))
+    shortlist_key = tuple(item["skill_normalized"] for item in normalized_shortlist)
+    row_signature = _compute_row_signature(ocr_rows)
+    cache_key = (row_signature, shortlist_key)
+    cached = _SKILL_MATCH_CACHE.get(cache_key)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
     matched = []
     for row in ocr_rows:
         normalized = row["text_normalized"]
         if not normalized or len(normalized) < 3:
             continue
+        normalized_compact = normalized.replace(" ", "")
+        row_tokens = frozenset(normalized.split())
         best_match = None
         best_score = 0.0
-        for skill_name in skill_shortlist:
-            skill_normalized = _normalize_skill_text(skill_name)
-            # Try exact substring containment first.
+        for skill_entry in normalized_shortlist:
+            skill_name = skill_entry["skill_name"]
+            skill_normalized = skill_entry["skill_normalized"]
+            skill_compact = skill_entry["skill_compact"]
+            skill_tokens = skill_entry["skill_tokens"]
+
+            score = max(
+                Levenshtein.ratio(normalized, skill_normalized),
+                Levenshtein.ratio(normalized_compact, skill_compact),
+            )
             if skill_normalized in normalized or normalized in skill_normalized:
-                score = Levenshtein.ratio(normalized, skill_normalized)
-                if score > best_score:
-                    best_score = score
-                    best_match = skill_name
-                continue
-            # Fuzzy match.
-            score = Levenshtein.ratio(normalized, skill_normalized)
+                score = max(score, 0.96)
+            if skill_tokens:
+                token_overlap = len(row_tokens & skill_tokens) / max(1, len(skill_tokens))
+                if token_overlap >= 0.66:
+                    score = max(score, 0.78 + (token_overlap * 0.18))
+                elif token_overlap >= 0.5:
+                    score = max(score, 0.72 + (token_overlap * 0.12))
             if score > best_score:
                 best_score = score
                 best_match = skill_name
@@ -541,6 +598,8 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist):
                 "match_score": round(best_score, 4),
                 "match_type": "fuzzy",
             })
+    with _SKILL_MATCH_CACHE_LOCK:
+        _SKILL_MATCH_CACHE[cache_key] = tuple(dict(row) for row in matched)
     return matched
 
 
@@ -562,12 +621,33 @@ def _detect_increment_buttons(screenshot):
     )
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
-    matches = device_action.match_template(
-        _INCREMENT_TEMPLATE,
-        crop,
-        threshold=_INCREMENT_MATCH_THRESHOLD,
+    template_attempts = []
+    if (constants.SCENARIO_NAME or "") in ("mant", "trackblazer"):
+        template_attempts.append(
+            (
+                constants.SKILL_INCREMENT_TEMPLATES.get("trackblazer"),
+                _INVERSE_GLOBAL_SCALE,
+            )
+        )
+    template_attempts.append(
+        (
+            constants.SKILL_INCREMENT_TEMPLATES.get("default", _INCREMENT_TEMPLATE),
+            1.0,
+        )
     )
-    return matches
+
+    all_matches = []
+    for template_path, template_scaling in template_attempts:
+        if not template_path:
+            continue
+        matches = device_action.match_template(
+            template_path,
+            crop,
+            threshold=_INCREMENT_MATCH_THRESHOLD,
+            template_scaling=template_scaling,
+        )
+        all_matches.extend(matches)
+    return device_action.deduplicate_boxes(all_matches)
 
 
 def _pair_skill_row_to_increment(row, increment_matches):
@@ -591,6 +671,12 @@ def _pair_skill_row_to_increment(row, increment_matches):
     return max(candidates, key=lambda c: c[0][0])[0]
 
 
+def _increment_match_abs_center_y(match):
+    """Return the absolute center Y for a paired increment match box."""
+    scroll_bbox_top = int(constants.SCROLLING_SKILL_SCREEN_BBOX[1])
+    return scroll_bbox_top + int(match[1]) + int(match[3]) // 2
+
+
 # ---------------------------------------------------------------------------
 # Per-frame analysis (used by the buffered pipeline)
 # ---------------------------------------------------------------------------
@@ -600,23 +686,55 @@ def _analyze_skill_frame(frame_payload):
     t0 = _time()
     screenshot = frame_payload.get("screenshot")
     skill_shortlist = frame_payload.get("skill_shortlist", [])
+    normalized_shortlist = frame_payload.get("normalized_shortlist")
 
     # OCR the name band.
+    t_ocr = _time()
     ocr_rows = _extract_ocr_rows_from_name_band(screenshot)
+    ocr_elapsed = _time() - t_ocr
 
     # Match against shortlist.
-    matched_targets = _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist)
+    t_match = _time()
+    matched_targets = _match_skill_rows_to_shortlist(
+        ocr_rows,
+        skill_shortlist,
+        normalized_shortlist=normalized_shortlist,
+    )
+    match_elapsed = _time() - t_match
 
     # Detect increment buttons.
-    increment_matches = _detect_increment_buttons(screenshot)
+    t_increment = _time()
+    increment_matches = _detect_increment_buttons(screenshot) if matched_targets else []
+    increment_elapsed = _time() - t_increment
 
     # Pair matched targets to increment buttons.
+    paired_increment_keys = set()
     for target in matched_targets:
         inc = _pair_skill_row_to_increment(target, increment_matches)
-        target["increment_match"] = list(inc) if inc else None
+        if inc:
+            target["increment_match"] = list(inc)
+            paired_increment_keys.add(tuple(int(v) for v in inc))
+        else:
+            target["increment_match"] = None
+
+    # Fallback: if a matched row still has no increment pair, assign the
+    # remaining buttons in top-to-bottom order. The skill cards can offset the
+    # button far enough from the OCR title that strict vertical proximity misses
+    # even when the button is still visibly tied to that row.
+    if increment_matches:
+        remaining_targets = [target for target in matched_targets if not target.get("increment_match")]
+        remaining_increments = [
+            match for match in sorted(increment_matches, key=_increment_match_abs_center_y)
+            if tuple(int(v) for v in match) not in paired_increment_keys
+        ]
+        for target, inc in zip(sorted(remaining_targets, key=lambda item: item["abs_y_center"]), remaining_increments):
+            target["increment_match"] = list(inc)
+            paired_increment_keys.add(tuple(int(v) for v in inc))
 
     # Scrollbar state.
+    t_scrollbar = _time()
     scrollbar = inspect_skill_scrollbar(screenshot=screenshot)
+    scrollbar_elapsed = _time() - t_scrollbar
 
     scan_elapsed = _time() - t0
     return {
@@ -632,6 +750,10 @@ def _analyze_skill_frame(frame_payload):
         "final": bool(frame_payload.get("final")),
         "timing": {
             "capture": round(frame_payload.get("capture_elapsed", 0.0), 4),
+            "ocr": round(ocr_elapsed, 4),
+            "match": round(match_elapsed, 4),
+            "increment": round(increment_elapsed, 4),
+            "scrollbar": round(scrollbar_elapsed, 4),
             "scan": round(scan_elapsed, 4),
             "wall": round(frame_payload.get("capture_elapsed", 0.0) + scan_elapsed, 4),
         },
@@ -645,6 +767,7 @@ def _analyze_skill_frame(frame_payload):
 def _capture_skill_frames_during_scrollbar_drag(
     initial_scrollbar,
     skill_shortlist,
+    normalized_shortlist=None,
     drag_duration=None,
     frame_interval=None,
     debug_session_dir=None,
@@ -756,6 +879,7 @@ def _capture_skill_frames_during_scrollbar_drag(
             "capture_elapsed": capture_elapsed,
             "screenshot": screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
         })
         frame_count += 1
         next_capture_at = max(next_capture_at + resolved_frame_interval, _time() + 0.001)
@@ -772,6 +896,7 @@ def _capture_skill_frames_during_scrollbar_drag(
         "capture_elapsed": final_capture_elapsed,
         "screenshot": final_screenshot,
         "skill_shortlist": skill_shortlist,
+        "normalized_shortlist": normalized_shortlist,
         "final": True,
     })
     frame_count += 1
@@ -844,8 +969,9 @@ def _capture_skill_frames_during_scrollbar_drag(
     return drag
 
 
-def _complete_scan_to_bottom(skill_shortlist, start_index, debug_session_dir=None):
+def _complete_scan_to_bottom(skill_shortlist, start_index, normalized_shortlist=None, debug_session_dir=None):
     """Force one or more bottom-edge captures when the main drag stops early."""
+    normalized_shortlist = tuple(normalized_shortlist or _normalize_skill_shortlist(skill_shortlist))
     extra_frames = []
     completion = {
         "attempted": False,
@@ -874,6 +1000,7 @@ def _complete_scan_to_bottom(skill_shortlist, start_index, debug_session_dir=Non
             "capture_elapsed": 0.0,
             "screenshot": screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
             "final": True,
         })
         if debug_session_dir is not None:
@@ -1030,6 +1157,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
     if target_skill and target_skill not in skill_shortlist:
         skill_shortlist = [target_skill] + skill_shortlist
     flow["skill_shortlist"] = skill_shortlist
+    normalized_shortlist = _normalize_skill_shortlist(skill_shortlist)
 
     if not skill_shortlist:
         flow["reason"] = "no_skill_shortlist_configured"
@@ -1078,6 +1206,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
             "capture_elapsed": 0.0,
             "screenshot": initial_screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
         })
         if debug_session_dir is not None:
             _save_skill_runtime_debug_frame(
@@ -1102,6 +1231,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
             drag_result = _capture_skill_frames_during_scrollbar_drag(
                 scrollbar,
                 skill_shortlist,
+                normalized_shortlist=normalized_shortlist,
                 debug_session_dir=debug_session_dir,
                 live_index=live_index,
             )
@@ -1114,6 +1244,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
                 info("Skill scanner: drag ended before bottom detection, forcing bottom completion...")
                 extra_frames, bottom_completion = _complete_scan_to_bottom(
                     skill_shortlist,
+                    normalized_shortlist=normalized_shortlist,
                     start_index=max(1, len(live_index.get_frames())),
                     debug_session_dir=debug_session_dir,
                 )
@@ -1160,6 +1291,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
             skill_shortlist,
             best_candidate,
             t_flow,
+            normalized_shortlist=normalized_shortlist,
         )
         flow["seekback_result"] = seek_result
         flow["reacquire_result"] = reacquire_result
@@ -1276,7 +1408,7 @@ def _click_increment_for_match(target_match, dry_run):
     }
 
 
-def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow):
+def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow, normalized_shortlist=None):
     """Seek back to an indexed candidate and reacquire it live.
 
     Bias slightly above the indexed ratio, then search downward first. That
@@ -1298,6 +1430,7 @@ def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow)
             "capture_elapsed": 0.0,
             "screenshot": reacquire_screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
         })
         reacquire_match = _find_best_target_match(reacquire_frame, target_skill)
         reacquire_result = _build_reacquire_result(reacquire_frame, reacquire_match)
@@ -1325,6 +1458,7 @@ def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow)
         "capture_elapsed": 0.0,
         "screenshot": reacquire_screenshot,
         "skill_shortlist": skill_shortlist,
+        "normalized_shortlist": normalized_shortlist,
     })
     reacquire_match = _find_best_target_match(reacquire_frame, target_skill)
     nudge_attempts = []
@@ -1353,6 +1487,7 @@ def _reacquire_skill_candidate(target_skill, skill_shortlist, candidate, t_flow)
             "capture_elapsed": 0.0,
             "screenshot": screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
         })
         match = _find_best_target_match(frame, target_skill)
         nudge_attempts.append({
@@ -1407,7 +1542,7 @@ def _find_best_target_match(frame, target_skill):
 # Seek-back nudge for reacquisition
 # ---------------------------------------------------------------------------
 
-def _nudge_and_reacquire(target_skill, skill_shortlist, flow, t_flow):
+def _nudge_and_reacquire(target_skill, skill_shortlist, flow, t_flow, normalized_shortlist=None):
     """Try small scrollbar nudges up/down to reacquire a target after seek-back."""
     for nudge_direction, nudge_delta in [("up", -0.03), ("down", 0.03), ("up2", -0.06)]:
         current_sb = inspect_skill_scrollbar()
@@ -1425,6 +1560,7 @@ def _nudge_and_reacquire(target_skill, skill_shortlist, flow, t_flow):
             "capture_elapsed": 0.0,
             "screenshot": screenshot,
             "skill_shortlist": skill_shortlist,
+            "normalized_shortlist": normalized_shortlist,
         })
         match = _find_best_target_match(frame, target_skill)
         if match and match.get("increment_match"):
@@ -1520,6 +1656,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
         return flow
 
     skill_shortlist = list(ordered_targets)
+    normalized_shortlist = _normalize_skill_shortlist(skill_shortlist)
     t_flow = _time()
     debug_session_dir = (
         _ensure_skill_runtime_debug_dir(
@@ -1571,6 +1708,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
             drag_result = _capture_skill_frames_during_scrollbar_drag(
                 scrollbar,
                 skill_shortlist,
+                normalized_shortlist=normalized_shortlist,
                 drag_duration=6.0,
                 frame_interval=0.22,
                 debug_session_dir=debug_session_dir,
@@ -1584,6 +1722,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
             if drag_result.get("stop_reason") != "scrollbar_bottom_reached":
                 extra_frames, bottom_completion = _complete_scan_to_bottom(
                     skill_shortlist,
+                    normalized_shortlist=normalized_shortlist,
                     start_index=max(1, len(live_index.get_frames())),
                     debug_session_dir=debug_session_dir,
                 )
@@ -1651,6 +1790,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                 skill_shortlist,
                 candidate,
                 t_flow,
+                normalized_shortlist=normalized_shortlist,
             )
             entry["seekback_result"] = seek_result
             entry["reacquire_result"] = reacquire_result
@@ -1794,7 +1934,7 @@ def _open_skills_page():
     t_click = _time()
     clicked = device_action.locate_and_click(
         _SKILLS_BTN_TEMPLATE,
-        min_search_time=get_secs(2),
+        min_search_time=get_secs(1),
         region_ltrb=constants.SCREEN_BOTTOM_BBOX,
     )
     result["timing"]["click"] = round(_time() - t_click, 4)
@@ -1833,7 +1973,7 @@ def _close_skills_page():
     t_click = _time()
     clicked = device_action.locate_and_click(
         _BACK_BTN_TEMPLATE,
-        min_search_time=get_secs(2),
+        min_search_time=get_secs(1),
         region_ltrb=constants.SCREEN_BOTTOM_BBOX,
     )
     result["timing"]["click_back"] = round(_time() - t_click, 4)
@@ -1916,7 +2056,7 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
     enable_debug_frames = bool(trigger == "manual_console") if save_debug_frames is None else bool(save_debug_frames)
 
     # Gate: is auto-buy enabled?
-    if not getattr(config, "IS_AUTO_BUY_SKILL", False) and trigger != "manual_console":
+    if not bot.get_skill_auto_buy_enabled() and trigger != "manual_console":
         flow["skipped"] = True
         flow["reason"] = "auto_buy_skill_disabled"
         flow["timing_total"] = round(_time() - t_total, 3)
