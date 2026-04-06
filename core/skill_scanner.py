@@ -63,6 +63,11 @@ _INCREMENT_FALLBACK_Y_TOLERANCE = 90
 _INCREMENT_TEMPLATE = "assets/buttons/skill_increment.png"
 _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
 
+# "Obtained" badge detection — used to suppress increment pairing for already-learned skills.
+_OBTAINED_TEMPLATE = "assets/custom/skill_obtained.png"
+_OBTAINED_MATCH_THRESHOLD = 0.85
+_OBTAINED_Y_TOLERANCE = 55  # Similar to increment Y tolerance
+
 # Confirm detection.
 _CONFIRM_TEMPLATE = "assets/buttons/confirm_btn.png"
 _CONFIRM_THRESHOLD = 0.8
@@ -586,7 +591,10 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
                 Levenshtein.ratio(normalized, skill_normalized),
                 Levenshtein.ratio(normalized_compact, skill_compact),
             )
-            if skill_normalized in normalized or normalized in skill_normalized:
+            shorter_len = min(len(normalized), len(skill_normalized))
+            longer_len = max(len(normalized), len(skill_normalized))
+            if ((skill_normalized in normalized or normalized in skill_normalized)
+                    and shorter_len >= max(6, int(longer_len * 0.55))):
                 score = max(score, 0.96)
             if skill_tokens:
                 shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
@@ -666,6 +674,41 @@ def _detect_increment_buttons(screenshot):
         )
         all_matches.extend(matches)
     return device_action.deduplicate_boxes(all_matches)
+
+
+def _detect_obtained_badges(screenshot):
+    """Find all 'Obtained' badges in the skill list area.
+
+    Returns matches as (x, y, w, h) relative to SCROLLING_SKILL_SCREEN_BBOX.
+    Used to suppress increment pairing for already-learned skills.
+    """
+    crop = _crop_absolute_bbox(
+        screenshot,
+        constants.SCROLLING_SKILL_SCREEN_BBOX,
+        base_region_ltrb=_skill_ui_region(),
+    )
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return []
+    matches = device_action.match_template(
+        _OBTAINED_TEMPLATE,
+        crop,
+        threshold=_OBTAINED_MATCH_THRESHOLD,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+    return device_action.deduplicate_boxes(matches)
+
+
+def _row_has_obtained_badge(row, obtained_matches):
+    """Check if an OCR row is near an 'Obtained' badge by vertical proximity."""
+    if not obtained_matches:
+        return False
+    row_abs_y = row["abs_y_center"]
+    scroll_bbox_top = int(constants.SCROLLING_SKILL_SCREEN_BBOX[1])
+    for match in obtained_matches:
+        badge_abs_cy = scroll_bbox_top + match[1] + match[3] // 2
+        if abs(badge_abs_cy - row_abs_y) <= _OBTAINED_Y_TOLERANCE:
+            return True
+    return False
 
 
 def _pair_skill_row_to_increment(row, increment_matches):
@@ -755,9 +798,18 @@ def _analyze_skill_frame(frame_payload):
     increment_matches = _detect_increment_buttons(screenshot) if matched_targets else []
     increment_elapsed = _time() - t_increment
 
+    # Detect "Obtained" badges to suppress increment pairing for learned skills.
+    obtained_matches = _detect_obtained_badges(screenshot) if matched_targets else []
+
     # Pair matched targets to increment buttons.
     paired_increment_keys = set()
     for target in matched_targets:
+        if _row_has_obtained_badge(target, obtained_matches):
+            target["increment_match"] = None
+            target["increment_pairing"] = None
+            target["increment_vertical_distance"] = None
+            target["obtained"] = True
+            continue
         inc = _pair_skill_row_to_increment(target, increment_matches)
         if inc:
             target["increment_match"] = list(inc)
@@ -775,7 +827,8 @@ def _analyze_skill_frame(frame_payload):
     # vertical proximity misses even when the button is still visibly tied to
     # that row, but we do not want an unbounded best-guess click.
     if increment_matches:
-        remaining_targets = [target for target in matched_targets if not target.get("increment_match")]
+        remaining_targets = [target for target in matched_targets
+                             if not target.get("increment_match") and not target.get("obtained")]
         remaining_increments = [
             match for match in sorted(increment_matches, key=_increment_match_abs_center_y)
             if tuple(int(v) for v in match) not in paired_increment_keys
@@ -1400,6 +1453,13 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
              f"(ratio={best_candidate['scrollbar_ratio']}, "
              f"score={best_candidate['row']['match_score']}, "
              f"has_inc={best_candidate['row'].get('increment_match') is not None})")
+
+        # Skip reacquire if scan determined this skill has an "Obtained" badge.
+        if best_candidate["row"].get("obtained") and not _match_has_safe_increment(best_candidate["row"]):
+            flow["reason"] = "target_obtained_no_increment"
+            flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done)
+            info("Skill scanner: target has Obtained badge, no increment button available.")
+            return flow
 
         # --- Step 6: Seek back near saved scrollbar ratio ---
         t_seekback = _time()
@@ -2194,6 +2254,13 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                 }
             else:
                 entry["reason"] = "target_not_found_in_any_frame"
+                flow["target_results"].append(entry)
+                continue
+
+            # Skip reacquire+nudge if the scan already determined this skill
+            # has an "Obtained" badge (no increment button exists).
+            if candidate_row.get("obtained") and not _match_has_safe_increment(candidate_row):
+                entry["reason"] = "target_obtained_no_increment"
                 flow["target_results"].append(entry)
                 continue
 

@@ -1722,7 +1722,7 @@ def _planned_clicks_for_action(action):
         _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
       ]
       return clicks
-    clicks = shop_clicks + pre_action_clicks + [
+    clicks = skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         "Check consecutive-race warning",
@@ -3662,6 +3662,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "skill_auto_buy_skill_enabled": bot.get_skill_auto_buy_enabled(),
     "skill_purchase_flow": state_obj.get("skill_purchase_flow"),
     "skill_purchase_scan": state_obj.get("skill_purchase_scan"),
+    "skill_purchase_plan": state_obj.get("skill_purchase_plan"),
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")

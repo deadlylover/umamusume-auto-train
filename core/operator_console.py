@@ -1414,6 +1414,9 @@ class OperatorConsole:
     lines = []
     skill_flow = state_summary.get("skill_purchase_flow") or {}
     skill_scan = state_summary.get("skill_purchase_scan") or {}
+    skill_plan = state_summary.get("skill_purchase_plan") or {}
+    budget_plan = skill_plan.get("budget_plan") or {}
+    plan_by_target = budget_plan.get("plan_by_target") or {}
     current_sp = skill_check.get("current_sp")
     threshold_sp = skill_check.get("threshold_sp")
     auto_buy_enabled = skill_check.get("auto_buy_skill_enabled")
@@ -1441,19 +1444,40 @@ class OperatorConsole:
         lines.append(f"  Scan: {skill_flow.get('reason')}")
     target_results = list(skill_scan.get("target_results") or [])
     if target_results:
-      found = []
-      missing = []
+      detected = []
+      actionable = []
+      unavailable = []
       for entry in target_results:
         candidate = entry.get("candidate") or {}
-        match_name = candidate.get("match_name") or entry.get("target_skill")
+        target_skill = entry.get("target_skill") or "unknown"
+        match_name = candidate.get("match_name") or target_skill
+        budget_entry = plan_by_target.get(target_skill) or {}
+        increment_click_result = entry.get("increment_click_result") or {}
         if candidate:
-          found.append(match_name)
+          detected.append(match_name)
+          if increment_click_result.get("target"):
+            actionable.append(match_name)
+          elif budget_entry.get("available"):
+            actionable.append(match_name)
+          else:
+            unavailable.append(match_name)
         else:
-          missing.append(entry.get("target_skill") or "unknown")
-      if found:
-        lines.append(f"  Available: {', '.join(found)}")
-      if missing:
-        lines.append(f"  Missing: {', '.join(missing)}")
+          unavailable.append(target_skill)
+      if detected:
+        lines.append(f"  Detected: {', '.join(detected)}")
+      if actionable:
+        lines.append(f"  Actionable: {', '.join(actionable)}")
+      if unavailable:
+        lines.append(f"  Non-actionable: {', '.join(unavailable)}")
+    selected_targets = list(budget_plan.get("selected_targets") or [])
+    if selected_targets:
+      selected_entries = []
+      for skill_name in selected_targets:
+        plan_entry = plan_by_target.get(skill_name) or {}
+        estimated_cost = plan_entry.get("estimated_cost")
+        cost_suffix = f" ({estimated_cost})" if estimated_cost is not None else ""
+        selected_entries.append(f"{skill_name}{cost_suffix}")
+      lines.append(f"  Queued: {', '.join(selected_entries)}")
     if last_review is not None or last_purchase is not None:
       lines.append(
         f"  Last: review {last_review if last_review is not None else '-'}"
