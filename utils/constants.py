@@ -262,6 +262,11 @@ SKILL_INCREMENT_TEMPLATES = {
   "trackblazer": "assets/trackblazer/skill_increment_tb.png",
 }
 
+TRACKBLAZER_SKILL_UI_TEMPLATES = {
+  "skills_learned": "assets/trackblazer/Skills_learned.png",
+  "skills_learned_close": "assets/trackblazer/skills_learned_close.png",
+}
+
 # Trackblazer item categories for decision logic.
 TRACKBLAZER_ITEM_CATEGORIES = {
   "aroma_diffuser": "mood",

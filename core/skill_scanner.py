@@ -59,6 +59,7 @@ _FUZZY_MATCH_MIN_LENGTH = 4       # Minimum skill name length for fuzzy
 # Increment button pairing.
 _INCREMENT_MATCH_THRESHOLD = 0.65
 _INCREMENT_Y_TOLERANCE = 50       # Looser than shop — skill cards are taller
+_INCREMENT_FALLBACK_Y_TOLERANCE = 90
 _INCREMENT_TEMPLATE = "assets/buttons/skill_increment.png"
 _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
 
@@ -71,6 +72,8 @@ _LEARN_TEMPLATE = "assets/buttons/learn_btn.png"
 _LEARN_THRESHOLD = 0.8
 _CLOSE_TEMPLATE = "assets/buttons/close_btn.png"
 _CLOSE_THRESHOLD = 0.8
+_TRACKBLAZER_SKILLS_LEARNED_THRESHOLD = 0.8
+_TRACKBLAZER_SKILLS_LEARNED_CLOSE_THRESHOLD = 0.8
 _LEARN_SETTLE_SECONDS = 0.5
 _CLOSE_SETTLE_SECONDS_POST_LEARN = 0.5
 
@@ -98,6 +101,15 @@ _SKILL_MATCH_CACHE_LOCK = threading.Lock()
 # ---------------------------------------------------------------------------
 # Screenshot helpers
 # ---------------------------------------------------------------------------
+
+def _smoothed_lane_scores(col_mean, window_size=5):
+    """Smooth column darkness without introducing zero-padded edge bias."""
+    if col_mean.shape[0] < window_size:
+        return col_mean
+    pad = window_size // 2
+    padded = np.pad(col_mean, pad, mode="edge")
+    kernel = np.ones(window_size, dtype=np.float32) / float(window_size)
+    return np.convolve(padded, kernel, mode="valid")
 
 def _skill_ui_region():
     """The base screenshot region for skill page captures."""
@@ -212,11 +224,7 @@ def inspect_skill_scrollbar(screenshot=None):
 
     # Find the darkest vertical lane (the scrollbar track).
     col_mean = gray.mean(axis=0).astype(np.float32, copy=False)
-    if col_mean.shape[0] >= 5:
-        kernel = np.ones(5, dtype=np.float32) / 5.0
-        lane_scores = np.convolve(col_mean, kernel, mode="same")
-    else:
-        lane_scores = col_mean
+    lane_scores = _smoothed_lane_scores(col_mean, window_size=5)
     track_center_x = int(np.argmin(lane_scores))
     left = max(0, track_center_x - _SCROLLBAR_WINDOW_HALF_WIDTH)
     right = min(gray.shape[1], track_center_x + _SCROLLBAR_WINDOW_HALF_WIDTH + 1)
@@ -535,6 +543,12 @@ def _normalize_skill_shortlist(skill_shortlist):
     return cached
 
 
+def _shared_skill_tokens(row_tokens, skill_tokens):
+    if not row_tokens or not skill_tokens:
+        return 0
+    return len(row_tokens & skill_tokens)
+
+
 # ---------------------------------------------------------------------------
 # Skill matching against shortlist
 # ---------------------------------------------------------------------------
@@ -575,10 +589,14 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
             if skill_normalized in normalized or normalized in skill_normalized:
                 score = max(score, 0.96)
             if skill_tokens:
-                token_overlap = len(row_tokens & skill_tokens) / max(1, len(skill_tokens))
-                if token_overlap >= 0.66:
+                shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
+                token_overlap = shared_tokens / max(1, len(skill_tokens))
+                # Do not promote a match on a single shared generic token.
+                # That let rows like "Straightaway Spurt" clear the fuzzy
+                # threshold for "Straightaway Recovery".
+                if shared_tokens >= 2 and token_overlap >= 0.66:
                     score = max(score, 0.78 + (token_overlap * 0.18))
-                elif token_overlap >= 0.5:
+                elif shared_tokens >= 2 and token_overlap >= 0.5:
                     score = max(score, 0.72 + (token_overlap * 0.12))
             if score > best_score:
                 best_score = score
@@ -677,6 +695,36 @@ def _increment_match_abs_center_y(match):
     return scroll_bbox_top + int(match[1]) + int(match[3]) // 2
 
 
+def _increment_match_vertical_distance(row, match):
+    """Return the absolute vertical distance between a row and increment button."""
+    if not row or not match:
+        return None
+    try:
+        row_abs_y = float(row.get("abs_y_center"))
+    except (TypeError, ValueError):
+        return None
+    return abs(float(_increment_match_abs_center_y(match)) - row_abs_y)
+
+
+def _match_has_safe_increment(target_match):
+    """Whether the matched row has a safe increment pairing for live clicks."""
+    if not isinstance(target_match, dict):
+        return False
+    inc = target_match.get("increment_match")
+    if not inc:
+        return False
+    pairing = target_match.get("increment_pairing")
+    distance = target_match.get("increment_vertical_distance")
+    if pairing == "vertical":
+        return True
+    if pairing == "fallback_nearest":
+        try:
+            return float(distance) <= float(_INCREMENT_FALLBACK_Y_TOLERANCE)
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Per-frame analysis (used by the buffered pipeline)
 # ---------------------------------------------------------------------------
@@ -713,23 +761,44 @@ def _analyze_skill_frame(frame_payload):
         inc = _pair_skill_row_to_increment(target, increment_matches)
         if inc:
             target["increment_match"] = list(inc)
+            target["increment_pairing"] = "vertical"
+            target["increment_vertical_distance"] = round(_increment_match_vertical_distance(target, inc) or 0.0, 1)
             paired_increment_keys.add(tuple(int(v) for v in inc))
         else:
             target["increment_match"] = None
+            target["increment_pairing"] = None
+            target["increment_vertical_distance"] = None
 
     # Fallback: if a matched row still has no increment pair, assign the
-    # remaining buttons in top-to-bottom order. The skill cards can offset the
-    # button far enough from the OCR title that strict vertical proximity misses
-    # even when the button is still visibly tied to that row.
+    # nearest remaining button when it is still plausibly aligned. The skill
+    # cards can offset the button far enough from the OCR title that strict
+    # vertical proximity misses even when the button is still visibly tied to
+    # that row, but we do not want an unbounded best-guess click.
     if increment_matches:
         remaining_targets = [target for target in matched_targets if not target.get("increment_match")]
         remaining_increments = [
             match for match in sorted(increment_matches, key=_increment_match_abs_center_y)
             if tuple(int(v) for v in match) not in paired_increment_keys
         ]
-        for target, inc in zip(sorted(remaining_targets, key=lambda item: item["abs_y_center"]), remaining_increments):
+        while remaining_targets and remaining_increments:
+            best_pair = None
+            for target in remaining_targets:
+                for inc in remaining_increments:
+                    distance = _increment_match_vertical_distance(target, inc)
+                    if distance is None:
+                        continue
+                    candidate = (float(distance), target, inc)
+                    if best_pair is None or candidate[0] < best_pair[0]:
+                        best_pair = candidate
+            if best_pair is None or best_pair[0] > _INCREMENT_FALLBACK_Y_TOLERANCE:
+                break
+            distance, target, inc = best_pair
             target["increment_match"] = list(inc)
+            target["increment_pairing"] = "fallback_nearest"
+            target["increment_vertical_distance"] = round(distance, 1)
             paired_increment_keys.add(tuple(int(v) for v in inc))
+            remaining_targets = [item for item in remaining_targets if item is not target]
+            remaining_increments = [item for item in remaining_increments if item != inc]
 
     # Scrollbar state.
     t_scrollbar = _time()
@@ -1079,6 +1148,54 @@ def _click_learn_and_close():
     }
     t0 = _time()
 
+    if (constants.SCENARIO_NAME or "") in ("mant", "trackblazer"):
+        learned_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned")
+        close_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned_close")
+        deadline = _time() + get_secs(2)
+        learned_detected = False
+        close_clicked = False
+        t_popup = _time()
+        while _time() < deadline:
+            screenshot = _capture_live_skill_screenshot()
+            if learned_template:
+                learned_matches = device_action.match_template(
+                    learned_template,
+                    screenshot,
+                    threshold=_TRACKBLAZER_SKILLS_LEARNED_THRESHOLD,
+                    template_scaling=_INVERSE_GLOBAL_SCALE,
+                )
+                if learned_matches:
+                    learned_detected = True
+            if close_template:
+                close_matches = device_action.match_template(
+                    close_template,
+                    screenshot,
+                    threshold=_TRACKBLAZER_SKILLS_LEARNED_CLOSE_THRESHOLD,
+                    template_scaling=_INVERSE_GLOBAL_SCALE,
+                )
+                if close_matches:
+                    ui_left, ui_top, _, _ = [int(v) for v in _skill_ui_region()]
+                    match = close_matches[0]
+                    click_x = ui_left + match[0] + match[2] // 2
+                    click_y = ui_top + match[1] + match[3] // 2
+                    info(f"[SKILL] Trackblazer learned popup close at ({click_x}, {click_y})...")
+                    device_action.click(target=(click_x, click_y), duration=0.15)
+                    close_clicked = True
+                    break
+            sleep(0.15)
+        result["learn_clicked"] = bool(learned_detected or close_clicked)
+        result["close_clicked"] = bool(close_clicked)
+        result["timing"]["learned_popup"] = round(_time() - t_popup, 4)
+        if close_clicked:
+            sleep(_CLOSE_SETTLE_SECONDS_POST_LEARN)
+            result["timing"]["close"] = round(_CLOSE_SETTLE_SECONDS_POST_LEARN, 4)
+        else:
+            warning("[SKILL] Trackblazer learned popup close button not found after confirm; falling back to generic learn/close flow.")
+            result["timing"]["close"] = 0.0
+        result["timing"]["total"] = round(_time() - t0, 4)
+        if close_clicked:
+            return result
+
     # Click learn button.
     learn_clicked = device_action.locate_and_click(
         _LEARN_TEMPLATE,
@@ -1314,6 +1431,12 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
             info("Skill scanner: target reacquired but no increment button paired live.")
             _log_scan_debug(flow, live_index.get_frames())
             return flow
+        if not _match_has_safe_increment(reacquire_match):
+            flow["reason"] = "target_reacquired_but_increment_pair_unsafe"
+            flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
+            info("Skill scanner: target reacquired but increment pairing was not safe enough to click.")
+            _log_scan_debug(flow, live_index.get_frames())
+            return flow
 
         info(f"Skill scanner: target reacquired! score={reacquire_match['match_score']}, "
              f"increment paired.")
@@ -1351,9 +1474,11 @@ def _choose_best_candidate(all_frames, target_skill):
 
     # Only consider candidates that have an increment button paired.
     # No increment means the skill is already learned / not actionable.
-    actionable = [c for c in candidates if c["row"].get("increment_match")]
+    actionable = [c for c in candidates if _match_has_safe_increment(c["row"])]
     if not actionable:
-        return None
+        actionable = [c for c in candidates if c["row"].get("increment_match")]
+    if not actionable:
+        return max(candidates, key=lambda c: c["row"].get("match_score", 0))
 
     # Sort by match score descending.
     actionable.sort(key=lambda c: c["row"].get("match_score", 0), reverse=True)
@@ -1368,6 +1493,11 @@ def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):
         "matched_targets_count": len(matched_targets),
         "target_reacquired": match is not None,
         "target_has_increment": bool(match and match.get("increment_match")),
+        "target_increment_safe": bool(_match_has_safe_increment(match)),
+        "match_name": (match or {}).get("match_name"),
+        "match_score": (match or {}).get("match_score"),
+        "increment_pairing": (match or {}).get("increment_pairing"),
+        "increment_vertical_distance": (match or {}).get("increment_vertical_distance"),
         "scrollbar_ratio": scrollbar.get("position_ratio"),
         "seek_ratio": seek_ratio,
         "nudge_attempts": list(nudge_attempts or []),
@@ -1384,6 +1514,16 @@ def _click_increment_for_match(target_match, dry_run):
             "target": None,
             "increment_match": None,
         }
+    if not _match_has_safe_increment(target_match):
+        return {
+            "clicked": False,
+            "dry_run": bool(dry_run),
+            "target": None,
+            "increment_match": list(inc),
+            "reason": "unsafe_increment_pairing",
+            "increment_pairing": target_match.get("increment_pairing"),
+            "increment_vertical_distance": target_match.get("increment_vertical_distance"),
+        }
     scroll_left, scroll_top, _, _ = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
     click_x = scroll_left + inc[0] + inc[2] // 2
     click_y = scroll_top + inc[1] + inc[3] // 2
@@ -1395,6 +1535,8 @@ def _click_increment_for_match(target_match, dry_run):
             "dry_run": True,
             "target": [click_x, click_y],
             "increment_match": list(inc),
+            "increment_pairing": target_match.get("increment_pairing"),
+            "increment_vertical_distance": target_match.get("increment_vertical_distance"),
         }
     info(f"Skill scanner: clicking increment for '{target_match['match_name']}' "
          f"at ({click_x}, {click_y})...")
@@ -1405,6 +1547,8 @@ def _click_increment_for_match(target_match, dry_run):
         "dry_run": False,
         "target": [click_x, click_y],
         "increment_match": list(inc),
+        "increment_pairing": target_match.get("increment_pairing"),
+        "increment_vertical_distance": target_match.get("increment_vertical_distance"),
     }
 
 
@@ -1586,6 +1730,10 @@ def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow,
         return flow
 
     flow["increment_click_result"] = _click_increment_for_match(target_match, dry_run)
+    if not flow["increment_click_result"].get("target"):
+        flow["reason"] = flow["increment_click_result"].get("reason") or "increment_click_not_ready"
+        flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
+        return flow
 
     # Detect confirm button.
     info("Skill scanner: checking for confirm button...")
@@ -1621,8 +1769,245 @@ def _do_increment_and_confirm(flow, target_match, screenshot, dry_run, t_flow,
     return flow
 
 
+def _build_scan_entry(target_skill, source=None):
+    return {
+        "target_skill": target_skill,
+        "source": source,
+        "candidate": None,
+        "seekback_result": None,
+        "reacquire_result": None,
+        "increment_click_result": None,
+        "confirm_detect_result": None,
+        "confirm_available": False,
+        "reason": "",
+    }
+
+
+def _build_hint_candidate(target_skill, hint):
+    """Build a synthetic candidate payload from a prior preview scan hint."""
+    if not isinstance(hint, dict):
+        return None
+    candidate = hint.get("candidate") or {}
+    reacquire_result = hint.get("reacquire_result") or {}
+    ratio = reacquire_result.get("scrollbar_ratio")
+    if ratio is None:
+        ratio = candidate.get("scrollbar_ratio")
+    if ratio is None:
+        return None
+    frame_index = candidate.get("frame_index")
+    if frame_index is None:
+        frame_index = 0
+    match_name = candidate.get("match_name") or reacquire_result.get("match_name") or target_skill
+    match_score = candidate.get("match_score")
+    if match_score is None:
+        match_score = reacquire_result.get("match_score")
+    increment_pairing = reacquire_result.get("increment_pairing")
+    if increment_pairing is None:
+        increment_pairing = candidate.get("increment_pairing")
+    increment_vertical_distance = reacquire_result.get("increment_vertical_distance")
+    if increment_vertical_distance is None:
+        increment_vertical_distance = candidate.get("increment_vertical_distance")
+    return {
+        "frame_index": frame_index,
+        "scrollbar_ratio": ratio,
+        "row": {
+            "match_name": match_name,
+            "match_score": match_score,
+            "increment_pairing": increment_pairing,
+            "increment_vertical_distance": increment_vertical_distance,
+        },
+    }
+
+
+def _normalize_target_hints(target_hints):
+    """Index preview target_results by normalized target skill."""
+    normalized = {}
+    for hint in (target_hints or []):
+        if not isinstance(hint, dict):
+            continue
+        target_skill = hint.get("target_skill")
+        target_key = _normalize_skill_text(target_skill or "")
+        if not target_key or target_key in normalized:
+            continue
+        normalized[target_key] = hint
+    return normalized
+
+
+def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized_shortlist, dry_run, t_flow):
+    """Try to reacquire targets directly from preview hints before full scanning."""
+    flow = {
+        "attempted": False,
+        "reason": "",
+        "resolved": 0,
+        "unresolved": list(target_skills or []),
+        "ordered_targets": [],
+    }
+    ordered_targets = list(target_skills or [])
+    if not ordered_targets:
+        flow["reason"] = "no_target_skills_configured"
+        return [], [], flow
+
+    hint_map = _normalize_target_hints(target_hints)
+    hinted_targets = []
+    unresolved = []
+    for skill_name in ordered_targets:
+        hint = hint_map.get(_normalize_skill_text(skill_name or ""))
+        candidate = _build_hint_candidate(skill_name, hint)
+        if candidate is None:
+            unresolved.append(skill_name)
+            continue
+        hinted_targets.append((skill_name, hint, candidate))
+
+    if not hinted_targets:
+        flow["reason"] = "no_reusable_hints"
+        return [], ordered_targets, flow
+
+    flow["attempted"] = True
+    current_sb = inspect_skill_scrollbar()
+    if not current_sb.get("detected"):
+        flow["reason"] = "scrollbar_not_detected"
+        return [], ordered_targets, flow
+    if not current_sb.get("is_at_top"):
+        _drag_skill_scrollbar(current_sb, edge="top")
+        sleep(_SCROLLBAR_SEEKBACK_SETTLE_SECONDS)
+
+    hinted_targets.sort(key=lambda item: float(item[2].get("scrollbar_ratio") or 0.0))
+    flow["ordered_targets"] = [
+        {
+            "target_skill": skill_name,
+            "scrollbar_ratio": candidate.get("scrollbar_ratio"),
+        }
+        for skill_name, _hint, candidate in hinted_targets
+    ]
+
+    results = []
+    for skill_name, hint, candidate in hinted_targets:
+        entry = _build_scan_entry(skill_name, source="preview_hint")
+        hint_candidate_row = candidate.get("row") or {}
+        entry["candidate"] = {
+            "frame_index": candidate.get("frame_index"),
+            "scrollbar_ratio": candidate.get("scrollbar_ratio"),
+            "match_name": hint_candidate_row.get("match_name"),
+            "match_score": hint_candidate_row.get("match_score"),
+            "increment_pairing": hint_candidate_row.get("increment_pairing"),
+            "increment_vertical_distance": hint_candidate_row.get("increment_vertical_distance"),
+            "increment_ready": bool(_match_has_safe_increment(hint_candidate_row)),
+        }
+        entry["hint"] = {
+            "candidate": hint.get("candidate"),
+            "reacquire_result": hint.get("reacquire_result"),
+        }
+
+        reacquire_match, _reacquire_screenshot, seek_result, reacquire_result = _reacquire_skill_candidate(
+            skill_name,
+            skill_shortlist,
+            candidate,
+            t_flow,
+            normalized_shortlist=normalized_shortlist,
+        )
+        entry["seekback_result"] = seek_result
+        entry["reacquire_result"] = reacquire_result
+        if not reacquire_match:
+            entry["reason"] = "preview_hint_reacquire_failed"
+            unresolved.append(skill_name)
+            results.append(entry)
+            continue
+        if not reacquire_match.get("increment_match"):
+            entry["reason"] = "preview_hint_no_increment_paired"
+            unresolved.append(skill_name)
+            results.append(entry)
+            continue
+        if not _match_has_safe_increment(reacquire_match):
+            entry["reason"] = "preview_hint_increment_pair_unsafe"
+            unresolved.append(skill_name)
+            results.append(entry)
+            continue
+
+        entry["increment_click_result"] = _click_increment_for_match(reacquire_match, dry_run)
+        if entry["increment_click_result"].get("target"):
+            flow["resolved"] += 1
+        else:
+            entry["reason"] = entry["increment_click_result"].get("reason") or "preview_hint_increment_click_not_ready"
+            unresolved.append(skill_name)
+        results.append(entry)
+
+    flow["unresolved"] = list(unresolved)
+    flow["reason"] = (
+        "preview_hints_complete"
+        if not unresolved
+        else ("preview_hints_partial" if flow["resolved"] else "preview_hints_failed")
+    )
+    return results, unresolved, flow
+
+
+def _finalize_multi_increment_results(target_results, dry_run):
+    """Finalize a queued multi-skill purchase once all increments are selected."""
+    summary = {
+        "confirm_detect_result": None,
+        "confirm_available": False,
+        "confirm_click_result": None,
+        "learn_close_result": None,
+        "queued_targets": [],
+        "reason": "",
+    }
+    queued_entries = [
+        entry for entry in (target_results or [])
+        if (entry.get("increment_click_result") or {}).get("target")
+    ]
+    summary["queued_targets"] = [entry.get("target_skill") for entry in queued_entries if entry.get("target_skill")]
+    if not queued_entries:
+        summary["reason"] = "no_targets_incremented"
+        return summary
+
+    confirm = _detect_confirm_button()
+    summary["confirm_detect_result"] = confirm
+    summary["confirm_available"] = bool(confirm.get("detected"))
+    for entry in queued_entries:
+        entry["confirm_detect_result"] = confirm
+        entry["confirm_available"] = bool(confirm.get("detected"))
+
+    if dry_run:
+        reason = "dry_run_confirm_detected" if confirm.get("detected") else "dry_run_complete"
+        for entry in queued_entries:
+            if not entry.get("reason"):
+                entry["reason"] = reason
+        summary["reason"] = reason
+        return summary
+
+    if not confirm.get("detected"):
+        for entry in queued_entries:
+            if not entry.get("reason"):
+                entry["reason"] = "increment_clicked_confirm_not_detected"
+        summary["reason"] = "increment_clicked_confirm_not_detected"
+        return summary
+
+    summary["confirm_click_result"] = _click_confirm_button(confirm)
+    learn_close = _click_learn_and_close()
+    summary["learn_close_result"] = learn_close
+    for entry in queued_entries:
+        entry["confirm_click_result"] = summary["confirm_click_result"]
+        entry["learn_close_result"] = learn_close
+    if learn_close.get("learn_clicked") and learn_close.get("close_clicked"):
+        for entry in queued_entries:
+            if not entry.get("reason"):
+                entry["reason"] = "purchase_finalized"
+        summary["reason"] = "purchase_finalized"
+    elif learn_close.get("learn_clicked"):
+        for entry in queued_entries:
+            if not entry.get("reason"):
+                entry["reason"] = "purchase_learned_close_failed"
+        summary["reason"] = "purchase_learned_close_failed"
+    else:
+        for entry in queued_entries:
+            if not entry.get("reason"):
+                entry["reason"] = "confirm_clicked_learn_failed"
+        summary["reason"] = "confirm_clicked_learn_failed"
+    return summary
+
+
 def scan_and_increment_skills(target_skills, dry_run=False,
-                              save_debug_frames=False, debug_session_name=None):
+                              save_debug_frames=False, debug_session_name=None,
+                              target_hints=None):
     """Scan once, then seek back and increment multiple skills in top-to-bottom order.
 
     Post-drag waterfall execution: after one uninterrupted drag scan, targets
@@ -1640,6 +2025,9 @@ def scan_and_increment_skills(target_skills, dry_run=False,
 
     flow = {
         "target_skills": ordered_targets,
+        "target_hints_used": False,
+        "shortcut_result": None,
+        "finalize_result": None,
         "scan_timing": {},
         "scrollbar_initial": None,
         "scrollbar_reset": None,
@@ -1668,6 +2056,35 @@ def scan_and_increment_skills(target_skills, dry_run=False,
     live_index = _LiveAnalysisIndex()
 
     try:
+        if target_hints:
+            hint_results, unresolved_targets, shortcut_result = _queue_hint_targets(
+                ordered_targets,
+                target_hints,
+                skill_shortlist,
+                normalized_shortlist,
+                dry_run,
+                t_flow,
+            )
+            flow["target_hints_used"] = bool((shortcut_result or {}).get("attempted"))
+            flow["shortcut_result"] = shortcut_result
+            flow["target_results"].extend(hint_results)
+        else:
+            unresolved_targets = list(ordered_targets)
+
+        if not unresolved_targets:
+            t_scan_done = _time()
+            flow["finalize_result"] = _finalize_multi_increment_results(flow["target_results"], dry_run)
+            flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_scan_done)
+            succeeded = [
+                entry for entry in flow["target_results"]
+                if (entry.get("increment_click_result") or {}).get("target")
+            ]
+            flow["reason"] = (
+                flow["finalize_result"].get("reason")
+                or ("multi_increments_processed" if succeeded else "no_targets_incremented")
+            )
+            return flow
+
         info(f"Skill scanner: detecting scrollbar for multi-target run {ordered_targets}...")
         scrollbar = inspect_skill_scrollbar()
         flow["scrollbar_initial"] = scrollbar
@@ -1740,7 +2157,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
 
         found_candidates = []
         not_found_skills = []
-        for skill_name in ordered_targets:
+        for skill_name in unresolved_targets:
             candidate = live_index.find_best_candidate(skill_name)
             if candidate:
                 found_candidates.append((skill_name, candidate))
@@ -1758,27 +2175,22 @@ def scan_and_increment_skills(target_skills, dry_run=False,
              f"{[(s, round(float((c or {}).get('scrollbar_ratio') or -1), 3)) for s, c in processing_order]}")
 
         for skill_name, candidate in processing_order:
-            entry = {
-                "target_skill": skill_name,
-                "candidate": None,
-                "seekback_result": None,
-                "reacquire_result": None,
-                "increment_click_result": None,
-                "confirm_detect_result": None,
-                "confirm_available": False,
-                "reason": "",
-            }
+            entry = _build_scan_entry(skill_name, source="full_scan")
 
             # If not found yet, wait for more background analysis.
             if candidate is None:
                 candidate = live_index.wait_for_candidate(skill_name, timeout=10.0)
 
             if candidate:
+                candidate_row = candidate.get("row") or {}
                 entry["candidate"] = {
                     "frame_index": candidate.get("frame_index"),
                     "scrollbar_ratio": candidate.get("scrollbar_ratio"),
-                    "match_name": (candidate.get("row") or {}).get("match_name"),
-                    "match_score": (candidate.get("row") or {}).get("match_score"),
+                    "match_name": candidate_row.get("match_name"),
+                    "match_score": candidate_row.get("match_score"),
+                    "increment_pairing": candidate_row.get("increment_pairing"),
+                    "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
+                    "increment_ready": bool(_match_has_safe_increment(candidate_row)),
                 }
             else:
                 entry["reason"] = "target_not_found_in_any_frame"
@@ -1802,34 +2214,25 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                 entry["reason"] = "target_reacquired_but_no_increment_paired"
                 flow["target_results"].append(entry)
                 continue
+            if not _match_has_safe_increment(reacquire_match):
+                entry["reason"] = "target_reacquired_but_increment_pair_unsafe"
+                flow["target_results"].append(entry)
+                continue
 
             entry["increment_click_result"] = _click_increment_for_match(reacquire_match, dry_run)
-            confirm = _detect_confirm_button()
-            entry["confirm_detect_result"] = confirm
-            entry["confirm_available"] = confirm.get("detected", False)
-            if dry_run:
-                entry["reason"] = "dry_run_confirm_detected" if confirm.get("detected") else "dry_run_complete"
-            elif confirm.get("detected"):
-                entry["confirm_click_result"] = _click_confirm_button(confirm)
-                learn_close = _click_learn_and_close()
-                entry["learn_close_result"] = learn_close
-                if learn_close.get("learn_clicked") and learn_close.get("close_clicked"):
-                    info(f"Skill scanner: purchase finalized for '{skill_name}'.")
-                    entry["reason"] = "purchase_finalized"
-                elif learn_close.get("learn_clicked"):
-                    entry["reason"] = "purchase_learned_close_failed"
-                else:
-                    entry["reason"] = "confirm_clicked_learn_failed"
-            else:
-                entry["reason"] = "increment_clicked_confirm_not_detected"
+            if not entry["increment_click_result"].get("target"):
+                entry["reason"] = entry["increment_click_result"].get("reason") or "increment_click_not_ready"
             flow["target_results"].append(entry)
 
+        flow["finalize_result"] = _finalize_multi_increment_results(flow["target_results"], dry_run)
         flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_scan_done)
-        succeeded = [entry for entry in flow["target_results"] if entry.get("increment_click_result")]
+        succeeded = [
+            entry for entry in flow["target_results"]
+            if (entry.get("increment_click_result") or {}).get("target")
+        ]
         flow["reason"] = (
-            "multi_increments_processed"
-            if succeeded
-            else "no_targets_incremented"
+            flow["finalize_result"].get("reason")
+            or ("multi_increments_processed" if succeeded else "no_targets_incremented")
         )
         return flow
     finally:
@@ -2020,7 +2423,8 @@ def _close_skills_page():
 
 def collect_skill_purchase(target_skill=None, skill_shortlist=None,
                            allow_open=True, trigger="automatic", dry_run=True,
-                           save_debug_frames=None, debug_session_name=None):
+                           save_debug_frames=None, debug_session_name=None,
+                           target_hints=None):
     """Full skill purchase flow: open skills page, scan, optionally increment, close.
 
     Returns a dict with:
@@ -2038,6 +2442,7 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         "dry_run": bool(dry_run),
         "target_skill": target_skill,
         "skill_shortlist": skill_shortlist,
+        "target_hints": list(target_hints or []),
         "opened": False,
         "scanned": False,
         "closed": False,
@@ -2096,6 +2501,7 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         dry_run=dry_run,
         save_debug_frames=enable_debug_frames,
         debug_session_name=debug_session_name,
+        target_hints=target_hints,
     )
     flow["timing_scan"] = round(_time() - t0, 3)
     flow["scanned"] = True
@@ -2111,6 +2517,10 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         flow["scan_result"]["drag_result"] = scan_result["drag_result"]
     if scan_result.get("bottom_completion_result"):
         flow["scan_result"]["bottom_completion_result"] = scan_result["bottom_completion_result"]
+    if scan_result.get("shortcut_result"):
+        flow["scan_result"]["shortcut_result"] = scan_result["shortcut_result"]
+    if scan_result.get("finalize_result"):
+        flow["scan_result"]["finalize_result"] = scan_result["finalize_result"]
     result["skill_purchase_scan"] = scan_result
 
     # Step 3: Close skills page (skip if it was already open before we started).

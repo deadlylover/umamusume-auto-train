@@ -14,6 +14,9 @@ import utils.device_action_wrapper as device_action
 import core.config as config
 import core.bot as bot
 
+_TRACKBLAZER_SKILLS_LEARNED_THRESHOLD = 0.8
+_INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+
 previous_action_count = -1
 previous_skill_check_action_count = -1
 previous_selected_race_skill_check_action_count = -1
@@ -193,8 +196,24 @@ def buy_skill(state, action_count, race_check=False):
         info(f"Found skills, shopping list: {shopping_list}")
         device_action.locate_and_click("assets/buttons/confirm_btn.png")
         sleep(0.5)
-        device_action.locate_and_click("assets/buttons/learn_btn.png", min_search_time=get_secs(1))
-        device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(2))
+        if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+          learned_close_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned_close")
+          if learned_close_template:
+            close_clicked = device_action.locate_and_click(
+              learned_close_template,
+              min_search_time=get_secs(2),
+              template_scaling=_INVERSE_GLOBAL_SCALE,
+            )
+            if not close_clicked:
+              warning("[SKILL] Trackblazer learned popup close not found; falling back to generic learn/close flow.")
+              device_action.locate_and_click("assets/buttons/learn_btn.png", min_search_time=get_secs(1))
+              device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(2))
+          else:
+            device_action.locate_and_click("assets/buttons/learn_btn.png", min_search_time=get_secs(1))
+            device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(2))
+        else:
+          device_action.locate_and_click("assets/buttons/learn_btn.png", min_search_time=get_secs(1))
+          device_action.locate_and_click("assets/buttons/close_btn.png", min_search_time=get_secs(2))
         device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
         return
       else:

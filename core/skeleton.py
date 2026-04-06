@@ -1253,6 +1253,298 @@ def _skill_purchase_plan(action):
   return {}
 
 
+def _skill_purchase_has_actionable_targets(scan_result):
+  if not isinstance(scan_result, dict):
+    return False
+  for entry in (scan_result.get("target_results") or []):
+    if not isinstance(entry, dict):
+      continue
+    increment_click_result = entry.get("increment_click_result") or {}
+    if increment_click_result.get("target"):
+      return True
+  return False
+
+
+_SKILL_DEFAULT_COST = 180
+_SKILL_GOLD_PREREQUISITES = {
+  "Professor of Curvature": "Corner Adept ○",
+  "Swinging Maestro": "Corner Recovery ○",
+  "Breath of Fresh Air": "Straightaway Recovery",
+}
+_SKILL_PREREQ_TO_GOLD = {
+  prereq: gold for gold, prereq in _SKILL_GOLD_PREREQUISITES.items()
+}
+
+
+def _normalize_skill_name(value):
+  if value is None:
+    return ""
+  return " ".join(str(value).strip().split())
+
+
+def _build_skill_entry_index(scan_result):
+  indexed = {}
+  if not isinstance(scan_result, dict):
+    return indexed
+  for entry in (scan_result.get("target_results") or []):
+    if not isinstance(entry, dict):
+      continue
+    target_skill = _normalize_skill_name(entry.get("target_skill"))
+    if target_skill and target_skill not in indexed:
+      indexed[target_skill] = entry
+  return indexed
+
+
+def _is_skill_entry_actionable(entry):
+  if not isinstance(entry, dict):
+    return False
+  increment_click_result = entry.get("increment_click_result") or {}
+  return bool(increment_click_result.get("target"))
+
+
+def _estimate_skill_cost(skill_name, available_entries, selected_targets):
+  prerequisite = _SKILL_GOLD_PREREQUISITES.get(skill_name)
+  if not prerequisite:
+    return _SKILL_DEFAULT_COST, None
+  prerequisite_entry = available_entries.get(prerequisite)
+  if prerequisite in selected_targets:
+    return _SKILL_DEFAULT_COST, prerequisite
+  if _is_skill_entry_actionable(prerequisite_entry):
+    return _SKILL_DEFAULT_COST * 2, prerequisite
+  return _SKILL_DEFAULT_COST, prerequisite
+
+
+def _plan_budgeted_skill_targets(context, scan_result=None):
+  shortlist = [_normalize_skill_name(item) for item in list((context or {}).get("shopping_list") or []) if _normalize_skill_name(item)]
+  current_sp = int((context or {}).get("current_sp") or 0)
+  available_entries = _build_skill_entry_index(scan_result)
+  remaining_sp = current_sp
+  selected_targets = []
+  selected_set = set()
+  covered_prereqs = set()
+  plan = {}
+
+  def _entry(skill_name):
+    return available_entries.get(skill_name)
+
+  def _set_plan(skill_name, **extra):
+    base = {
+      "target_skill": skill_name,
+      "available": _is_skill_entry_actionable(_entry(skill_name)),
+      "selected": False,
+      "estimated_cost": None,
+      "remaining_sp_before": None,
+      "remaining_sp_after": None,
+      "reason": "",
+      "covered_by": None,
+      "paired_gold": None,
+    }
+    base.update(extra)
+    plan[skill_name] = base
+
+  # Primary pass: shortlist order, but gold skills consume their prerequisite.
+  for skill_name in shortlist:
+    entry = _entry(skill_name)
+    available = _is_skill_entry_actionable(entry)
+    if not available:
+      _set_plan(skill_name, reason=(entry or {}).get("reason") or "not_actionable_from_preview")
+      continue
+    if skill_name in covered_prereqs:
+      _set_plan(skill_name, reason="covered_by_selected_gold", covered_by=_SKILL_PREREQ_TO_GOLD.get(skill_name))
+      continue
+    if skill_name in _SKILL_PREREQ_TO_GOLD:
+      paired_gold = _SKILL_PREREQ_TO_GOLD[skill_name]
+      gold_entry = _entry(paired_gold)
+      if _is_skill_entry_actionable(gold_entry):
+        _set_plan(skill_name, reason="deferred_to_gold_partner", paired_gold=paired_gold)
+        continue
+    estimated_cost, prerequisite = _estimate_skill_cost(skill_name, available_entries, selected_set)
+    remaining_before = remaining_sp
+    if remaining_sp >= estimated_cost:
+      selected_targets.append(skill_name)
+      selected_set.add(skill_name)
+      remaining_sp -= estimated_cost
+      _set_plan(
+        skill_name,
+        selected=True,
+        estimated_cost=estimated_cost,
+        remaining_sp_before=remaining_before,
+        remaining_sp_after=remaining_sp,
+        reason="selected",
+        covered_by=prerequisite if estimated_cost > _SKILL_DEFAULT_COST else None,
+      )
+      if estimated_cost > _SKILL_DEFAULT_COST and prerequisite:
+        covered_prereqs.add(prerequisite)
+        if prerequisite not in plan or plan[prerequisite].get("reason") == "deferred_to_gold_partner":
+          _set_plan(prerequisite, reason="covered_by_selected_gold", covered_by=skill_name)
+    else:
+      _set_plan(
+        skill_name,
+        estimated_cost=estimated_cost,
+        remaining_sp_before=remaining_before,
+        remaining_sp_after=remaining_before,
+        reason="insufficient_skill_points",
+        covered_by=prerequisite if estimated_cost > _SKILL_DEFAULT_COST else None,
+      )
+
+  # Fallback pass: buy prerequisite whites alone if their paired gold was skipped and budget remains.
+  for skill_name in shortlist:
+    entry = _entry(skill_name)
+    current = plan.get(skill_name) or {}
+    if skill_name not in _SKILL_PREREQ_TO_GOLD:
+      continue
+    if not _is_skill_entry_actionable(entry):
+      continue
+    if current.get("selected") or current.get("reason") == "covered_by_selected_gold":
+      continue
+    paired_gold = _SKILL_PREREQ_TO_GOLD[skill_name]
+    if paired_gold in selected_set:
+      continue
+    if current.get("reason") != "deferred_to_gold_partner":
+      continue
+    remaining_before = remaining_sp
+    if remaining_sp >= _SKILL_DEFAULT_COST:
+      selected_targets.append(skill_name)
+      selected_set.add(skill_name)
+      remaining_sp -= _SKILL_DEFAULT_COST
+      _set_plan(
+        skill_name,
+        selected=True,
+        estimated_cost=_SKILL_DEFAULT_COST,
+        remaining_sp_before=remaining_before,
+        remaining_sp_after=remaining_sp,
+        reason="selected_prerequisite_fallback",
+        paired_gold=paired_gold,
+      )
+    else:
+      _set_plan(
+        skill_name,
+        estimated_cost=_SKILL_DEFAULT_COST,
+        remaining_sp_before=remaining_before,
+        remaining_sp_after=remaining_before,
+        reason="insufficient_skill_points",
+        paired_gold=paired_gold,
+      )
+
+  return {
+    "current_sp": current_sp,
+    "remaining_sp": remaining_sp,
+    "selected_targets": selected_targets,
+    "plan_by_target": plan,
+  }
+
+
+def _build_skill_purchase_planned_clicks(context, scan_result=None, budget_plan=None):
+  clicks = [
+    _planned_click("Open skills menu", template="assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+    _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR + shortlist match over the visible skill cards"),
+  ]
+
+  target_results = list((scan_result or {}).get("target_results") or [])
+  actionable_count = 0
+  budget_details = (budget_plan or {}).get("plan_by_target") or {}
+  if target_results:
+    for entry in target_results:
+      if not isinstance(entry, dict):
+        continue
+      target_skill = _normalize_skill_name(entry.get("target_skill") or "unknown")
+      candidate = entry.get("candidate") or {}
+      match_name = candidate.get("match_name") or target_skill
+      match_score = candidate.get("match_score")
+      pairing = candidate.get("increment_pairing")
+      y_delta = candidate.get("increment_vertical_distance")
+      budget_entry = budget_details.get(target_skill) or {}
+      is_actionable = bool(budget_entry.get("selected"))
+      if is_actionable:
+        actionable_count += 1
+      label = f"Queue skill: {match_name}" if is_actionable else f"Skip skill: {target_skill}"
+      note_parts = [f"target={target_skill}"]
+      if match_name != target_skill:
+        note_parts.append(f"matched={match_name}")
+      if match_score is not None:
+        note_parts.append(f"score={match_score}")
+      if pairing:
+        note_parts.append(f"pair={pairing}")
+      if y_delta is not None:
+        note_parts.append(f"y_delta={y_delta}px")
+      estimated_cost = budget_entry.get("estimated_cost")
+      if estimated_cost is not None:
+        note_parts.append(f"cost={estimated_cost}")
+      remaining_after = budget_entry.get("remaining_sp_after")
+      if remaining_after is not None and is_actionable:
+        note_parts.append(f"sp_after={remaining_after}")
+      covered_by = budget_entry.get("covered_by")
+      if covered_by:
+        note_parts.append(f"covers={covered_by}" if is_actionable else f"covered_by={covered_by}")
+      paired_gold = budget_entry.get("paired_gold")
+      if paired_gold and not is_actionable:
+        note_parts.append(f"paired_gold={paired_gold}")
+      reason = budget_entry.get("reason") or entry.get("reason")
+      if reason and reason not in {"dry_run_confirm_detected", "dry_run_complete", "selected"}:
+        note_parts.append(f"status={reason}")
+      clicks.append(_planned_click(label, note="; ".join(note_parts)))
+  else:
+    shortlist = list(context.get("shopping_list") or [])
+    clicks.append(
+      _planned_click(
+        "Select matching skill rows",
+        template="assets/icons/buy_skill.png",
+        region_key="SCROLLING_SKILL_SCREEN_BBOX",
+        note=", ".join(shortlist) if shortlist else "Use the configured skill shortlist",
+      )
+    )
+
+  if actionable_count:
+    clicks.append(
+      _planned_click(
+        "Reopen skills using saved preview positions",
+        note="Seek directly to previewed scrollbar positions before falling back to a full scan",
+      )
+    )
+    clicks.append(
+      _planned_click(
+        "Confirm selected skills",
+        template="assets/buttons/confirm_btn.png",
+        note=f"{actionable_count} queued skill(s) matched the preview scan",
+      )
+    )
+    clicks.append(_planned_click("Learn selected skills", template="assets/buttons/learn_btn.png"))
+  else:
+    clicks.append(_planned_click("No safe skill increments queued", note="Scanner will exit skills without confirming a purchase"))
+  clicks.append(_planned_click("Exit skills screen", template="assets/buttons/back_btn.png", region_key="SCREEN_BOTTOM_BBOX"))
+  return clicks
+
+
+def _build_skill_purchase_scan_hints(scan_result):
+  hints = []
+  if not isinstance(scan_result, dict):
+    return hints
+  for entry in (scan_result.get("target_results") or []):
+    if not isinstance(entry, dict):
+      continue
+    increment_click_result = entry.get("increment_click_result") or {}
+    candidate = entry.get("candidate") or {}
+    if not increment_click_result.get("target"):
+      continue
+    if candidate.get("scrollbar_ratio") is None:
+      continue
+    hints.append(
+      {
+        "target_skill": entry.get("target_skill"),
+        "candidate": {
+          "frame_index": candidate.get("frame_index"),
+          "scrollbar_ratio": candidate.get("scrollbar_ratio"),
+          "match_name": candidate.get("match_name"),
+          "match_score": candidate.get("match_score"),
+          "increment_pairing": candidate.get("increment_pairing"),
+          "increment_vertical_distance": candidate.get("increment_vertical_distance"),
+        },
+        "reacquire_result": dict(entry.get("reacquire_result") or {}),
+      }
+    )
+  return hints
+
+
 def _trackblazer_items_require_reassess(items):
   for entry in (items or []):
     if not isinstance(entry, dict):
@@ -1947,7 +2239,10 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
   state_obj["skill_purchase_flow"] = preview_flow
   state_obj["skill_purchase_scan"] = preview_scan
 
-  if preview_flow.get("scanned"):
+  budget_plan = _plan_budgeted_skill_targets(context, preview_scan)
+  selected_targets = list(budget_plan.get("selected_targets") or [])
+  preview_has_actionable_targets = bool(selected_targets)
+  if preview_flow.get("scanned") and preview_has_actionable_targets:
     mark_skill_purchase_checked(
       current_action_count,
       selected_race=bool(context.get("scheduled_g1_race")),
@@ -1956,6 +2251,12 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
       **get_skill_purchase_check_state(),
       **context,
       "reason": "Skill scan complete. Purchase is queued before the main action.",
+    }
+  elif preview_flow.get("scanned"):
+    state_obj["skill_purchase_check"] = {
+      **get_skill_purchase_check_state(),
+      **context,
+      "reason": "Skill scan complete. No affordable safe skill increments were queued.",
     }
   else:
     state_obj["skill_purchase_check"] = {
@@ -1969,14 +2270,25 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
     state_obj.pop("skill_purchase_plan", None)
     state_obj.pop("skill_purchase_preview_key", None)
     return "failed"
-  if not preview_flow.get("scanned"):
+  if not preview_flow.get("scanned") or not preview_has_actionable_targets:
     state_obj.pop("skill_purchase_plan", None)
     state_obj.pop("skill_purchase_preview_key", None)
     return "skipped"
 
   plan = {
     "context": context,
-    "planned_clicks": list(context.get("planned_clicks") or []),
+    "target_skills": selected_targets,
+    "budget_plan": budget_plan,
+    "planned_clicks": _build_skill_purchase_planned_clicks(context, preview_scan, budget_plan=budget_plan),
+    "scan_hints": _build_skill_purchase_scan_hints(
+      {
+        **(preview_scan or {}),
+        "target_results": [
+          entry for entry in list((preview_scan or {}).get("target_results") or [])
+          if _normalize_skill_name((entry or {}).get("target_skill")) in set(selected_targets)
+        ],
+      }
+    ),
     "preview_key": preview_key,
   }
   state_obj["skill_purchase_plan"] = plan
@@ -1993,9 +2305,10 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
     return {"status": "skipped"}
 
   purchase_result = collect_skill_purchase(
-    skill_shortlist=context.get("shopping_list"),
+    skill_shortlist=plan.get("target_skills") or context.get("shopping_list"),
     trigger="automatic_execute",
     dry_run=False,
+    target_hints=plan.get("scan_hints"),
   )
   purchase_flow = purchase_result.get("skill_purchase_flow") or {}
   purchase_scan = purchase_result.get("skill_purchase_scan") or {}
@@ -2008,7 +2321,7 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
   }
 
   target_results = list(purchase_scan.get("target_results") or [])
-  purchased_any = any(entry.get("increment_click_result") for entry in target_results)
+  purchased_any = any((entry.get("increment_click_result") or {}).get("target") for entry in target_results)
   if purchased_any:
     update_skill_action_count(current_action_count)
     state_obj["skill_purchase_check"] = {
