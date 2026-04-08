@@ -492,8 +492,20 @@ _OCR_SYMBOL_VARIANTS = (
     ("”", "\""),
 )
 _SKILL_TOKEN_STOPWORDS = frozenset({"and", "for", "the", "with"})
+_GENERIC_SKILL_TOKENS = frozenset({"corner", "corners", "curve", "curves", "turn", "turns", "straight", "straightaway", "straightaways"})
+_TOKEN_CANONICAL_MAP = {
+    "corners": "corner",
+    "curves": "curve",
+    "turns": "turn",
+    "straightaways": "straightaway",
+}
+_CORNER_FAMILY_DISTANCE_TOKENS = frozenset({"short", "mile", "middle", "medium", "long"})
+_CORNER_FAMILY_SPECIAL_TOKENS = frozenset({"adept", "recovery"})
 _NAME_MATCH_METHOD_PRIORITY = {"exact": 3, "token_merge": 2, "fuzzy": 1}
 _OCR_VARIANT_PRIORITY = {"normal": 3, "merged": 2, "dim": 1}
+_ROW_GROUP_Y_BUCKET = 8.0
+_ROW_GROUP_X_BUCKET = 28.0
+_MEANINGFUL_NORMAL_CONFIDENCE = 0.45
 
 
 def _name_match_method_rank(method):
@@ -592,6 +604,24 @@ def _extract_key_tokens(normalized_text):
     if len(key_tokens) < 2:
         key_tokens = tokens
     return frozenset(key_tokens)
+
+
+def _canonicalize_skill_tokens(tokens):
+    canonical = []
+    for token in (tokens or []):
+        token = str(token or "").strip()
+        if not token:
+            continue
+        canonical.append(_TOKEN_CANONICAL_MAP.get(token, token))
+    return frozenset(canonical)
+
+
+def _extract_distinctive_skill_tokens(skill_key_tokens):
+    canonical = _canonicalize_skill_tokens(skill_key_tokens)
+    distinctive = [token for token in canonical if token not in _GENERIC_SKILL_TOKENS]
+    if not distinctive:
+        distinctive = list(canonical)
+    return frozenset(distinctive)
 
 
 def _stitch_split_skill_rows(rows):
@@ -772,12 +802,16 @@ def _normalize_skill_shortlist(skill_shortlist):
         if not normalized_name or normalized_name in seen:
             continue
         seen.add(normalized_name)
+        skill_tokens = frozenset(normalized_name.split())
+        skill_key_tokens = _extract_key_tokens(normalized_name)
         normalized.append({
             "skill_name": skill_name,
             "skill_normalized": normalized_name,
             "skill_compact": normalized_name.replace(" ", ""),
-            "skill_tokens": frozenset(normalized_name.split()),
-            "skill_key_tokens": _extract_key_tokens(normalized_name),
+            "skill_tokens": skill_tokens,
+            "skill_key_tokens": skill_key_tokens,
+            "skill_family_tokens": _canonicalize_skill_tokens(skill_tokens),
+            "skill_distinctive_tokens": _extract_distinctive_skill_tokens(skill_key_tokens),
         })
 
     cached = tuple(normalized)
@@ -789,6 +823,184 @@ def _shared_skill_tokens(row_tokens, skill_tokens):
     if not row_tokens or not skill_tokens:
         return 0
     return len(row_tokens & skill_tokens)
+
+
+def _row_group_key(row):
+    crop_bbox = row.get("crop_bbox") or [0, 0, 0, 0]
+    return (
+        int(round(float(row.get("abs_y_center") or 0.0) / _ROW_GROUP_Y_BUCKET)),
+        int(round(float(crop_bbox[0]) / _ROW_GROUP_X_BUCKET)),
+    )
+
+
+def _group_ocr_rows_by_physical_row(ocr_rows):
+    grouped = {}
+    for row in (ocr_rows or []):
+        normalized = row.get("text_normalized") or ""
+        if not normalized:
+            continue
+        grouped.setdefault(_row_group_key(row), []).append(dict(row))
+    groups = list(grouped.values())
+    groups.sort(
+        key=lambda rows: (
+            min(float(item.get("abs_y_center") or 0.0) for item in rows),
+            min(int((item.get("crop_bbox") or [0, 0, 0, 0])[0]) for item in rows),
+        ),
+    )
+    return groups
+
+
+def _build_row_skill_match_metrics(row, skill_entry):
+    normalized = row.get("text_normalized") or ""
+    normalized_compact = normalized.replace(" ", "")
+    row_tokens = frozenset(normalized.split())
+    row_key_tokens = _extract_key_tokens(normalized)
+    row_family_tokens = _canonicalize_skill_tokens(row_tokens)
+
+    skill_normalized = skill_entry["skill_normalized"]
+    skill_compact = skill_entry["skill_compact"]
+    skill_tokens = skill_entry["skill_tokens"]
+    skill_key_tokens = skill_entry.get("skill_key_tokens") or skill_tokens
+
+    score = max(
+        Levenshtein.ratio(normalized, skill_normalized),
+        Levenshtein.ratio(normalized_compact, skill_compact),
+    )
+    method = "fuzzy"
+    shorter_len = min(len(normalized), len(skill_normalized))
+    longer_len = max(len(normalized), len(skill_normalized))
+    if ((skill_normalized in normalized or normalized in skill_normalized)
+            and shorter_len >= max(6, int(longer_len * 0.55))):
+        score = max(score, 0.96)
+        method = "exact"
+
+    shared_key_tokens = _shared_skill_tokens(row_key_tokens, skill_key_tokens)
+    key_coverage = shared_key_tokens / max(1, len(skill_key_tokens))
+    row_key_coverage = shared_key_tokens / max(1, len(row_key_tokens))
+    if (
+        len(skill_key_tokens) >= _TOKEN_MERGE_MIN_SHARED
+        and len(row_tokens) <= _TOKEN_MERGE_MAX_ROW_TOKENS
+        and shared_key_tokens >= _TOKEN_MERGE_MIN_SHARED
+        and key_coverage >= _TOKEN_MERGE_MIN_COVERAGE
+        and row_key_coverage >= 0.5
+    ):
+        token_score = 0.74 + (key_coverage * 0.16) + min(0.08, row_key_coverage * 0.08)
+        if token_score > score:
+            score = token_score
+            method = "token_merge"
+
+    shared_tokens = 0
+    token_overlap = 0.0
+    if skill_tokens:
+        shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
+        token_overlap = shared_tokens / max(1, len(skill_tokens))
+        # Do not promote a match on a single shared generic token.
+        # That let rows like "Straightaway Spurt" clear the fuzzy
+        # threshold for "Straightaway Recovery".
+        if shared_tokens >= 2 and token_overlap >= 0.66:
+            score = max(score, 0.78 + (token_overlap * 0.18))
+        elif shared_tokens >= 2 and token_overlap >= 0.5:
+            score = max(score, 0.72 + (token_overlap * 0.12))
+
+    accepted = False
+    if score >= _EXACT_MATCH_THRESHOLD:
+        accepted = True
+    elif method == "token_merge" and score >= _TOKEN_MERGE_FALLBACK_THRESHOLD:
+        accepted = True
+    elif score >= _FUZZY_MATCH_THRESHOLD and len(normalized) >= _FUZZY_MATCH_MIN_LENGTH:
+        accepted = True
+    if accepted and score < _EXACT_MATCH_THRESHOLD and method == "fuzzy" and skill_tokens and len(skill_tokens) >= 2 and shared_tokens < 2:
+        accepted = False
+
+    return {
+        **row,
+        "match_name": skill_entry["skill_name"],
+        "match_score": round(float(score), 4),
+        "raw_match_score": round(float(score), 4),
+        "name_match_method": method,
+        "shared_key_tokens": int(shared_key_tokens),
+        "key_token_coverage": round(float(key_coverage), 4),
+        "shared_tokens": int(shared_tokens),
+        "token_overlap": round(float(token_overlap), 4),
+        "row_tokens": row_tokens,
+        "row_key_tokens": row_key_tokens,
+        "row_family_tokens": row_family_tokens,
+        "accepted": bool(accepted),
+    }
+
+
+def _match_candidate_rank(candidate):
+    return (
+        float(candidate.get("match_score") or 0.0),
+        float(candidate.get("confidence") or 0.0),
+        _name_match_method_rank(candidate.get("name_match_method")),
+        _ocr_variant_rank(candidate.get("ocr_variant")),
+        len(candidate.get("text_normalized") or ""),
+    )
+
+
+def _variants_seen_for_metrics(metrics):
+    variants = {str(metric.get("ocr_variant") or "") for metric in (metrics or []) if metric.get("ocr_variant")}
+    return sorted(variants, key=_ocr_variant_rank, reverse=True)
+
+
+def _meaningful_normal_metrics(metrics):
+    if not isinstance(metrics, dict):
+        return False
+    if len(str(metrics.get("text_normalized") or "")) < 5:
+        return False
+    return float(metrics.get("confidence") or 0.0) >= _MEANINGFUL_NORMAL_CONFIDENCE
+
+
+def _corner_family_conflict(skill_entry, normal_metrics, corroborated_tokens=None):
+    if not isinstance(skill_entry, dict) or not isinstance(normal_metrics, dict):
+        return False
+    skill_family_tokens = skill_entry.get("skill_family_tokens") or frozenset()
+    if "corner" not in skill_family_tokens:
+        return False
+    target_special = skill_family_tokens & _CORNER_FAMILY_SPECIAL_TOKENS
+    if not target_special:
+        return False
+    normal_family_tokens = normal_metrics.get("row_family_tokens") or frozenset()
+    if "corner" not in normal_family_tokens:
+        return False
+    if not (normal_family_tokens & _CORNER_FAMILY_DISTANCE_TOKENS):
+        return False
+    corroborated = frozenset(corroborated_tokens or [])
+    return not bool(corroborated & target_special)
+
+
+def _normal_variant_strongly_disagrees(skill_entry, normal_metrics, corroborated_tokens=None):
+    if not _meaningful_normal_metrics(normal_metrics):
+        return False
+    if _corner_family_conflict(skill_entry, normal_metrics, corroborated_tokens=corroborated_tokens):
+        return True
+    if normal_metrics.get("row_family_tokens") and (normal_metrics["row_family_tokens"] & (skill_entry.get("skill_distinctive_tokens") or frozenset())):
+        return False
+    if int(normal_metrics.get("shared_key_tokens") or 0) == 0:
+        return True
+    return (
+        float(normal_metrics.get("raw_match_score") or 0.0) < _FUZZY_MATCH_THRESHOLD
+        and float(normal_metrics.get("key_token_coverage") or 0.0) < 0.5
+    )
+
+
+def _token_evidence_for_match(skill_entry, best_metric, support_metrics, normal_metrics):
+    support_metrics = list(support_metrics or [])
+    corroborated_metrics = [metric for metric in support_metrics if metric is not best_metric]
+    evidence_tokens = frozenset().union(*(metric.get("row_family_tokens") or frozenset() for metric in support_metrics)) if support_metrics else frozenset()
+    corroborated_tokens = frozenset().union(*(metric.get("row_family_tokens") or frozenset() for metric in corroborated_metrics)) if corroborated_metrics else frozenset()
+    distinctive_tokens = skill_entry.get("skill_distinctive_tokens") or frozenset()
+    skill_tokens = skill_entry.get("skill_tokens") or frozenset()
+    best_row_tokens = best_metric.get("row_tokens") or frozenset()
+    return {
+        "row_tokens": sorted(best_row_tokens),
+        "shared_tokens": sorted(best_row_tokens & skill_tokens),
+        "distinctive_tokens_required": sorted(distinctive_tokens),
+        "distinctive_tokens_present": sorted(evidence_tokens & distinctive_tokens),
+        "corroborated_tokens": sorted(corroborated_tokens),
+        "normal_tokens": sorted((normal_metrics or {}).get("row_family_tokens") or []),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -810,125 +1022,106 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
         return [dict(row) for row in cached]
 
     matched_by_skill = {}
-    for row in ocr_rows:
-        normalized = row["text_normalized"]
-        if not normalized or len(normalized) < 3:
-            continue
-        normalized_compact = normalized.replace(" ", "")
-        row_tokens = frozenset(normalized.split())
-        row_key_tokens = _extract_key_tokens(normalized)
-        best_match = None
-        best_score = 0.0
-        best_method = "fuzzy"
-        best_shared_key_tokens = 0
-        best_key_coverage = 0.0
+    for row_group in _group_ocr_rows_by_physical_row(ocr_rows):
+        group_metrics = []
+        for skill_entry in normalized_shortlist:
+            group_metrics.extend(
+                _build_row_skill_match_metrics(row, skill_entry)
+                for row in row_group
+            )
+
         for skill_entry in normalized_shortlist:
             skill_name = skill_entry["skill_name"]
-            skill_normalized = skill_entry["skill_normalized"]
-            skill_compact = skill_entry["skill_compact"]
-            skill_tokens = skill_entry["skill_tokens"]
-            skill_key_tokens = skill_entry.get("skill_key_tokens") or skill_tokens
+            per_skill = [
+                metric for metric in group_metrics
+                if metric.get("match_name") == skill_name
+            ]
+            if not per_skill:
+                continue
+            accepted_metrics = [metric for metric in per_skill if metric.get("accepted")]
+            if not accepted_metrics:
+                continue
 
-            score = max(
-                Levenshtein.ratio(normalized, skill_normalized),
-                Levenshtein.ratio(normalized_compact, skill_compact),
-            )
-            method = "fuzzy"
-            shorter_len = min(len(normalized), len(skill_normalized))
-            longer_len = max(len(normalized), len(skill_normalized))
-            if ((skill_normalized in normalized or normalized in skill_normalized)
-                    and shorter_len >= max(6, int(longer_len * 0.55))):
-                score = max(score, 0.96)
-                method = "exact"
+            best_metric = max(accepted_metrics, key=_match_candidate_rank)
+            support_metrics = list(accepted_metrics)
+            variants_seen = _variants_seen_for_metrics(support_metrics)
+            normal_metrics = None
+            normal_candidates = [metric for metric in per_skill if metric.get("ocr_variant") == "normal"]
+            if normal_candidates:
+                normal_metrics = max(normal_candidates, key=_match_candidate_rank)
 
-            shared_key_tokens = _shared_skill_tokens(row_key_tokens, skill_key_tokens)
-            key_coverage = shared_key_tokens / max(1, len(skill_key_tokens))
-            row_key_coverage = shared_key_tokens / max(1, len(row_key_tokens))
+            token_evidence = _token_evidence_for_match(skill_entry, best_metric, support_metrics, normal_metrics)
+            corroborated_tokens = frozenset(token_evidence.get("corroborated_tokens") or [])
+            distinctive_present = frozenset(token_evidence.get("distinctive_tokens_present") or [])
+            reject_reason = ""
+            dim_only_or_merged = bool(variants_seen) and all(variant in ("dim", "merged") for variant in variants_seen)
             if (
-                len(skill_key_tokens) >= _TOKEN_MERGE_MIN_SHARED
-                and len(row_tokens) <= _TOKEN_MERGE_MAX_ROW_TOKENS
-                and shared_key_tokens >= _TOKEN_MERGE_MIN_SHARED
-                and key_coverage >= _TOKEN_MERGE_MIN_COVERAGE
-                and row_key_coverage >= 0.5
+                len(skill_entry.get("skill_key_tokens") or []) >= 2
+                and skill_entry.get("skill_distinctive_tokens")
+                and not distinctive_present
             ):
-                token_score = 0.74 + (key_coverage * 0.16) + min(0.08, row_key_coverage * 0.08)
-                if token_score > score:
-                    score = token_score
-                    method = "token_merge"
-
-            if skill_tokens:
-                shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
-                token_overlap = shared_tokens / max(1, len(skill_tokens))
-                # Do not promote a match on a single shared generic token.
-                # That let rows like "Straightaway Spurt" clear the fuzzy
-                # threshold for "Straightaway Recovery".
-                if shared_tokens >= 2 and token_overlap >= 0.66:
-                    score = max(score, 0.78 + (token_overlap * 0.18))
-                elif shared_tokens >= 2 and token_overlap >= 0.5:
-                    score = max(score, 0.72 + (token_overlap * 0.12))
-            if score > best_score or (
-                score == best_score and _name_match_method_rank(method) > _name_match_method_rank(best_method)
+                reject_reason = "missing_distinctive_token_evidence"
+            elif dim_only_or_merged and _corner_family_conflict(
+                skill_entry,
+                normal_metrics,
+                corroborated_tokens=corroborated_tokens,
             ):
-                best_score = score
-                best_match = skill_name
-                best_method = method
-                best_shared_key_tokens = shared_key_tokens
-                best_key_coverage = key_coverage
-
-        accepted = False
-        if best_match and best_score >= _EXACT_MATCH_THRESHOLD:
-            accepted = True
-        elif best_match and best_method == "token_merge" and best_score >= _TOKEN_MERGE_FALLBACK_THRESHOLD:
-            accepted = True
-        elif best_match and best_score >= _FUZZY_MATCH_THRESHOLD and len(normalized) >= _FUZZY_MATCH_MIN_LENGTH:
-            accepted = True
-        if not accepted:
-            continue
-
-        if best_score < _EXACT_MATCH_THRESHOLD:
-            best_entry = next(
-                (e for e in normalized_shortlist if e["skill_name"] == best_match), None
-            )
-            if (
-                best_method == "fuzzy"
-                and best_entry
-                and best_entry["skill_tokens"]
-                and len(best_entry["skill_tokens"]) >= 2
+                reject_reason = "corner_family_conflict"
+            elif (
+                dim_only_or_merged
+                and float(best_metric.get("raw_match_score") or 0.0) >= _EXACT_MATCH_THRESHOLD
+                and _normal_variant_strongly_disagrees(
+                    skill_entry,
+                    normal_metrics,
+                    corroborated_tokens=corroborated_tokens,
+                )
             ):
-                shared = _shared_skill_tokens(row_tokens, best_entry["skill_tokens"])
-                if shared < 2:
-                    continue
+                reject_reason = "dim_only_exact_conflicts_with_normal"
+            if reject_reason:
+                continue
 
-        candidate = {
-            **row,
-            "match_name": best_match,
-            "match_score": round(best_score, 4),
-            "match_type": "exact" if best_score >= _EXACT_MATCH_THRESHOLD else "fuzzy",
-            "name_match_method": best_method,
-            "shared_key_tokens": int(best_shared_key_tokens),
-            "key_token_coverage": round(float(best_key_coverage), 4),
-        }
-        skill_key = _normalize_skill_text(best_match)
-        existing = matched_by_skill.get(skill_key)
-        if existing is None:
-            matched_by_skill[skill_key] = candidate
-            continue
-        current_rank = (
-            float(candidate.get("match_score") or 0.0),
-            float(candidate.get("confidence") or 0.0),
-            _name_match_method_rank(candidate.get("name_match_method")),
-            _ocr_variant_rank(candidate.get("ocr_variant")),
-            len(candidate.get("text_normalized") or ""),
-        )
-        existing_rank = (
-            float(existing.get("match_score") or 0.0),
-            float(existing.get("confidence") or 0.0),
-            _name_match_method_rank(existing.get("name_match_method")),
-            _ocr_variant_rank(existing.get("ocr_variant")),
-            len(existing.get("text_normalized") or ""),
-        )
-        if current_rank > existing_rank:
-            matched_by_skill[skill_key] = candidate
+            consensus_score = float(best_metric.get("raw_match_score") or 0.0)
+            if len(variants_seen) >= 2:
+                consensus_score += 0.02
+            elif dim_only_or_merged and _normal_variant_strongly_disagrees(
+                skill_entry,
+                normal_metrics,
+                corroborated_tokens=corroborated_tokens,
+            ):
+                consensus_score -= 0.06
+            consensus_score = max(0.0, min(1.0, consensus_score))
+
+            final_match_type = None
+            if consensus_score >= _EXACT_MATCH_THRESHOLD:
+                final_match_type = "exact"
+            elif (
+                best_metric.get("name_match_method") == "token_merge"
+                and consensus_score >= _TOKEN_MERGE_FALLBACK_THRESHOLD
+            ):
+                final_match_type = "fuzzy"
+            elif consensus_score >= _FUZZY_MATCH_THRESHOLD and len(best_metric.get("text_normalized") or "") >= _FUZZY_MATCH_MIN_LENGTH:
+                final_match_type = "fuzzy"
+            if final_match_type is None:
+                continue
+
+            candidate = {
+                **{
+                    key: value
+                    for key, value in best_metric.items()
+                    if key not in {"row_tokens", "row_key_tokens", "row_family_tokens", "accepted"}
+                },
+                "match_score": round(float(consensus_score), 4),
+                "match_type": final_match_type,
+                "ocr_variants_seen": variants_seen,
+                "chosen_variant": best_metric.get("ocr_variant"),
+                "consensus_score": round(float(consensus_score), 4),
+                "token_evidence": token_evidence,
+                "reject_reason": "",
+            }
+            skill_key = _normalize_skill_text(skill_name)
+            existing = matched_by_skill.get(skill_key)
+            if existing is None or _match_candidate_rank(candidate) > _match_candidate_rank(existing):
+                matched_by_skill[skill_key] = candidate
 
     matched = sorted(
         matched_by_skill.values(),
@@ -2068,7 +2261,12 @@ def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):
         "match_name": (match or {}).get("match_name"),
         "match_score": (match or {}).get("match_score"),
         "ocr_variant_used": (match or {}).get("ocr_variant"),
+        "chosen_variant": (match or {}).get("chosen_variant") or (match or {}).get("ocr_variant"),
+        "ocr_variants_seen": list((match or {}).get("ocr_variants_seen") or []),
         "name_match_method": (match or {}).get("name_match_method") or (match or {}).get("match_type"),
+        "consensus_score": (match or {}).get("consensus_score"),
+        "token_evidence": dict((match or {}).get("token_evidence") or {}),
+        "reject_reason": (match or {}).get("reject_reason") or "",
         "obtained_evidence": (match or {}).get("obtained_evidence") or ("template" if (match or {}).get("obtained") else "none"),
         "increment_pairing": (match or {}).get("increment_pairing"),
         "increment_vertical_distance": (match or {}).get("increment_vertical_distance"),
@@ -2367,7 +2565,12 @@ def _build_scan_entry(target_skill, source=None):
         "confirm_detect_result": None,
         "confirm_available": False,
         "ocr_variant_used": None,
+        "chosen_variant": None,
+        "ocr_variants_seen": [],
         "name_match_method": None,
+        "consensus_score": None,
+        "token_evidence": {},
+        "reject_reason": "",
         "obtained_evidence": "none",
         "increment_present": False,
         "final_reason": "",
@@ -2383,9 +2586,20 @@ def _sync_target_entry_telemetry(entry, match_row=None):
         ocr_variant = row.get("ocr_variant") or row.get("ocr_variant_used")
         if ocr_variant:
             entry["ocr_variant_used"] = ocr_variant
+        chosen_variant = row.get("chosen_variant") or ocr_variant
+        if chosen_variant:
+            entry["chosen_variant"] = chosen_variant
+        if "ocr_variants_seen" in row:
+            entry["ocr_variants_seen"] = list(row.get("ocr_variants_seen") or [])
         match_method = row.get("name_match_method") or row.get("match_type")
         if match_method:
             entry["name_match_method"] = match_method
+        if "consensus_score" in row:
+            entry["consensus_score"] = row.get("consensus_score")
+        if "token_evidence" in row:
+            entry["token_evidence"] = dict(row.get("token_evidence") or {})
+        if "reject_reason" in row:
+            entry["reject_reason"] = row.get("reject_reason") or ""
         obtained_evidence = row.get("obtained_evidence")
         if obtained_evidence:
             entry["obtained_evidence"] = obtained_evidence
@@ -2408,7 +2622,10 @@ def _log_target_entry_debug(entry):
         "[SKILL][TARGET] "
         f"{entry.get('target_skill')}: "
         f"ocr_variant={entry.get('ocr_variant_used') or 'unknown'}; "
+        f"variants_seen={entry.get('ocr_variants_seen') or []}; "
         f"name_match={entry.get('name_match_method') or 'unknown'}; "
+        f"consensus={entry.get('consensus_score')}; "
+        f"reject_reason={entry.get('reject_reason') or ''}; "
         f"obtained_evidence={entry.get('obtained_evidence') or 'none'}; "
         f"increment_present={bool(entry.get('increment_present'))}; "
         f"final_reason={entry.get('final_reason') or entry.get('reason') or ''}"
@@ -2457,7 +2674,12 @@ def _build_hint_candidate(target_skill, hint):
             "increment_pairing": increment_pairing,
             "increment_vertical_distance": increment_vertical_distance,
             "ocr_variant": candidate.get("ocr_variant_used") or reacquire_result.get("ocr_variant_used"),
+            "chosen_variant": candidate.get("chosen_variant") or reacquire_result.get("chosen_variant"),
+            "ocr_variants_seen": list(candidate.get("ocr_variants_seen") or reacquire_result.get("ocr_variants_seen") or []),
             "name_match_method": candidate.get("name_match_method") or reacquire_result.get("name_match_method"),
+            "consensus_score": candidate.get("consensus_score") if candidate.get("consensus_score") is not None else reacquire_result.get("consensus_score"),
+            "token_evidence": dict(candidate.get("token_evidence") or reacquire_result.get("token_evidence") or {}),
+            "reject_reason": candidate.get("reject_reason") or reacquire_result.get("reject_reason") or "",
             "obtained_evidence": candidate.get("obtained_evidence") or reacquire_result.get("obtained_evidence"),
         },
     }
@@ -2537,7 +2759,12 @@ def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized
             "increment_pairing": hint_candidate_row.get("increment_pairing"),
             "increment_vertical_distance": hint_candidate_row.get("increment_vertical_distance"),
             "ocr_variant_used": hint_candidate_row.get("ocr_variant"),
+            "chosen_variant": hint_candidate_row.get("chosen_variant") or hint_candidate_row.get("ocr_variant"),
+            "ocr_variants_seen": list(hint_candidate_row.get("ocr_variants_seen") or []),
             "name_match_method": hint_candidate_row.get("name_match_method"),
+            "consensus_score": hint_candidate_row.get("consensus_score"),
+            "token_evidence": dict(hint_candidate_row.get("token_evidence") or {}),
+            "reject_reason": hint_candidate_row.get("reject_reason") or "",
             "obtained_evidence": hint_candidate_row.get("obtained_evidence") or "none",
             "increment_ready": bool(_match_has_safe_increment(hint_candidate_row)),
         }
@@ -2851,7 +3078,12 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                     "increment_pairing": candidate_row.get("increment_pairing"),
                     "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
                     "ocr_variant_used": candidate_row.get("ocr_variant"),
+                    "chosen_variant": candidate_row.get("chosen_variant") or candidate_row.get("ocr_variant"),
+                    "ocr_variants_seen": list(candidate_row.get("ocr_variants_seen") or []),
                     "name_match_method": candidate_row.get("name_match_method"),
+                    "consensus_score": candidate_row.get("consensus_score"),
+                    "token_evidence": dict(candidate_row.get("token_evidence") or {}),
+                    "reject_reason": candidate_row.get("reject_reason") or "",
                     "obtained_evidence": candidate_row.get("obtained_evidence") or "none",
                     "increment_ready": bool(_match_has_safe_increment(candidate_row)),
                 }

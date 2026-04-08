@@ -117,6 +117,51 @@ class SkillScannerTrackblazerChecks(unittest.TestCase):
         self.assertEqual(matched[0]["match_name"], "Corner Recovery")
         self.assertEqual(matched[0]["name_match_method"], "token_merge")
 
+    def test_dim_only_corner_adept_hallucination_is_rejected_when_normal_disagrees(self):
+        shortlist = ["Corner Adept ○"]
+        rows = [
+            _base_row(
+                confidence=0.96,
+                ocr_variant="normal",
+                text_raw="Long Corners",
+                text_normalized=skill_scanner._normalize_skill_text("Long Corners"),
+            ),
+            _base_row(
+                confidence=0.74,
+                ocr_variant="dim",
+                text_raw="Corner Adept ○",
+                text_normalized=skill_scanner._normalize_skill_text("Corner Adept ○"),
+                crop_bbox=[50, 102, 144, 24],
+            ),
+        ]
+        matched = skill_scanner._match_skill_rows_to_shortlist(rows, shortlist)
+        self.assertEqual(matched, [])
+
+    def test_true_corner_adept_dim_row_survives_when_normal_variant_corroborates(self):
+        shortlist = ["Corner Adept ○"]
+        rows = [
+            _base_row(
+                confidence=0.67,
+                ocr_variant="normal",
+                text_raw="Comer Adept ○",
+                text_normalized=skill_scanner._normalize_skill_text("Comer Adept ○"),
+            ),
+            _base_row(
+                confidence=0.74,
+                ocr_variant="dim",
+                text_raw="Corner Adept ○",
+                text_normalized=skill_scanner._normalize_skill_text("Corner Adept ○"),
+                crop_bbox=[50, 102, 144, 24],
+            ),
+        ]
+        matched = skill_scanner._match_skill_rows_to_shortlist(rows, shortlist)
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0]["match_name"], "Corner Adept ○")
+        self.assertEqual(matched[0]["chosen_variant"], "dim")
+        self.assertEqual(matched[0]["ocr_variants_seen"], ["normal", "dim"])
+        self.assertIn("adept", matched[0]["token_evidence"]["distinctive_tokens_present"])
+        self.assertGreaterEqual(float(matched[0]["consensus_score"]), 0.92)
+
 
 if __name__ == "__main__":
     unittest.main()
