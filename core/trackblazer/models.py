@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -914,11 +915,40 @@ class TurnPlan:
   timing: Dict[str, Any] = field(default_factory=dict)
   debug_summary: Dict[str, Any] = field(default_factory=dict)
   planner_metadata: Dict[str, Any] = field(default_factory=dict)
+  review_context: Dict[str, Any] = field(default_factory=dict)
   legacy_shared_plan: Dict[str, Any] = field(default_factory=dict)
   step_sequence: List[ExecutionStep] = field(default_factory=list)
 
   def to_planned_actions(self) -> Dict[str, Any]:
-    return dict(self.legacy_shared_plan)
+    planned = dict(self.legacy_shared_plan)
+
+    inventory_scan = dict(planned.get("inventory_scan") or {})
+    inventory_scan.update(dict((self.inventory_snapshot or {}).get("scan") or {}))
+    if inventory_scan:
+      planned["inventory_scan"] = inventory_scan
+
+    shop_scan = dict(planned.get("shop_scan") or {})
+    shop_scan.update(dict((self.shop_plan or {}).get("scan") or {}))
+    if shop_scan:
+      planned["shop_scan"] = shop_scan
+
+    planner_would_buy = list((self.shop_plan or {}).get("would_buy") or [])
+    if planner_would_buy:
+      planned["would_buy"] = planner_would_buy
+
+    planner_would_use = list((self.item_plan or {}).get("pre_action_items") or [])
+    if planner_would_use:
+      planned["would_use"] = planner_would_use
+
+    planner_deferred_use = list((self.item_plan or {}).get("deferred_use") or [])
+    if planner_deferred_use or "deferred_use" not in planned:
+      planned["deferred_use"] = planner_deferred_use
+
+    item_context = dict((self.item_plan or {}).get("context") or {})
+    if item_context:
+      planned["would_use_context"] = item_context
+
+    return planned
 
   @classmethod
   def from_snapshot(cls, snapshot: Optional[Dict[str, Any]] = None) -> "TurnPlan":
@@ -941,12 +971,21 @@ class TurnPlan:
       timing=dict(snapshot.get("timing") or {}),
       debug_summary=dict(snapshot.get("debug_summary") or {}),
       planner_metadata=dict(snapshot.get("planner_metadata") or {}),
+      review_context=dict(snapshot.get("review_context") or {}),
       legacy_shared_plan=dict(snapshot.get("legacy_shared_plan") or {}),
       step_sequence=step_sequence,
     )
 
   def to_turn_discussion(self, snapshot_context: Optional[Dict[str, Any]] = None) -> str:
-    return render_turn_discussion(snapshot_context or {}, self.to_planned_actions())
+    snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
+    merged_context = dict(snapshot_context)
+    review_context = dict(self.review_context or {})
+    for key in ("selected_action", "ranked_trainings", "reasoning_notes", "planned_clicks"):
+      value = review_context.get(key)
+      if value in (None, {}, []):
+        continue
+      merged_context[key] = copy.deepcopy(value)
+    return render_turn_discussion(merged_context, self.to_planned_actions())
 
   def to_snapshot(self) -> Dict[str, Any]:
     return {
@@ -961,6 +1000,7 @@ class TurnPlan:
       "timing": dict(self.timing),
       "debug_summary": dict(self.debug_summary),
       "planner_metadata": dict(self.planner_metadata),
+      "review_context": dict(self.review_context),
       "legacy_shared_plan": self.to_planned_actions(),
       "step_sequence": [step.to_dict() for step in self.step_sequence],
     }

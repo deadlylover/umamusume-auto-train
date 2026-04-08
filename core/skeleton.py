@@ -36,6 +36,7 @@ from core.trackblazer.planner import (
   update_turn_discussion_dual_run,
 )
 from core.trackblazer.models import TurnPlan
+from core.trackblazer.review import build_ranked_training_snapshot as _build_trackblazer_ranked_training_snapshot
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
   SUB_PHASE_POST_ACTION_RESOLUTION,
@@ -1906,11 +1907,14 @@ def _planned_clicks_for_action(action):
   return skill_clicks + pre_action_clicks
 
 
-def _build_trackblazer_planned_actions(state_obj, action):
+def _build_trackblazer_planned_actions(state_obj, action, planner_state=None):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return {}
 
-  planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
+  planner_state = (
+    planner_state if isinstance(planner_state, dict) else
+    (plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {})
+  )
   turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
   if turn_plan_snapshot:
     return TurnPlan.from_snapshot(turn_plan_snapshot).to_planned_actions()
@@ -3494,8 +3498,26 @@ def _ocr_debug_for_action(state_obj, action):
 
 
 def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  planner_state = {}
   if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
-    plan_once(state_obj, action, limit=8)
+    planner_state = plan_once(state_obj, action, limit=8)
+  turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
+  planner_turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot) if turn_plan_snapshot else None
+  planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})
+  planner_review_context = dict((planner_turn_plan.review_context if planner_turn_plan else {}) or {})
+  planner_selected_action = dict(planner_review_context.get("selected_action") or {})
+  planner_ranked_trainings = copy.deepcopy(planner_review_context.get("ranked_trainings") or [])
+  planner_pre_action_items = list(planner_item_plan.get("pre_action_items") or [])
+  planner_reassess_after_item_use = planner_item_plan.get("reassess_after_item_use")
+  if planner_pre_action_items and not planner_selected_action.get("pre_action_item_use"):
+    planner_selected_action["pre_action_item_use"] = copy.deepcopy(planner_pre_action_items)
+  if planner_reassess_after_item_use:
+    planner_selected_action["reassess_after_item_use"] = bool(planner_reassess_after_item_use)
+  elif (
+    planner_reassess_after_item_use is not None
+    and planner_selected_action.get("reassess_after_item_use") is None
+  ):
+    planner_selected_action["reassess_after_item_use"] = bool(planner_reassess_after_item_use)
   profile_info = _active_region_profile_info()
   backend_state = bot.get_backend_state()
   post_action_resolution = bot.get_post_action_resolution_state()
@@ -3549,12 +3571,12 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     )
     state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
     state_summary["trackblazer_planner_runtime"] = state_obj.get(PLANNER_RUNTIME_KEY)
-    state_summary["trackblazer_planner_state"] = state_obj.get(PLANNER_STATE_KEY)
+    state_summary["trackblazer_planner_state"] = planner_state or state_obj.get(PLANNER_STATE_KEY)
   state_summary["skill_purchase_check"] = {
     **get_skill_purchase_check_state(),
     **(state_obj.get("skill_purchase_check") or {}),
   }
-  selected_action = {
+  live_selected_action = {
     "func": getattr(action, "func", None),
     "training_name": action.get("training_name") if hasattr(action, "get") else None,
     "training_function": action.get("training_function") if hasattr(action, "get") else None,
@@ -3566,21 +3588,47 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "total_rainbow_friends": action.get("training_data", {}).get("total_rainbow_friends") if hasattr(action, "get") else None,
     "prefer_rival_race": action.get("prefer_rival_race") if hasattr(action, "get") else None,
     "rival_scout": action.get("rival_scout") if hasattr(action, "get") else None,
-    "pre_action_item_use": action.get("trackblazer_pre_action_items") if hasattr(action, "get") else None,
-    "reassess_after_item_use": action.get("trackblazer_reassess_after_item_use") if hasattr(action, "get") else None,
+    "pre_action_item_use": (
+      action.get("trackblazer_pre_action_items")
+      if hasattr(action, "get") and action.get("trackblazer_pre_action_items") is not None else
+      planner_pre_action_items
+    ),
+    "reassess_after_item_use": (
+      action.get("trackblazer_reassess_after_item_use")
+      if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use") is not None else
+      planner_reassess_after_item_use
+    ),
     "trackblazer_race_decision": action.get("trackblazer_race_decision") if hasattr(action, "get") else None,
     "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead") if hasattr(action, "get") else None,
   }
+  selected_action = {
+    **live_selected_action,
+    **planner_selected_action,
+  }
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
-  if isinstance(state_obj, dict):
+  if not available_trainings:
+    available_trainings = copy.deepcopy(
+      (((planner_state or {}).get("dual_run") or {}).get("observed") or {}).get("available_trainings") or {}
+    )
+  if planner_ranked_trainings:
+    ranked_trainings = planner_ranked_trainings
+  elif isinstance(state_obj, dict):
     ranked_trainings = _build_ranked_training_snapshot(
       state_obj=state_obj,
       available_trainings=available_trainings,
       training_function=selected_action.get("training_function"),
     )
+    if planner_turn_plan is not None:
+      planner_turn_plan.review_context = {
+        **planner_review_context,
+        "selected_action": copy.deepcopy(selected_action),
+        "ranked_trainings": copy.deepcopy(ranked_trainings),
+      }
+      planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
+      state_obj[PLANNER_STATE_KEY] = planner_state
   resolved_planned_clicks = planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action)
-  planned_actions = _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {}
+  planned_actions = _build_trackblazer_planned_actions(state_obj, action, planner_state=planner_state) if isinstance(state_obj, dict) else {}
   planner_dual_run_comparison = {}
   if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     planner_dual_run_comparison = update_turn_discussion_dual_run(
@@ -3623,192 +3671,12 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
   }
 
 
-def _get_training_filter_settings(training_function):
-  settings = {
-    "use_risk_taking": False,
-    "check_stat_caps": False,
-  }
-  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain", "stat_weight_training"):
-    settings["use_risk_taking"] = True
-  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "stat_weight_training"):
-    settings["check_stat_caps"] = True
-  return settings
-
-
-def _resolve_review_risk_taking_set(state_obj, training_function):
-  settings = _get_training_filter_settings(training_function)
-  if not settings["use_risk_taking"] or not isinstance(training_function, str):
-    return {}
-
-  training_template = Strategy().get_training_template(state_obj) or {}
-  risk_taking_set = training_template.get("risk_taking_set")
-  return risk_taking_set if isinstance(risk_taking_set, dict) else {}
-
-
-def _summarize_training_exclusion(training_name, training_data, state_obj, training_function, risk_taking_set=None):
-  settings = _get_training_filter_settings(training_function)
-  current_stats = state_obj.get("current_stats") or {}
-  current_stat = current_stats.get(training_name)
-  stat_cap = config.STAT_CAPS.get(training_name)
-  failure = training_data.get("failure")
-  risk_increase = 0
-  max_allowed_failure = config.MAX_FAILURE
-
-  if settings["use_risk_taking"]:
-    resolved_risk_taking_set = risk_taking_set if isinstance(risk_taking_set, dict) else {}
-    if resolved_risk_taking_set:
-      from core.trainings import calculate_risk_increase
-      risk_increase = calculate_risk_increase(training_data, resolved_risk_taking_set)
-      max_allowed_failure += risk_increase
-
-  reason = "filtered"
-  if settings["check_stat_caps"] and current_stat is not None and stat_cap is not None and current_stat >= stat_cap:
-    reason = f"stat cap ({current_stat}/{stat_cap})"
-  elif failure is not None and int(failure) > max_allowed_failure:
-    reason = f"fail {int(failure)}% > {int(max_allowed_failure)}%"
-  elif training_function:
-    reason = f"not selected by {training_function}"
-
-  return max_allowed_failure, risk_increase, reason
-
-
-def _score_training_for_display(training_name, training_data, state_obj, training_function, training_template):
-  """Compute a score for a filtered-out training so it can be compared in the
-  operator console.  Uses the same formula as the configured training function."""
-  from copy import deepcopy
-  from core.trainings import (
-    most_stat_score, max_out_friendships_score,
-    rainbow_training_score, add_scenario_gimmick_score,
-    most_support_score,
-  )
-  # Work on a copy so scoring side-effects don't leak into the original data.
-  td = deepcopy(training_data)
-  x = (training_name, td)
-  try:
-    if training_function == "meta_training":
-      stat_gain = most_stat_score(x, state_obj, training_template)
-      non_max = max_out_friendships_score(x)
-      rainbow = rainbow_training_score(x)
-      rainbow = add_scenario_gimmick_score(x, rainbow, state_obj)
-      return ((stat_gain[0] / 10) + non_max[0] + rainbow[0], stat_gain[1])
-    if training_function == "rainbow_training":
-      rainbow = rainbow_training_score(x)
-      rainbow = add_scenario_gimmick_score(x, rainbow, state_obj)
-      non_max = max_out_friendships_score(x)
-      return (rainbow[0] + non_max[0] * config.NON_MAX_SUPPORT_WEIGHT, rainbow[1])
-    if training_function == "most_support_cards":
-      support = most_support_score(x)
-      support = add_scenario_gimmick_score(x, support, state_obj)
-      non_max = max_out_friendships_score(x)
-      return (non_max[0] * config.NON_MAX_SUPPORT_WEIGHT + support[0], support[1])
-    if training_function == "most_stat_gain":
-      return most_stat_score(x, state_obj, training_template)
-    if training_function == "stat_weight_training":
-      stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
-      if not isinstance(stat_weights, dict) or not stat_weights:
-        stat_weights = training_template.get("stat_weight_set", {})
-      stat_gains = td.get("stat_gains", {})
-      total_value = 0
-      current_stats = state_obj.get("current_stats") or {}
-      for stat, gain in stat_gains.items():
-        if stat == "sp":
-          continue
-        if current_stats.get(stat, 0) >= config.STAT_CAPS.get(stat, 9999):
-          continue
-        weight = stat_weights.get(stat, 1)
-        total_value += gain * weight
-      if bot.get_trackblazer_bond_boost_enabled():
-        cutoff = bot.get_trackblazer_bond_boost_cutoff()
-        current_year = state_obj.get("year", "")
-        try:
-          active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
-        except ValueError:
-          active = False
-        if active:
-          friendship_levels = td.get('total_friendship_levels', {})
-          raiseable = friendship_levels.get('blue', 0) + friendship_levels.get('green', 0)
-          if raiseable > 0:
-            per_friend = 15 if training_name == "wit" else 10
-            total_value += raiseable * per_friend
-      from core.trainings import get_priority_index
-      priority_index = get_priority_index(x)
-      return (total_value, -priority_index)
-    if training_function == "max_out_friendships":
-      max_f = max_out_friendships_score(x)
-      max_f = add_scenario_gimmick_score(x, max_f, state_obj)
-      rainbow = rainbow_training_score(x)
-      return (max_f[0] + rainbow[0] * 0.25 * config.RAINBOW_SUPPORT_WEIGHT_ADDITION, max_f[1])
-    # Fallback: stat-gain only
-    return most_stat_score(x, state_obj, training_template)
-  except Exception:
-    return None
-
-
 def _build_ranked_training_snapshot(state_obj, available_trainings, training_function):
-  raw_training_results = state_obj.get("training_results", {}) or {}
-  merged_trainings = CleanDefaultDict()
-  risk_taking_set = _resolve_review_risk_taking_set(state_obj, training_function)
-
-  # Resolve training template once for scoring filtered trainings.
-  training_template = None
-  filtered_keys = set(raw_training_results.keys()) - set(available_trainings.keys())
-  if filtered_keys:
-    try:
-      training_template = Strategy().get_training_template(state_obj) or {}
-    except Exception:
-      training_template = {}
-
-  for training_name, training_data in raw_training_results.items():
-    max_allowed_failure, risk_increase, exclusion_reason = _summarize_training_exclusion(
-      training_name=training_name,
-      training_data=training_data,
-      state_obj=state_obj,
-      training_function=training_function,
-      risk_taking_set=risk_taking_set,
-    )
-
-    # Compute a display score even for filtered-out trainings.
-    score_tuple = None
-    if training_name in filtered_keys and training_template is not None:
-      score_tuple = _score_training_for_display(
-        training_name, training_data, state_obj, training_function, training_template,
-      )
-
-    merged_trainings[training_name] = {
-      "name": training_name,
-      "score_tuple": score_tuple,
-      "failure": training_data.get("failure"),
-      "max_allowed_failure": max_allowed_failure,
-      "risk_increase": risk_increase,
-      "total_supports": training_data.get("total_supports"),
-      "total_rainbow_friends": None,
-      "total_friendship_increases": None,
-      "stat_gains": training_data.get("stat_gains"),
-      "unity_gauge_fills": training_data.get("unity_gauge_fills"),
-      "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
-      "filtered_out": True,
-      "excluded_reason": exclusion_reason,
-    }
-
-  for training_name, training_data in available_trainings.items():
-    merged_trainings[training_name] = {
-      "name": training_name,
-      "score_tuple": training_data.get("score_tuple"),
-      "failure": training_data.get("failure"),
-      "max_allowed_failure": training_data.get("max_allowed_failure"),
-      "risk_increase": training_data.get("risk_increase", 0),
-      "total_supports": training_data.get("total_supports"),
-      "total_rainbow_friends": training_data.get("total_rainbow_friends"),
-      "total_friendship_increases": training_data.get("total_friendship_increases"),
-      "stat_gains": training_data.get("stat_gains"),
-      "unity_gauge_fills": training_data.get("unity_gauge_fills"),
-      "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
-      "filtered_out": False,
-      "excluded_reason": None,
-      "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
-    }
-
-  return list(merged_trainings.values())
+  return _build_trackblazer_ranked_training_snapshot(
+    state_obj=state_obj,
+    available_trainings=available_trainings,
+    training_function=training_function,
+  )
 
 
 def build_startup_scan_snapshot(sub_phase, message, ocr_debug=None, reasoning_notes=None, available_actions=None):

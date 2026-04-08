@@ -12,6 +12,7 @@ from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
 from core.trackblazer_item_use import plan_item_usage
 from core.trackblazer.observe import hydrate_observed_turn_state
+from core.trackblazer.review import build_ranked_training_snapshot
 from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items
 from core.trackblazer.models import (
   BackgroundSkillScanState,
@@ -67,6 +68,7 @@ def _state_signature(state_obj) -> Dict[str, Any]:
     "trackblazer_shop_flow": (state_obj or {}).get("trackblazer_shop_flow"),
     "trackblazer_inventory_flow": (state_obj or {}).get("trackblazer_inventory_flow"),
     "trackblazer_inventory_pre_shop_flow": (state_obj or {}).get("trackblazer_inventory_pre_shop_flow"),
+    "training_results": (state_obj or {}).get("training_results"),
     "trackblazer_climax": (state_obj or {}).get("trackblazer_climax"),
     "trackblazer_climax_locked_race": (state_obj or {}).get("trackblazer_climax_locked_race"),
     "trackblazer_trainings_remaining_upper_bound": (state_obj or {}).get("trackblazer_trainings_remaining_upper_bound"),
@@ -79,6 +81,7 @@ def _action_signature(action) -> Dict[str, Any]:
   training_data = action.get("training_data") or {}
   return {
     "func": getattr(action, "func", None),
+    "available_trainings": action.get("available_trainings"),
     "training_name": action.get("training_name"),
     "training_function": action.get("training_function"),
     "race_name": action.get("race_name"),
@@ -119,6 +122,35 @@ def _skill_context_signature(state_obj) -> Dict[str, Any]:
     "should_check": bool(context.get("should_check")),
     "current_sp": context.get("current_sp"),
     "threshold": context.get("threshold"),
+  }
+
+
+def _build_selected_action_review_context(action, pre_action_items=None, reassess_after_item_use=None) -> Dict[str, Any]:
+  if not hasattr(action, "get"):
+    return {
+      "func": getattr(action, "func", None),
+      "pre_action_item_use": list(pre_action_items or []),
+      "reassess_after_item_use": bool(reassess_after_item_use),
+    }
+  training_data = action.get("training_data") or {}
+  return {
+    "func": getattr(action, "func", None),
+    "training_name": action.get("training_name"),
+    "training_function": action.get("training_function"),
+    "race_name": action.get("race_name"),
+    "race_image_path": action.get("race_image_path"),
+    "race_grade_target": action.get("race_grade_target"),
+    "score_tuple": copy.deepcopy(training_data.get("score_tuple")),
+    "stat_gains": copy.deepcopy(training_data.get("stat_gains")),
+    "failure": training_data.get("failure"),
+    "total_supports": training_data.get("total_supports"),
+    "total_rainbow_friends": training_data.get("total_rainbow_friends"),
+    "prefer_rival_race": action.get("prefer_rival_race"),
+    "rival_scout": copy.deepcopy(action.get("rival_scout") or {}),
+    "pre_action_item_use": copy.deepcopy(pre_action_items or []),
+    "reassess_after_item_use": bool(reassess_after_item_use),
+    "trackblazer_race_decision": copy.deepcopy(action.get("trackblazer_race_decision") or {}),
+    "trackblazer_race_lookahead": copy.deepcopy(action.get("trackblazer_race_lookahead") or {}),
   }
 
 
@@ -480,9 +512,9 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
   legacy_shared_plan = planner_state.get("legacy_shared_plan") or {}
   inventory_plan = legacy_shared_plan.get("inventory_scan") or {}
   shop_plan = legacy_shared_plan.get("shop_scan") or {}
-  would_buy = list(legacy_shared_plan.get("would_buy") or [])
-  would_use = list(legacy_shared_plan.get("would_use") or [])
-  deferred_use = list(legacy_shared_plan.get("deferred_use") or [])
+  would_buy = list(planner_state.get("shop_buy_plan") or legacy_shared_plan.get("would_buy") or [])
+  would_use = list(planner_state.get("pre_action_items") or legacy_shared_plan.get("would_use") or [])
+  deferred_use = list(planner_state.get("deferred_use") or legacy_shared_plan.get("deferred_use") or [])
 
   race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
   rival_scout = _action_value(action, "rival_scout", {}) or {}
@@ -805,6 +837,11 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "item_use_context": item_context,
     },
   )
+  ranked_trainings = build_ranked_training_snapshot(
+    state_obj=state_obj,
+    available_trainings=copy.deepcopy(action.get("available_trainings") or {}) if hasattr(action, "get") else {},
+    training_function=action.get("training_function") if hasattr(action, "get") else None,
+  )
 
   turn_plan = TurnPlan(
     version=PLANNER_VERSION,
@@ -816,6 +853,16 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "would_buy": shop_buy_plan,
       "shop_summary": copy.deepcopy(shop_summary),
       "effective_shop_items": copy.deepcopy(effective_shop_items),
+      "scan": {
+        "status": _shop_scan_status(shop_flow),
+        "reason": (shop_flow or {}).get("reason") or "",
+        "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
+        "items_detected": (state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items,
+        "not_purchasable": sorted(
+          set((state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items or [])
+          - set((state_obj.get("trackblazer_shop_summary") or {}).get("purchasable_items") or shop_items or [])
+        ),
+      },
     },
     item_plan={
       "item_use_plan": copy.deepcopy(item_use_plan),
@@ -823,9 +870,31 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "deferred_use": copy.deepcopy(deferred_use),
       "reassess_after_item_use": bool(reassess_after_item_use),
       "context": copy.deepcopy(item_context),
+      "selected_action_binding": {
+        "func": getattr(action, "func", None),
+        "training_name": action.get("training_name") if hasattr(action, "get") else None,
+        "race_name": action.get("race_name") if hasattr(action, "get") else None,
+      },
+      "reassess_boundary": {
+        "required": bool(reassess_after_item_use),
+        "trigger_items": [entry.get("key") for entry in execution_items if isinstance(entry, dict) and entry.get("key")],
+        "reason": (
+          "selected pre-action items change board state and require a fresh evaluation"
+          if reassess_after_item_use else
+          "selected pre-action items can flow directly into the already selected action"
+        ),
+      },
     },
     inventory_snapshot={
       "source": inventory_source,
+      "scan": {
+        "status": _inventory_scan_status(inventory_flow),
+        "reason": (inventory_flow or {}).get("reason") or "",
+        "button_visible": (inventory_flow or {}).get("use_training_items_button_visible"),
+        "items_detected": items_detected,
+        "held_quantities": held_quantities,
+        "actionable_items": list((inventory_summary or {}).get("actionable_items") or []),
+      },
       "pre_plan_summary": copy.deepcopy(inventory_summary),
       "projected_post_buy_summary": projected_summary,
     },
@@ -838,6 +907,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "shop_item_count": len(shop_buy_plan),
       "item_candidate_count": len(list(item_use_plan.get("candidates") or [])),
       "execution_item_count": len(execution_items),
+      "ranked_training_count": len(ranked_trainings),
       "inventory_source": inventory_source,
     },
     planner_metadata={
@@ -845,6 +915,14 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "decision_path": "legacy",
       "inventory_source": inventory_source,
       "runtime": copy.deepcopy(runtime_state),
+    },
+    review_context={
+      "selected_action": _build_selected_action_review_context(
+        action,
+        pre_action_items=execution_items,
+        reassess_after_item_use=reassess_after_item_use,
+      ),
+      "ranked_trainings": copy.deepcopy(ranked_trainings),
     },
     legacy_shared_plan=review_planned_actions,
     step_sequence=_build_step_sequence(

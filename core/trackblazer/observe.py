@@ -34,6 +34,8 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
   skill_purchase_plan = copy.deepcopy(state_obj.get("skill_purchase_plan") or {})
   training_results = copy.deepcopy(state_obj.get("training_results") or {})
   available_trainings = copy.deepcopy(selected_action.get("available_trainings") or {}) if selected_action else {}
+  planner_pre_action_items = copy.deepcopy(planner_state.get("pre_action_items") or [])
+  planner_reassess_after_item_use = bool(planner_state.get("reassess_after_item_use"))
   inventory_snapshot = {
     "pre_shop": inventory_pre_shop,
     "pre_shop_summary": inventory_pre_shop_summary,
@@ -115,8 +117,16 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
       "consecutive_warning_cancel_reason": selected_action.get("_consecutive_warning_cancel_reason") if selected_action else None,
       "rival_fallback_func": selected_action.get("_rival_fallback_func") if selected_action else None,
       "training_data": copy.deepcopy(selected_action.get("training_data") or {}) if selected_action else {},
-      "trackblazer_pre_action_items": copy.deepcopy(selected_action.get("trackblazer_pre_action_items") or []) if selected_action else [],
-      "trackblazer_reassess_after_item_use": bool(selected_action.get("trackblazer_reassess_after_item_use")) if selected_action else False,
+      "trackblazer_pre_action_items": (
+        copy.deepcopy(selected_action.get("trackblazer_pre_action_items") or [])
+        if selected_action and selected_action.get("trackblazer_pre_action_items") is not None else
+        planner_pre_action_items
+      ),
+      "trackblazer_reassess_after_item_use": (
+        bool(selected_action.get("trackblazer_reassess_after_item_use"))
+        if selected_action and selected_action.get("trackblazer_reassess_after_item_use") is not None else
+        planner_reassess_after_item_use
+      ),
       "trackblazer_race_decision": copy.deepcopy(selected_action.get("trackblazer_race_decision") or {}) if selected_action else {},
       "trackblazer_race_lookahead": copy.deepcopy(selected_action.get("trackblazer_race_lookahead") or {}) if selected_action else {},
       "rival_scout": copy.deepcopy(selected_action.get("rival_scout") or {}) if selected_action else {},

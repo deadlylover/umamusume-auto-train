@@ -1,4 +1,5 @@
 import json
+import copy
 from contextlib import ExitStack
 from unittest.mock import patch
 
@@ -6,6 +7,7 @@ import core.config as config
 import utils.constants as constants
 from core.actions import Action
 from core.skeleton import build_review_snapshot
+from core.trackblazer.models import TurnPlan
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 
@@ -401,10 +403,31 @@ def main():
       missing_kinds = sorted(expected_candidate_kinds[case_name] - set(candidate_kinds))
       assert not missing_kinds, f"{case_name}: missing candidate kinds {missing_kinds}"
       turn_plan = (state_obj.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+      review_context = dict(turn_plan.get("review_context") or {})
       step_types = [entry.get("step_type") for entry in list(turn_plan.get("step_sequence") or []) if isinstance(entry, dict)]
       assert "await_operator_review" in step_types, f"{case_name}: missing await_operator_review step"
       assert "execute_main_action" in step_types, f"{case_name}: missing execute_main_action step"
       assert "resolve_post_action" in step_types, f"{case_name}: missing resolve_post_action step"
+      assert review_context.get("selected_action"), f"{case_name}: missing planner-owned selected_action review context"
+      assert review_context.get("ranked_trainings"), f"{case_name}: missing planner-owned ranked trainings"
+      assert review_context.get("ranked_trainings") == snapshot.get("ranked_trainings"), f"{case_name}: planner-owned ranked trainings should match review snapshot"
+
+      planner_only_turn_plan = copy.deepcopy(turn_plan)
+      planner_only_legacy_plan = planner_only_turn_plan.get("legacy_shared_plan") or {}
+      planner_only_legacy_plan["inventory_scan"] = {}
+      planner_only_legacy_plan["would_use"] = []
+      planner_only_legacy_plan["deferred_use"] = []
+      planner_only_legacy_plan["shop_scan"] = {}
+      planner_only_legacy_plan["would_buy"] = []
+      planner_only_turn_plan["legacy_shared_plan"] = planner_only_legacy_plan
+      planner_only_planned_actions = TurnPlan.from_snapshot(planner_only_turn_plan).to_planned_actions()
+      original_planned_actions = snapshot.get("planned_actions") or {}
+      assert planner_only_planned_actions.get("inventory_scan") == original_planned_actions.get("inventory_scan"), f"{case_name}: inventory scan should be planner-native"
+      assert planner_only_planned_actions.get("would_use") == original_planned_actions.get("would_use"), f"{case_name}: would_use should be planner-native"
+      assert planner_only_planned_actions.get("deferred_use") == original_planned_actions.get("deferred_use"), f"{case_name}: deferred_use should be planner-native"
+      assert planner_only_planned_actions.get("shop_scan") == original_planned_actions.get("shop_scan"), f"{case_name}: shop scan should be planner-native"
+      assert planner_only_planned_actions.get("would_buy") == original_planned_actions.get("would_buy"), f"{case_name}: would_buy should be planner-native"
+
       cases[case_name] = {
         "match": comparison.get("match"),
         "legacy_hash": comparison.get("legacy_hash"),
@@ -412,6 +435,145 @@ def main():
         "candidate_kinds": candidate_kinds,
         "step_types": step_types,
       }
+
+    planner_fallback_state, planner_fallback_action = _prepare_case("training")
+    initial_snapshot = build_review_snapshot(
+      planner_fallback_state,
+      planner_fallback_action,
+      reasoning_notes="synthetic planner fallback case",
+      ocr_debug=[],
+    )
+    planner_state = planner_fallback_state.get("trackblazer_planner_state") or {}
+    fallback_entry = {
+      "key": "vita_20",
+      "name": "Vita 20",
+      "usage_group": "energy",
+      "reason": "synthetic planner fallback check",
+    }
+    planner_state["pre_action_items"] = [fallback_entry]
+    planner_state["reassess_after_item_use"] = True
+    planner_state["item_use_context"] = {"training_name": "speed"}
+    turn_plan = planner_state.get("turn_plan") or {}
+    turn_plan["item_plan"] = {
+      **dict(turn_plan.get("item_plan") or {}),
+      "pre_action_items": [fallback_entry],
+      "deferred_use": [],
+      "reassess_after_item_use": True,
+      "context": {"training_name": "speed"},
+    }
+    planner_state["turn_plan"] = turn_plan
+    planner_fallback_state["trackblazer_planner_state"] = planner_state
+    planner_fallback_action.options.pop("trackblazer_pre_action_items", None)
+    planner_fallback_action.options.pop("trackblazer_reassess_after_item_use", None)
+    fallback_snapshot = build_review_snapshot(
+      planner_fallback_state,
+      planner_fallback_action,
+      reasoning_notes="synthetic planner fallback case",
+      ocr_debug=[],
+    )
+    selected_action = fallback_snapshot.get("selected_action") or {}
+    assert selected_action.get("pre_action_item_use") == [fallback_entry], "selected_action should fall back to planner pre-action items"
+    assert selected_action.get("reassess_after_item_use") is True, "selected_action should fall back to planner reassess flag"
+    assert initial_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, "planner fallback setup should still produce a valid initial comparison"
+
+    review_context_state, review_context_action = _prepare_case("training")
+    review_context_snapshot = build_review_snapshot(
+      review_context_state,
+      review_context_action,
+      reasoning_notes="synthetic planner review context case",
+      ocr_debug=[],
+    )
+    review_context_planner_state = review_context_state.get("trackblazer_planner_state") or {}
+    review_context_turn_plan = review_context_planner_state.get("turn_plan") or {}
+    review_context_payload = dict(review_context_turn_plan.get("review_context") or {})
+    review_context_payload["selected_action"] = {
+      **dict(review_context_payload.get("selected_action") or {}),
+      "training_name": "stamina",
+      "score_tuple": (99.0, 0),
+      "stat_gains": {"stamina": 33, "power": 7, "sp": 11},
+      "failure": 1,
+      "total_supports": 5,
+      "total_rainbow_friends": 2,
+      "trackblazer_race_decision": {
+        "should_race": False,
+        "reason": "synthetic planner-owned selected_action view",
+        "training_total_stats": 40,
+        "training_score": 99.0,
+        "race_available": False,
+      },
+    }
+    review_context_payload["ranked_trainings"] = [
+      {
+        "name": "stamina",
+        "score_tuple": (99.0, 0),
+        "failure": 1,
+        "total_supports": 5,
+        "total_rainbow_friends": 2,
+        "stat_gains": {"stamina": 33, "power": 7, "sp": 11},
+        "filtered_out": False,
+        "excluded_reason": None,
+      }
+    ]
+    review_context_turn_plan["review_context"] = review_context_payload
+    review_context_planner_state["turn_plan"] = review_context_turn_plan
+    review_context_state["trackblazer_planner_state"] = review_context_planner_state
+    review_context_followup = build_review_snapshot(
+      review_context_state,
+      review_context_action,
+      reasoning_notes="synthetic planner review context case",
+      ocr_debug=[],
+    )
+    followup_selected_action = review_context_followup.get("selected_action") or {}
+    assert followup_selected_action.get("training_name") == "stamina", "review snapshot should prefer planner-owned selected_action view"
+    assert followup_selected_action.get("score_tuple") == (99.0, 0), "review snapshot should preserve planner-owned selected_action score tuple"
+    assert followup_selected_action.get("trackblazer_race_decision", {}).get("reason") == "synthetic planner-owned selected_action view", "review snapshot should prefer planner-owned race decision summary"
+    followup_ranked_trainings = review_context_followup.get("ranked_trainings") or []
+    assert len(followup_ranked_trainings) == 1 and followup_ranked_trainings[0].get("name") == "stamina", "review snapshot should prefer planner-owned ranked trainings"
+    mutated_turn_plan = TurnPlan.from_snapshot((review_context_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {})
+    planner_text = mutated_turn_plan.to_turn_discussion({
+      "scenario_name": review_context_followup.get("scenario_name"),
+      "turn_label": review_context_followup.get("turn_label"),
+      "execution_intent": review_context_followup.get("execution_intent"),
+      "state_summary": review_context_followup.get("state_summary"),
+      "selected_action": {},
+      "ranked_trainings": [],
+      "reasoning_notes": review_context_followup.get("reasoning_notes"),
+      "planned_clicks": review_context_followup.get("planned_clicks"),
+    })
+    assert "Action: train stamina" in planner_text, "TurnPlan discussion should render from planner-owned selected_action context"
+    assert "Race Gate Reason: synthetic planner-owned selected_action view" in planner_text, "TurnPlan discussion should render planner-owned race summary"
+
+    freshness_state, freshness_action = _prepare_case("training")
+    freshness_initial = build_review_snapshot(
+      freshness_state,
+      freshness_action,
+      reasoning_notes="synthetic planner freshness case",
+      ocr_debug=[],
+    )
+    initial_turn_plan = (freshness_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    initial_freshness = dict(initial_turn_plan.get("freshness") or {})
+    freshness_action["available_trainings"] = copy.deepcopy(freshness_action.get("available_trainings") or {})
+    freshness_action["available_trainings"]["stamina"] = {
+      **dict(freshness_action["available_trainings"].get("stamina") or {}),
+      "score_tuple": (88.0, 0),
+      "stat_gains": {"stamina": 30, "power": 6, "sp": 9},
+      "failure": 0,
+    }
+    freshness_followup = build_review_snapshot(
+      freshness_state,
+      freshness_action,
+      reasoning_notes="synthetic planner freshness case",
+      ocr_debug=[],
+    )
+    refreshed_turn_plan = (freshness_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    refreshed_freshness = dict(refreshed_turn_plan.get("freshness") or {})
+    assert initial_freshness.get("action_key") != refreshed_freshness.get("action_key"), "planner freshness should invalidate when available trainings change"
+    refreshed_ranked_trainings = refreshed_turn_plan.get("review_context", {}).get("ranked_trainings") or []
+    stamina_entry = next((entry for entry in refreshed_ranked_trainings if entry.get("name") == "stamina"), {})
+    assert stamina_entry.get("score_tuple") == (88.0, 0), "planner-owned ranked trainings should refresh from updated available trainings"
+    assert freshness_followup.get("ranked_trainings") == refreshed_ranked_trainings, "review snapshot should reuse refreshed planner-owned ranked trainings"
+    assert freshness_initial.get("planner_dual_run_comparison", {}).get("match") is True, "initial freshness case should produce a valid planner comparison"
+    assert freshness_followup.get("planner_dual_run_comparison", {}).get("match") is True, "refreshed freshness case should preserve planner comparison parity"
 
   assert all(count == 0 for count in traversal_calls.values()), traversal_calls
   print(json.dumps({
