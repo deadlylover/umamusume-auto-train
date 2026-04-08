@@ -25,10 +25,14 @@ from core.skill import (
   update_skill_action_count,
 )
 from core.skill_scanner import collect_skill_purchase
-from core.trackblazer_item_use import plan_item_usage
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
 from core.race_selector import get_race_gate_for_turn_label
+from core.trackblazer.planner import (
+  PLANNER_RUNTIME_KEY,
+  PLANNER_STATE_KEY,
+  plan_once,
+)
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
   SUB_PHASE_POST_ACTION_RESOLUTION,
@@ -39,7 +43,7 @@ from core.runtime_flow import (
   SUB_PHASE_RESOLVE_SHOP_REFRESH_POPUP,
   SUB_PHASE_RETURN_TO_LOBBY,
 )
-from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items, get_priority_preview, policy_context
+from core.trackblazer_shop import get_dynamic_shop_limits, get_priority_preview, policy_context
 from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
 from core.trackblazer_race_logic import (
   evaluate_trackblazer_race,
@@ -1903,99 +1907,13 @@ def _build_trackblazer_planned_actions(state_obj, action):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return {}
 
-  inventory = state_obj.get("trackblazer_inventory") or {}
-  inventory_summary = state_obj.get("trackblazer_inventory_summary") or {}
-  inventory_flow = state_obj.get("trackblazer_inventory_flow") or {}
-  pre_shop_inventory_summary = state_obj.get("trackblazer_inventory_pre_shop_summary") or inventory_summary
-  pre_shop_inventory_flow = state_obj.get("trackblazer_inventory_pre_shop_flow") or inventory_flow
-  shop_items = list(state_obj.get("trackblazer_shop_items") or [])
-  shop_summary = state_obj.get("trackblazer_shop_summary") or {}
-  shop_flow = state_obj.get("trackblazer_shop_flow") or {}
-  held_quantities = pre_shop_inventory_summary.get("held_quantities") or {}
-  # Use pre-shop inventory data for item-use planning so it matches the
-  # inventory items shown in the planned-actions display.  The post-shop
-  # refresh may have overwritten state_obj with empty data if it failed to
-  # reopen the inventory screen.
-  pre_shop_inventory = state_obj.get("trackblazer_inventory_pre_shop") or inventory
-  plan_state = dict(state_obj)
-  plan_state["trackblazer_inventory"] = pre_shop_inventory
-  plan_state["trackblazer_inventory_summary"] = pre_shop_inventory_summary
-  inventory_items_detected = list(pre_shop_inventory_summary.get("items_detected") or [])
-  if not inventory_items_detected and isinstance(pre_shop_inventory, dict):
-    for item_key, item_entry in pre_shop_inventory.items():
-      if not isinstance(item_entry, dict):
-        continue
-      held_quantity = item_entry.get("held_quantity")
-      detected = bool(item_entry.get("detected"))
-      try:
-        held_quantity = int(held_quantity)
-      except (TypeError, ValueError):
-        held_quantity = 0
-      if detected or held_quantity > 0:
-        inventory_items_detected.append(item_key)
-  effective_shop_items = get_effective_shop_items(
-    policy=config.TRACKBLAZER_SHOP_POLICY,
-    year=state_obj.get("year"),
-    turn=state_obj.get("turn"),
-  )
-  action_shop_buy_plan = list(action.get("trackblazer_shop_buy_plan") or []) if hasattr(action, "get") else []
-  if action_shop_buy_plan:
-    would_buy = action_shop_buy_plan
-  else:
-    would_buy = _trackblazer_shop_buy_candidates(
-      effective_shop_items,
-      shop_items=shop_items,
-      shop_summary={
-        **(shop_summary or {}),
-        "year": state_obj.get("year"),
-        "turn": state_obj.get("turn"),
-      },
-      held_quantities=held_quantities,
-      limit=8,
-    )
-  if would_buy:
-    plan_state = _project_trackblazer_inventory_for_planned_buys(plan_state, would_buy)
-
-  item_use_plan = plan_item_usage(
-    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=plan_state,
-    action=action,
-    limit=8,
-  )
-
-  would_use = list(item_use_plan.get("candidates") or [])
-  deferred_use = list(item_use_plan.get("deferred") or [])
-  planned_pre_action_items = _trackblazer_pre_action_items(action)
-  if planned_pre_action_items:
-    planned_item_keys = {entry.get("key") for entry in planned_pre_action_items if entry.get("key")}
-    if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use"):
-      deferred_keys = {entry.get("key") for entry in deferred_use if isinstance(entry, dict)}
-      for entry in would_use:
-        item_key = entry.get("key")
-        if not item_key or item_key in planned_item_keys or item_key in deferred_keys:
-          continue
-        deferred_entry = dict(entry)
-        existing_reason = deferred_entry.get("reason") or ""
-        deferred_entry["reason"] = (
-          f"{existing_reason}; deferred until post-whistle reassess"
-          if existing_reason else
-          "deferred until post-whistle reassess"
-        )
-        deferred_use.append(deferred_entry)
-    would_use = list(planned_pre_action_items)
-  actionable_items = list(pre_shop_inventory_summary.get("actionable_items") or [])
-
-  inventory_status = "unknown"
-  if pre_shop_inventory_flow.get("opened") or pre_shop_inventory_flow.get("already_open"):
-    inventory_status = "scanned"
-  elif pre_shop_inventory_flow.get("skipped"):
-    inventory_status = "skipped"
-
-  shop_status = "unknown"
-  if shop_flow.get("entered"):
-    shop_status = "scanned" if shop_flow.get("closed") else "open_failed_to_close"
-  elif shop_flow:
-    shop_status = "skipped" if shop_flow.get("reason") else "failed"
+  planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
+  legacy_shared_plan = planner_state.get("legacy_shared_plan") or {}
+  inventory_plan = legacy_shared_plan.get("inventory_scan") or {}
+  shop_plan = legacy_shared_plan.get("shop_scan") or {}
+  would_buy = list(legacy_shared_plan.get("would_buy") or [])
+  would_use = list(legacy_shared_plan.get("would_use") or [])
+  deferred_use = list(legacy_shared_plan.get("deferred_use") or [])
 
   race_decision = action.get("trackblazer_race_decision") if hasattr(action, "get") else {}
   rival_scout = action.get("rival_scout") if hasattr(action, "get") else {}
@@ -2120,27 +2038,11 @@ def _build_trackblazer_planned_actions(state_obj, action):
     "race_decision": race_planned,
     "race_entry_gate": race_entry_gate,
     "race_scout": race_scout_planned,
-    "inventory_scan": {
-      "status": inventory_status,
-      "reason": pre_shop_inventory_flow.get("reason") or "",
-      "button_visible": pre_shop_inventory_flow.get("use_training_items_button_visible"),
-      "items_detected": inventory_items_detected,
-      "held_quantities": held_quantities,
-      "actionable_items": actionable_items,
-    },
+    "inventory_scan": inventory_plan,
     "would_use": would_use,
-    "would_use_context": item_use_plan.get("context") or {},
+    "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
     "deferred_use": deferred_use,
-    "shop_scan": {
-      "status": shop_status,
-      "reason": shop_flow.get("reason") or "",
-      "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
-      "items_detected": shop_summary.get("items_detected") or shop_items,
-      "not_purchasable": sorted(
-        set(shop_summary.get("items_detected") or shop_items or [])
-        - set(shop_summary.get("purchasable_items") or shop_items or [])
-      ),
-    },
+    "shop_scan": shop_plan,
     "would_buy": would_buy,
   }
 
@@ -2228,58 +2130,12 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
     return action
 
-  effective_shop_items = get_effective_shop_items(
-    policy=config.TRACKBLAZER_SHOP_POLICY,
-    year=state_obj.get("year"),
-    turn=state_obj.get("turn"),
-  )
-  held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
-  shop_buy_plan = _trackblazer_shop_buy_candidates(
-    effective_shop_items,
-    shop_items=state_obj.get("trackblazer_shop_items"),
-    shop_summary={
-      **(state_obj.get("trackblazer_shop_summary") or {}),
-      "year": state_obj.get("year"),
-      "turn": state_obj.get("turn"),
-    },
-    held_quantities=held_quantities,
-    limit=8,
-  )
-  action["trackblazer_shop_buy_plan"] = shop_buy_plan
-
-  planning_state = (
-    _project_trackblazer_inventory_for_planned_buys(state_obj, shop_buy_plan)
-    if shop_buy_plan else
-    state_obj
-  )
-  item_use_plan = plan_item_usage(
-    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=planning_state,
-    action=action,
-    limit=8,
-  )
-  candidates = list(item_use_plan.get("candidates") or [])
-  has_whistle = any(entry.get("key") == "reset_whistle" for entry in candidates)
-  if has_whistle:
-    # Reset Whistle reshuffles the board. Other items (energy, burst, stat)
-    # depend on the post-whistle board, so defer them to the reassess pass
-    # where they'll be re-planned against the new training state.
-    candidates = [entry for entry in candidates if entry.get("key") == "reset_whistle"]
-  elif any(entry.get("usage_group") == "energy" for entry in candidates):
-    # Energy items change fail rate, so a reassess will happen. Defer burst
-    # items (megaphones, stat-specific burst) to the reassess pass — they
-    # should only be committed once we've confirmed the training is still
-    # viable after the energy change.
-    _BURST_GROUPS = ("training_burst", "training_burst_specific")
-    candidates = [entry for entry in candidates if entry.get("usage_group") not in _BURST_GROUPS]
-  candidates = _order_trackblazer_pre_action_items(candidates)
-  item_context = item_use_plan.get("context") or {}
-  action["trackblazer_pre_action_items"] = candidates
-  action["trackblazer_item_use_context"] = item_context
-  # Reassess only when the final planned item list actually changes the board
-  # in a way that requires a fresh training scan. Charm-only failure bypass is
-  # action-local and should proceed directly into the selected training.
-  action["trackblazer_reassess_after_item_use"] = _trackblazer_items_require_reassess(candidates)
+  planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
+  action["trackblazer_shop_buy_plan"] = list(planner_state.get("shop_buy_plan") or [])
+  action["trackblazer_pre_action_items"] = list(planner_state.get("pre_action_items") or [])
+  action["trackblazer_item_use_context"] = dict(planner_state.get("item_use_context") or {})
+  # Reassess only when the shared per-snapshot planner result requires it.
+  action["trackblazer_reassess_after_item_use"] = bool(planner_state.get("reassess_after_item_use"))
   return action
 
 
@@ -3768,6 +3624,8 @@ def _ocr_debug_for_action(state_obj, action):
 
 
 def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
+    plan_once(state_obj, action, limit=8)
   profile_info = _active_region_profile_info()
   backend_state = bot.get_backend_state()
   post_action_resolution = bot.get_post_action_resolution_state()
@@ -3820,6 +3678,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       limit=10,
     )
     state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
+    state_summary["trackblazer_planner_runtime"] = state_obj.get(PLANNER_RUNTIME_KEY)
+    state_summary["trackblazer_planner_state"] = state_obj.get(PLANNER_STATE_KEY)
   state_summary["skill_purchase_check"] = {
     **get_skill_purchase_check_state(),
     **(state_obj.get("skill_purchase_check") or {}),
@@ -3862,6 +3722,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "trackblazer_inventory": state_obj.get("trackblazer_inventory") if isinstance(state_obj, dict) else None,
     "trackblazer_inventory_pre_shop": state_obj.get("trackblazer_inventory_pre_shop") if isinstance(state_obj, dict) else None,
     "trackblazer_shop_items": state_obj.get("trackblazer_shop_items") if isinstance(state_obj, dict) else None,
+    "trackblazer_planner_runtime": state_obj.get(PLANNER_RUNTIME_KEY) if isinstance(state_obj, dict) else None,
+    "trackblazer_planner_state": state_obj.get(PLANNER_STATE_KEY) if isinstance(state_obj, dict) else None,
     "planned_actions": _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {},
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
