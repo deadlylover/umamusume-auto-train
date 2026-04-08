@@ -82,6 +82,7 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
   observed_data = observed.to_dict()
   derived_data = derived.to_dict()
   selected_action = observed_data.get("selected_action") or {}
+  race_decision = copy.deepcopy(selected_action.get("trackblazer_race_decision") or {})
   candidates = []
   action_kind = _kind_from_action(selected_action)
 
@@ -111,6 +112,31 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       },
     )
 
+  if action_kind == "training" and selected_action.get("rest_promoted_to_training"):
+    _append_action_candidate(
+      candidates,
+      "stat_focused_training_override",
+      selected_action,
+      derived_data,
+      "stat-focused Trackblazer scoring promoted a provisional rest turn back into training",
+      source_facts={
+        "training_name": selected_action.get("training_name"),
+      },
+    )
+
+  if selected_action.get("is_race_day") and not selected_action.get("trackblazer_climax_race_day"):
+    _append_action_candidate(
+      candidates,
+      "forced_race_day",
+      selected_action,
+      derived_data,
+      "turn is on a forced race day in the legacy Trackblazer flow",
+      source_facts={
+        "is_race_day": True,
+        "race_name": selected_action.get("race_name"),
+      },
+    )
+
   if observed_data.get("trackblazer_climax_race_day") or selected_action.get("trackblazer_climax_race_day"):
     _append_action_candidate(
       candidates,
@@ -122,6 +148,19 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
         "trackblazer_climax_race_day": True,
         "banner_detected": bool(observed_data.get("trackblazer_climax_race_day_banner")),
         "button_detected": bool(observed_data.get("trackblazer_climax_race_day_button")),
+      },
+    )
+
+  if selected_action.get("scheduled_race") and not selected_action.get("trackblazer_lobby_scheduled_race"):
+    _append_action_candidate(
+      candidates,
+      "scheduled_race",
+      selected_action,
+      derived_data,
+      "scheduled race from the legacy race schedule branch is active",
+      source_facts={
+        "scheduled_race": True,
+        "race_name": selected_action.get("race_name"),
       },
     )
 
@@ -165,6 +204,33 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       "legacy flow selected a concrete race target",
       source_facts={
         "race_name": selected_action.get("race_name"),
+      },
+    )
+
+  if action_kind == "race" and selected_action.get("fallback_non_rival_race"):
+    _append_action_candidate(
+      candidates,
+      "fallback_non_rival_race",
+      selected_action,
+      derived_data,
+      "race gate escalated a weak board into a non-rival fallback race",
+      source_facts={
+        "fallback_non_rival_race": True,
+        "race_name": selected_action.get("race_name"),
+        "reason": race_decision.get("reason"),
+      },
+    )
+
+  if action_kind == "rest" and race_decision.get("prefer_rest_over_weak_training"):
+    _append_action_candidate(
+      candidates,
+      "weak_training_rest",
+      selected_action,
+      derived_data,
+      "race gate converted the selected turn into rest because the board was too weak to train or race",
+      source_facts={
+        "prefer_rest_over_weak_training": True,
+        "reason": race_decision.get("reason"),
       },
     )
 

@@ -15,6 +15,7 @@ from core.trackblazer.observe import hydrate_observed_turn_state
 from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items
 from core.trackblazer.models import (
   BackgroundSkillScanState,
+  ExecutionStep,
   PlannerFreshness,
   PlannerRuntimeState,
   TurnPlan,
@@ -81,13 +82,23 @@ def _action_signature(action) -> Dict[str, Any]:
     "training_name": action.get("training_name"),
     "training_function": action.get("training_function"),
     "race_name": action.get("race_name"),
+    "race_image_path": action.get("race_image_path"),
+    "race_grade_target": action.get("race_grade_target"),
     "prefer_rival_race": action.get("prefer_rival_race"),
+    "fallback_non_rival_race": action.get("fallback_non_rival_race"),
     "scheduled_race": action.get("scheduled_race"),
     "trackblazer_lobby_scheduled_race": action.get("trackblazer_lobby_scheduled_race"),
     "trackblazer_climax_race_day": action.get("trackblazer_climax_race_day"),
+    "race_mission_available": action.get("race_mission_available"),
+    "_trackblazer_rest_promoted_to_training": action.get("_trackblazer_rest_promoted_to_training"),
     "trackblazer_race_decision": action.get("trackblazer_race_decision"),
     "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead"),
+    "rival_scout": action.get("rival_scout"),
     "is_race_day": action.get("is_race_day"),
+    "_rival_fallback_func": action.get("_rival_fallback_func"),
+    "_consecutive_warning_force_rest": action.get("_consecutive_warning_force_rest"),
+    "_consecutive_warning_cancelled": action.get("_consecutive_warning_cancelled"),
+    "_consecutive_warning_cancel_reason": action.get("_consecutive_warning_cancel_reason"),
     "date_event_available": action.get("date_event_available"),
     "training_data": {
       "score_tuple": training_data.get("score_tuple"),
@@ -294,6 +305,116 @@ def _resolve_inventory_source(state_obj) -> Tuple[Dict[str, Any], Dict[str, Any]
     return pre_shop_inventory, pre_shop_summary, pre_shop_flow, "pre_shop_fallback"
 
   return current_inventory, current_summary, current_flow, "current"
+
+
+def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reassess_after_item_use) -> List[ExecutionStep]:
+  action_func = _action_func(action)
+  prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
+  skill_purchase_plan = dict((state_obj or {}).get("skill_purchase_plan") or {})
+  step_sequence = [
+    ExecutionStep(
+      step_type="await_operator_review",
+      intent="review_current_turn",
+      screen_preconditions=["lobby_snapshot_ready"],
+      success_transition="operator_confirmed",
+      failure_transition="review_cancelled",
+    ),
+  ]
+
+  if skill_purchase_plan:
+    step_sequence.append(
+      ExecutionStep(
+        step_type="execute_skill_purchases",
+        intent="commit_skill_purchase_plan",
+        screen_preconditions=["skills_menu_accessible"],
+        success_transition="skill_purchase_complete",
+        failure_transition="skill_purchase_failed",
+        planned_clicks=list(skill_purchase_plan.get("planned_clicks") or []),
+      )
+    )
+
+  if shop_buy_plan:
+    step_sequence.append(
+      ExecutionStep(
+        step_type="execute_shop_purchases",
+        intent="buy_planned_trackblazer_items",
+        screen_preconditions=["shop_entry_available"],
+        success_transition="shop_purchase_complete",
+        failure_transition="shop_purchase_failed",
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_type="await_lobby_after_shop",
+        intent="return_to_lobby_after_shop",
+        screen_preconditions=["shop_overlay_open"],
+        success_transition="lobby_restored",
+        failure_transition="lobby_return_failed",
+      )
+    )
+
+  if execution_items:
+    step_sequence.append(
+      ExecutionStep(
+        step_type="execute_pre_action_items",
+        intent="use_planned_pre_action_items",
+        screen_preconditions=["inventory_entry_available"],
+        success_transition="reassess_required" if reassess_after_item_use else "item_use_complete",
+        failure_transition="item_use_failed",
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_type="await_lobby_after_items",
+        intent="return_to_lobby_after_item_use",
+        screen_preconditions=["inventory_overlay_open"],
+        success_transition="reassess" if reassess_after_item_use else "lobby_restored",
+        failure_transition="lobby_return_failed",
+      )
+    )
+
+  if action_func == "do_race":
+    step_sequence.append(
+      ExecutionStep(
+        step_type="enforce_race_gate",
+        intent="apply_operator_race_gate",
+        screen_preconditions=["race_action_selected"],
+        success_transition="race_gate_cleared",
+        failure_transition="race_gate_blocked",
+      )
+    )
+    if prefer_rival_race:
+      step_sequence.append(
+        ExecutionStep(
+          step_type="execute_rival_scout",
+          intent="verify_rival_race_before_commit",
+          screen_preconditions=["race_list_accessible"],
+          success_transition="rival_race_confirmed",
+          failure_transition="revert_to_fallback_action",
+        )
+      )
+
+  if action_func:
+    step_sequence.append(
+      ExecutionStep(
+        step_type="execute_main_action",
+        intent=action_func,
+        screen_preconditions=["main_action_ready"],
+        success_transition="action_click_complete",
+        failure_transition="action_click_failed",
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_type="resolve_post_action",
+        intent="stabilize_after_action",
+        screen_preconditions=["post_action_transition_expected"],
+        success_transition="turn_complete",
+        failure_transition="post_action_resolution_failed",
+      )
+    )
+
+  return step_sequence
 
 
 def _attach_execution_item_plan(item_use_plan):
@@ -726,6 +847,13 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "runtime": copy.deepcopy(runtime_state),
     },
     legacy_shared_plan=review_planned_actions,
+    step_sequence=_build_step_sequence(
+      state_obj,
+      action,
+      shop_buy_plan,
+      execution_items,
+      reassess_after_item_use,
+    ),
   )
 
   plan_payload = {

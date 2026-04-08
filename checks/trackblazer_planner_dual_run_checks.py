@@ -182,6 +182,115 @@ def _rest_action():
   return action, training_results
 
 
+def _scheduled_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_training", "do_rest", "do_race"]
+  training_results = _training_results(selected_score=18.0, selected_failure=0)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "tokyo_yushun"
+  action["scheduled_race"] = True
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
+def _forced_race_day_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_training", "do_rest", "do_race"]
+  training_results = _training_results(selected_score=12.0, selected_failure=0)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "any"
+  action["is_race_day"] = True
+  action["year"] = "Senior Year"
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
+def _fallback_non_rival_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+  training_results = _training_results(selected_score=16.0, selected_failure=4)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "any"
+  action["fallback_non_rival_race"] = True
+  action["available_trainings"] = dict(training_results)
+  action["trackblazer_race_decision"] = {
+    "should_race": True,
+    "reason": "Weak board with rival gate fallback allowed a non-rival race attempt",
+    "training_total_stats": 16,
+    "training_score": 16.0,
+    "fallback_non_rival_race": True,
+    "prefer_rival_race": False,
+    "race_tier_target": "g3",
+    "race_name": "any",
+    "race_available": True,
+    "rival_indicator": False,
+  }
+  return action, training_results
+
+
+def _goal_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+  training_results = _training_results(selected_score=21.0, selected_failure=1)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "satsuki_sho"
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
+def _weak_training_rest_action():
+  action = Action()
+  action.func = "do_rest"
+  action.available_actions = ["do_rest", "do_training", "do_race"]
+  training_results = _training_results(selected_score=7.0, selected_failure=12)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = {
+    **dict(training_results["speed"]),
+    "weighted_stat_score": 7.0,
+    "score_tuple": (7.0, 0),
+    "stat_gains": {"speed": 5, "power": 2, "sp": 4},
+    "failure": 12,
+  }
+  action["energy_level"] = 14
+  action["available_trainings"] = dict(training_results)
+  action["trackblazer_race_decision"] = {
+    "should_race": False,
+    "reason": "Weak low-value board with upcoming cadence pressure; rest preferred over training",
+    "training_total_stats": 7,
+    "training_score": 7.0,
+    "prefer_rest_over_weak_training": True,
+    "race_available": False,
+    "rival_indicator": False,
+  }
+  return action, training_results
+
+
+def _stat_focused_training_override_action():
+  action = Action()
+  action.func = "do_training"
+  action.available_actions = ["do_training", "do_rest", "do_race"]
+  training_results = _training_results(selected_score=41.0, selected_failure=0)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["_trackblazer_rest_promoted_to_training"] = True
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
 def _prepare_case(case_name):
   state = _base_state()
   if case_name == "training":
@@ -194,10 +303,31 @@ def _prepare_case(case_name):
     action, training_results = _rest_action()
     state["energy_level"] = 5
     state["rival_indicator_detected"] = False
+  elif case_name == "scheduled_race":
+    action, training_results = _scheduled_race_action()
+    state["rival_indicator_detected"] = False
+  elif case_name == "forced_race_day":
+    action, training_results = _forced_race_day_action()
+    state["turn"] = "Race Day"
+    state["rival_indicator_detected"] = False
+  elif case_name == "fallback_non_rival_race":
+    action, training_results = _fallback_non_rival_race_action()
+    state["rival_indicator_detected"] = False
+  elif case_name == "goal_race":
+    action, training_results = _goal_race_action()
+    state["rival_indicator_detected"] = False
+  elif case_name == "weak_training_rest":
+    action, training_results = _weak_training_rest_action()
+    state["energy_level"] = 14
+    state["rival_indicator_detected"] = False
+  elif case_name == "stat_focused_training_override":
+    action, training_results = _stat_focused_training_override_action()
+    state["rival_indicator_detected"] = False
   else:
     raise ValueError(case_name)
   state["training_results"] = dict(training_results)
-  action["trackblazer_race_decision"] = evaluate_trackblazer_race(state, action)
+  if not action.get("trackblazer_race_decision"):
+    action["trackblazer_race_decision"] = evaluate_trackblazer_race(state, action)
   return state, action
 
 
@@ -228,7 +358,29 @@ def main():
     stack.enter_context(patch("core.skill_scanner.collect_skill_purchase", side_effect=_forbid("collect_skill_purchase")))
     stack.enter_context(patch("scenarios.trackblazer.check_rival_race_indicator", side_effect=_forbid("check_rival_race_indicator")))
 
-    for case_name in ("training", "race", "rest"):
+    expected_candidate_kinds = {
+      "training": {"training", "race_gate"},
+      "race": {"race", "race_gate"},
+      "rest": {"rest", "race_gate"},
+      "scheduled_race": {"race", "scheduled_race", "race_gate"},
+      "forced_race_day": {"race", "forced_race_day", "race_gate"},
+      "fallback_non_rival_race": {"race", "fallback_non_rival_race", "race_gate"},
+      "goal_race": {"race", "goal_race", "race_gate"},
+      "weak_training_rest": {"rest", "weak_training_rest", "race_gate"},
+      "stat_focused_training_override": {"training", "stat_focused_training_override", "race_gate"},
+    }
+
+    for case_name in (
+      "training",
+      "race",
+      "rest",
+      "scheduled_race",
+      "forced_race_day",
+      "fallback_non_rival_race",
+      "goal_race",
+      "weak_training_rest",
+      "stat_focused_training_override",
+    ):
       state_obj, action = _prepare_case(case_name)
       snapshot = build_review_snapshot(
         state_obj,
@@ -242,14 +394,23 @@ def main():
       assert "Turn Discussion" in (comparison.get("legacy_turn_discussion") or ""), f"{case_name}: missing legacy discussion text"
       assert "Turn Discussion" in (comparison.get("planner_turn_discussion") or ""), f"{case_name}: missing planner discussion text"
       assert comparison.get("diff_lines") in ([], None), f"{case_name}: expected empty diff lines on match"
+      candidate_kinds = [
+        entry.get("kind")
+        for entry in ((state_obj.get("trackblazer_planner_state") or {}).get("dual_run") or {}).get("candidates", [])
+      ]
+      missing_kinds = sorted(expected_candidate_kinds[case_name] - set(candidate_kinds))
+      assert not missing_kinds, f"{case_name}: missing candidate kinds {missing_kinds}"
+      turn_plan = (state_obj.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+      step_types = [entry.get("step_type") for entry in list(turn_plan.get("step_sequence") or []) if isinstance(entry, dict)]
+      assert "await_operator_review" in step_types, f"{case_name}: missing await_operator_review step"
+      assert "execute_main_action" in step_types, f"{case_name}: missing execute_main_action step"
+      assert "resolve_post_action" in step_types, f"{case_name}: missing resolve_post_action step"
       cases[case_name] = {
         "match": comparison.get("match"),
         "legacy_hash": comparison.get("legacy_hash"),
         "planner_hash": comparison.get("planner_hash"),
-        "candidate_kinds": [
-          entry.get("kind")
-          for entry in ((state_obj.get("trackblazer_planner_state") or {}).get("dual_run") or {}).get("candidates", [])
-        ],
+        "candidate_kinds": candidate_kinds,
+        "step_types": step_types,
       }
 
   assert all(count == 0 for count in traversal_calls.values()), traversal_calls

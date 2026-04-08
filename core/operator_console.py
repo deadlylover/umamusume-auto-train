@@ -1202,12 +1202,20 @@ class OperatorConsole:
       lines.append("Use this for quick back-and-forth turn review.")
       lines.append("")
 
+    planner_state = state_summary.get("trackblazer_planner_state") or {}
+    turn_plan = planner_state.get("turn_plan") or {}
+    decision_path = str(turn_plan.get("decision_path") or planner_state.get("decision_path") or "legacy")
+    comparison = snapshot.get("planner_dual_run_comparison") or {}
+
     lines.append(
       "Turn: "
       f"{snapshot.get('turn_label') or '?'}"
       f" | Scenario: {snapshot.get('scenario_name') or '-'}"
       f" | Intent: {snapshot.get('execution_intent') or '-'}"
+      f" | Path: {decision_path}"
     )
+    if isinstance(comparison, dict) and comparison.get("match") is not None:
+      lines.append("Planner Comparison: match" if comparison.get("match") else "Planner Comparison: DIVERGED (see notes)")
     lines.append(
       "State: "
       f"mood {state_summary.get('current_mood') or '-'}"

@@ -35,6 +35,7 @@ from core.trackblazer.planner import (
   plan_once,
   update_turn_discussion_dual_run,
 )
+from core.trackblazer.models import TurnPlan
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
   SUB_PHASE_POST_ACTION_RESOLUTION,
@@ -1910,6 +1911,9 @@ def _build_trackblazer_planned_actions(state_obj, action):
     return {}
 
   planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
+  turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
+  if turn_plan_snapshot:
+    return TurnPlan.from_snapshot(turn_plan_snapshot).to_planned_actions()
   return build_review_planned_actions(state_obj, action, planner_state=planner_state)
 
 
@@ -5113,6 +5117,7 @@ def career_lobby(dry_run_turn=False):
           and action.get("training_name")
         ):
           action.func = "do_training"
+          action["_trackblazer_rest_promoted_to_training"] = True
           info(
             f"[TB_RACE] Promoting rest to training because stat-focused score is strong "
             f"({strong_training_score:.1f} >= {strong_training_score_threshold})."

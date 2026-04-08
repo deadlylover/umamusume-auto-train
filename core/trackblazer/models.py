@@ -213,6 +213,20 @@ def _format_operator_race_gate_line(state_summary):
   return " | ".join(parts)
 
 
+def _planner_path_label(snapshot_context, state_summary):
+  planner_state = state_summary.get("trackblazer_planner_state") or {}
+  turn_plan = planner_state.get("turn_plan") or {}
+  decision_path = turn_plan.get("decision_path") or planner_state.get("decision_path") or "legacy"
+  return str(decision_path or "legacy")
+
+
+def _planner_comparison_line(snapshot_context):
+  comparison = (snapshot_context or {}).get("planner_dual_run_comparison") or {}
+  if not isinstance(comparison, dict) or comparison.get("match") is None:
+    return ""
+  return "Planner Comparison: match" if comparison.get("match") else "Planner Comparison: DIVERGED (see notes)"
+
+
 def _format_selected_action_line(selected_action):
   action_name = selected_action.get("func") or "-"
   pre_action_items = selected_action.get("pre_action_item_use") or []
@@ -795,7 +809,11 @@ def render_turn_discussion(snapshot_context, planned_actions):
     f"{turn_label}"
     f" | Scenario: {snapshot_context.get('scenario_name') or '-'}"
     f" | Intent: {snapshot_context.get('execution_intent') or '-'}"
+    f" | Path: {_planner_path_label(snapshot_context, state_summary)}"
   )
+  comparison_line = _planner_comparison_line(snapshot_context)
+  if comparison_line:
+    lines.append(comparison_line)
   lines.append(
     "State: "
     f"mood {state_summary.get('current_mood') or '-'}"
