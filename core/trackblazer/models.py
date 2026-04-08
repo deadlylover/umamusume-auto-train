@@ -791,19 +791,19 @@ def _format_planned_clicks(planned_clicks):
   return lines
 
 
-def render_turn_discussion(snapshot_context, planned_actions):
+def _review_summary_lines(snapshot_context, planned_actions, include_prompt=False):
   snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
   planned_actions = planned_actions if isinstance(planned_actions, dict) else {}
   state_summary = snapshot_context.get("state_summary") or {}
   selected_action = snapshot_context.get("selected_action") or {}
   ranked_trainings = snapshot_context.get("ranked_trainings") or []
   lines = []
-
   turn_label = snapshot_context.get("turn_label") or "?"
-  year_label = state_summary.get("year") or turn_label
-  lines.append("Turn Discussion")
-  lines.append(f"Paste this back and we can discuss this turn. Year: {year_label}.")
-  lines.append("")
+
+  if include_prompt:
+    lines.append("Compact Turn Summary")
+    lines.append("Use this for quick back-and-forth turn review.")
+    lines.append("")
 
   lines.append(
     "Turn: "
@@ -886,6 +886,54 @@ def render_turn_discussion(snapshot_context, planned_actions):
   if notes:
     lines.append("")
     lines.append(f"Notes: {notes}")
+  return lines
+
+
+def render_compact_summary(snapshot_context, planned_actions, include_prompt=True):
+  lines = _review_summary_lines(
+    snapshot_context,
+    planned_actions,
+    include_prompt=include_prompt,
+  )
+  return "\n".join(lines).strip()
+
+
+def build_quick_bar_payload(snapshot_context, planned_actions):
+  snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
+  planned_actions = planned_actions if isinstance(planned_actions, dict) else {}
+
+  planned_clicks = snapshot_context.get("planned_clicks") or []
+  click_labels = []
+  for click in planned_clicks:
+    if not isinstance(click, dict):
+      continue
+    click_labels.append(click.get("label") or "click")
+
+  would_use = list(planned_actions.get("would_use") or [])
+  would_buy = list(planned_actions.get("would_buy") or [])
+  return {
+    "planned_click_labels": click_labels,
+    "planned_clicks_text": " \u2192 ".join(click_labels) if click_labels else "-",
+    "would_use": copy.deepcopy(would_use),
+    "would_use_text": _format_candidate_list(would_use) if would_use else "-",
+    "would_buy": copy.deepcopy(would_buy),
+    "would_buy_text": _format_shop_buy_list(would_buy) if would_buy else "-",
+  }
+
+
+def render_turn_discussion(snapshot_context, planned_actions):
+  snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
+  planned_actions = planned_actions if isinstance(planned_actions, dict) else {}
+  state_summary = snapshot_context.get("state_summary") or {}
+  lines = []
+
+  turn_label = snapshot_context.get("turn_label") or "?"
+  year_label = state_summary.get("year") or turn_label
+  lines.append("Turn Discussion")
+  lines.append(f"Paste this back and we can discuss this turn. Year: {year_label}.")
+  lines.append("")
+
+  lines.extend(_review_summary_lines(snapshot_context, planned_actions))
 
   lines.append("")
   lines.append("Planned Actions")
@@ -977,6 +1025,22 @@ class TurnPlan:
     )
 
   def to_turn_discussion(self, snapshot_context: Optional[Dict[str, Any]] = None) -> str:
+    merged_context = self._merged_review_context(snapshot_context)
+    return render_turn_discussion(merged_context, self.to_planned_actions())
+
+  def to_compact_summary(self, snapshot_context: Optional[Dict[str, Any]] = None, include_prompt: bool = True) -> str:
+    merged_context = self._merged_review_context(snapshot_context)
+    return render_compact_summary(
+      merged_context,
+      self.to_planned_actions(),
+      include_prompt=include_prompt,
+    )
+
+  def to_quick_bar(self, snapshot_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    merged_context = self._merged_review_context(snapshot_context)
+    return build_quick_bar_payload(merged_context, self.to_planned_actions())
+
+  def _merged_review_context(self, snapshot_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
     merged_context = dict(snapshot_context)
     review_context = dict(self.review_context or {})
@@ -985,7 +1049,7 @@ class TurnPlan:
       if value in (None, {}, []):
         continue
       merged_context[key] = copy.deepcopy(value)
-    return render_turn_discussion(merged_context, self.to_planned_actions())
+    return merged_context
 
   def to_snapshot(self) -> Dict[str, Any]:
     return {

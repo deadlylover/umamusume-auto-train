@@ -34,6 +34,12 @@ from core.trackblazer_shop import (
   normalize_shop_policy,
   policy_context,
 )
+from core.trackblazer.models import (
+  TurnPlan,
+  build_quick_bar_payload,
+  render_compact_summary,
+  render_turn_discussion,
+)
 import utils.constants as constants
 from core.platform.window_focus import focus_target_window
 from core.region_adjuster import run_region_adjuster_session
@@ -825,27 +831,19 @@ class OperatorConsole:
     self._debug_history_text.configure(state=tk.DISABLED)
 
   def _update_quick_bar(self, snapshot):
-    planned = snapshot.get("planned_actions") or {}
-    # Planned clicks
-    planned_clicks = snapshot.get("planned_clicks") or []
-    if planned_clicks:
-      labels = []
-      for click in planned_clicks:
-        if isinstance(click, dict):
-          labels.append(click.get("label") or "click")
-      clicks_text = " \u2192 ".join(labels) if labels else "-"
-    else:
-      clicks_text = "-"
+    quick_bar = snapshot.get("quick_bar")
+    if not isinstance(quick_bar, dict):
+      snapshot_context = {
+        "planned_clicks": snapshot.get("planned_clicks") or [],
+      }
+      quick_bar = build_quick_bar_payload(snapshot_context, snapshot.get("planned_actions") or {})
+    clicks_text = quick_bar.get("planned_clicks_text") or "-"
     if self._planned_clicks_value is not None:
       self._planned_clicks_value.configure(text=clicks_text)
-    # Would use
-    would_use = planned.get("would_use") or []
-    use_text = self._format_candidate_list(would_use) if would_use else "-"
+    use_text = quick_bar.get("would_use_text") or "-"
     if self._would_use_value is not None:
       self._would_use_value.configure(text=use_text)
-    # Would buy
-    would_buy = planned.get("would_buy") or []
-    buy_text = self._format_shop_buy_list(would_buy) if would_buy else "-"
+    buy_text = quick_bar.get("would_buy_text") or "-"
     if self._would_buy_value is not None:
       self._would_buy_value.configure(text=buy_text)
 
@@ -1059,31 +1057,29 @@ class OperatorConsole:
     return "\n".join(lines)
 
   def _format_planned_actions(self, snapshot):
-    planned = snapshot.get("planned_actions") or {}
-    lines = []
-    turn_label = snapshot.get("turn_label") or "?"
-    state_summary = snapshot.get("state_summary") or {}
-    year_label = state_summary.get("year") or turn_label
-    lines.append("Turn Discussion")
-    lines.append(f"Paste this back and we can discuss this turn. Year: {year_label}.")
-    lines.append("")
-    compact_summary = self._format_compact_summary(snapshot, include_prompt=False)
-    if compact_summary:
-      lines.append(compact_summary)
-    if planned:
-      lines.append("")
-      lines.append("Planned Actions")
-      lines.extend(self._format_planned_action_sections(planned, state_summary))
-    else:
-      lines.append("")
-      lines.append("Planned Actions")
-      lines.append("  No planned actions yet")
-    planned_clicks = snapshot.get("planned_clicks") or []
-    if planned_clicks:
-      lines.append("")
-      lines.append("Planned Clicks")
-      lines.extend(self._format_planned_clicks(planned_clicks))
-    return "\n".join(lines).strip()
+    turn_discussion_text = snapshot.get("turn_discussion_text")
+    if isinstance(turn_discussion_text, str) and turn_discussion_text.strip():
+      return turn_discussion_text.strip()
+
+    snapshot_context = {
+      "scenario_name": snapshot.get("scenario_name"),
+      "turn_label": snapshot.get("turn_label"),
+      "execution_intent": snapshot.get("execution_intent"),
+      "state_summary": snapshot.get("state_summary") or {},
+      "selected_action": snapshot.get("selected_action") or {},
+      "ranked_trainings": snapshot.get("ranked_trainings") or [],
+      "reasoning_notes": snapshot.get("reasoning_notes") or "",
+      "planned_clicks": snapshot.get("planned_clicks") or [],
+      "planner_dual_run_comparison": snapshot.get("planner_dual_run_comparison") or {},
+    }
+    planner_state = (
+      snapshot.get("trackblazer_planner_state")
+      or (snapshot_context["state_summary"].get("trackblazer_planner_state") or {})
+    )
+    turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
+    if turn_plan_snapshot:
+      return TurnPlan.from_snapshot(turn_plan_snapshot).to_turn_discussion(snapshot_context)
+    return render_turn_discussion(snapshot_context, snapshot.get("planned_actions") or {})
 
   def _copy_active_summary(self):
     if self._root is None:
@@ -1191,104 +1187,43 @@ class OperatorConsole:
       self._history_last_summary_raw = self._summary_raw_value
 
   def _format_compact_summary(self, snapshot, include_prompt=True):
-    state_summary = snapshot.get("state_summary") or {}
-    selected_action = snapshot.get("selected_action") or {}
-    ranked_trainings = snapshot.get("ranked_trainings") or []
-    planned = snapshot.get("planned_actions") or {}
-    lines = []
+    compact_summary_text = snapshot.get("compact_summary_text")
+    if isinstance(compact_summary_text, str) and compact_summary_text.strip():
+      if include_prompt:
+        return "\n".join([
+          "Compact Turn Summary",
+          "Use this for quick back-and-forth turn review.",
+          "",
+          compact_summary_text.strip(),
+        ]).strip()
+      return compact_summary_text.strip()
 
-    if include_prompt:
-      lines.append("Compact Turn Summary")
-      lines.append("Use this for quick back-and-forth turn review.")
-      lines.append("")
-
-    planner_state = state_summary.get("trackblazer_planner_state") or {}
-    turn_plan = planner_state.get("turn_plan") or {}
-    decision_path = str(turn_plan.get("decision_path") or planner_state.get("decision_path") or "legacy")
-    comparison = snapshot.get("planner_dual_run_comparison") or {}
-
-    lines.append(
-      "Turn: "
-      f"{snapshot.get('turn_label') or '?'}"
-      f" | Scenario: {snapshot.get('scenario_name') or '-'}"
-      f" | Intent: {snapshot.get('execution_intent') or '-'}"
-      f" | Path: {decision_path}"
+    snapshot_context = {
+      "scenario_name": snapshot.get("scenario_name"),
+      "turn_label": snapshot.get("turn_label"),
+      "execution_intent": snapshot.get("execution_intent"),
+      "state_summary": snapshot.get("state_summary") or {},
+      "selected_action": snapshot.get("selected_action") or {},
+      "ranked_trainings": snapshot.get("ranked_trainings") or [],
+      "reasoning_notes": snapshot.get("reasoning_notes") or "",
+      "planned_clicks": snapshot.get("planned_clicks") or [],
+      "planner_dual_run_comparison": snapshot.get("planner_dual_run_comparison") or {},
+    }
+    planner_state = (
+      snapshot.get("trackblazer_planner_state")
+      or (snapshot_context["state_summary"].get("trackblazer_planner_state") or {})
     )
-    if isinstance(comparison, dict) and comparison.get("match") is not None:
-      lines.append("Planner Comparison: match" if comparison.get("match") else "Planner Comparison: DIVERGED (see notes)")
-    lines.append(
-      "State: "
-      f"mood {state_summary.get('current_mood') or '-'}"
-      f" | energy {self._format_ratio(state_summary.get('energy_level'), state_summary.get('max_energy'))}"
-      f" | backend {state_summary.get('control_backend') or '-'}"
+    turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
+    if turn_plan_snapshot:
+      return TurnPlan.from_snapshot(turn_plan_snapshot).to_compact_summary(
+        snapshot_context,
+        include_prompt=include_prompt,
+      )
+    return render_compact_summary(
+      snapshot_context,
+      snapshot.get("planned_actions") or {},
+      include_prompt=include_prompt,
     )
-
-    stats_line = self._format_current_stats_line(state_summary)
-    if stats_line:
-      lines.append(stats_line)
-
-    criteria = state_summary.get("criteria")
-    if criteria:
-      lines.append(f"Criteria: {criteria}")
-
-    gate_line = self._format_operator_race_gate_line(state_summary)
-    if gate_line:
-      lines.append(gate_line)
-
-    lines.append(self._format_selected_action_line(selected_action))
-
-    rival_line = self._format_rival_line(selected_action, state_summary)
-    if rival_line:
-      lines.append(rival_line)
-
-    race_check_line = self._format_race_check_line(planned)
-    if race_check_line:
-      lines.append(race_check_line)
-
-    race_gate_lines = self._format_trackblazer_race_lines(selected_action)
-    if race_gate_lines:
-      lines.extend(race_gate_lines)
-
-    race_entry_lines = self._format_trackblazer_race_entry_lines(planned)
-    if race_entry_lines:
-      lines.extend(race_entry_lines)
-
-    skill_check_lines = self._format_skill_check_lines(state_summary)
-    if skill_check_lines:
-      lines.append("")
-      lines.append("Skill Check")
-      lines.extend(skill_check_lines)
-
-    training_lines = self._format_training_lines(ranked_trainings, selected_action)
-    if training_lines:
-      lines.append("")
-      lines.append("Trainings")
-      lines.extend(training_lines)
-
-    inventory_lines = self._format_inventory_lines(planned)
-    if inventory_lines:
-      lines.append("")
-      lines.append("Inventory")
-      lines.extend(inventory_lines)
-
-    shop_lines = self._format_shop_lines(planned, state_summary)
-    if shop_lines:
-      lines.append("")
-      lines.append("Shop")
-      lines.extend(shop_lines)
-
-    timing_lines = self._format_compact_timing_lines(state_summary)
-    if timing_lines:
-      lines.append("")
-      lines.append("Timing")
-      lines.extend(timing_lines)
-
-    notes = snapshot.get("reasoning_notes")
-    if notes:
-      lines.append("")
-      lines.append(f"Notes: {notes}")
-
-    return "\n".join(lines).strip()
 
   def _format_current_stats_line(self, state_summary):
     current_stats = state_summary.get("current_stats")

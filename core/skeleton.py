@@ -35,7 +35,12 @@ from core.trackblazer.planner import (
   plan_once,
   update_turn_discussion_dual_run,
 )
-from core.trackblazer.models import TurnPlan
+from core.trackblazer.models import (
+  TurnPlan,
+  build_quick_bar_payload,
+  render_compact_summary,
+  render_turn_discussion,
+)
 from core.trackblazer.review import build_ranked_training_snapshot as _build_trackblazer_ranked_training_snapshot
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
@@ -3628,23 +3633,51 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
       state_obj[PLANNER_STATE_KEY] = planner_state
   resolved_planned_clicks = planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action)
+  resolved_reasoning_notes = reasoning_notes or ""
+  if planner_turn_plan is not None:
+    planner_turn_plan.review_context = {
+      **planner_review_context,
+      "selected_action": copy.deepcopy(selected_action),
+      "ranked_trainings": copy.deepcopy(ranked_trainings),
+      "reasoning_notes": resolved_reasoning_notes,
+      "planned_clicks": copy.deepcopy(resolved_planned_clicks),
+    }
+    planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
+    state_obj[PLANNER_STATE_KEY] = planner_state
   planned_actions = _build_trackblazer_planned_actions(state_obj, action, planner_state=planner_state) if isinstance(state_obj, dict) else {}
+  turn_discussion_context = {
+    "scenario_name": constants.SCENARIO_NAME or "default",
+    "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+    "execution_intent": bot.get_execution_intent(),
+    "state_summary": state_summary,
+    "selected_action": selected_action,
+    "ranked_trainings": ranked_trainings,
+    "reasoning_notes": resolved_reasoning_notes,
+    "planned_clicks": resolved_planned_clicks,
+  }
+  turn_discussion_text = (
+    planner_turn_plan.to_turn_discussion(turn_discussion_context)
+    if planner_turn_plan is not None else
+    render_turn_discussion(turn_discussion_context, planned_actions)
+  )
+  compact_summary_text = (
+    planner_turn_plan.to_compact_summary(turn_discussion_context, include_prompt=False)
+    if planner_turn_plan is not None else
+    render_compact_summary(turn_discussion_context, planned_actions, include_prompt=False)
+  )
+  quick_bar = (
+    planner_turn_plan.to_quick_bar(turn_discussion_context)
+    if planner_turn_plan is not None else
+    build_quick_bar_payload(turn_discussion_context, planned_actions)
+  )
   planner_dual_run_comparison = {}
   if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     planner_dual_run_comparison = update_turn_discussion_dual_run(
       state_obj,
-      {
-        "scenario_name": constants.SCENARIO_NAME or "default",
-        "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
-        "execution_intent": bot.get_execution_intent(),
-        "state_summary": state_summary,
-        "selected_action": selected_action,
-        "ranked_trainings": ranked_trainings,
-        "reasoning_notes": reasoning_notes or "",
-        "planned_clicks": resolved_planned_clicks,
-      },
+      turn_discussion_context,
       legacy_planned_actions=planned_actions,
     )
+    turn_discussion_text = planner_dual_run_comparison.get("planner_turn_discussion") or turn_discussion_text
     state_summary["trackblazer_planner_state"] = state_obj.get(PLANNER_STATE_KEY)
   return {
     "scenario_name": constants.SCENARIO_NAME or "default",
@@ -3663,11 +3696,14 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "trackblazer_planner_state": state_obj.get(PLANNER_STATE_KEY) if isinstance(state_obj, dict) else None,
     "planner_dual_run_comparison": planner_dual_run_comparison,
     "planned_actions": planned_actions,
-    "reasoning_notes": reasoning_notes or "",
+    "reasoning_notes": resolved_reasoning_notes,
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
     "backend_state": backend_state,
     "ocr_debug": debug_entries,
     "planned_clicks": resolved_planned_clicks,
+    "quick_bar": quick_bar,
+    "compact_summary_text": compact_summary_text,
+    "turn_discussion_text": turn_discussion_text,
   }
 
 

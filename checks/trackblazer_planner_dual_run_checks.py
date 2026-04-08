@@ -529,7 +529,27 @@ def main():
     assert followup_selected_action.get("trackblazer_race_decision", {}).get("reason") == "synthetic planner-owned selected_action view", "review snapshot should prefer planner-owned race decision summary"
     followup_ranked_trainings = review_context_followup.get("ranked_trainings") or []
     assert len(followup_ranked_trainings) == 1 and followup_ranked_trainings[0].get("name") == "stamina", "review snapshot should prefer planner-owned ranked trainings"
+    followup_turn_plan_snapshot = (review_context_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    followup_review_context_payload = followup_turn_plan_snapshot.get("review_context") or {}
+    assert followup_review_context_payload.get("reasoning_notes") == "synthetic planner review context case", "stored TurnPlan review context should carry reasoning notes for console rendering"
+    assert followup_review_context_payload.get("planned_clicks") == review_context_followup.get("planned_clicks"), "stored TurnPlan review context should carry planned clicks for console rendering"
+    assert review_context_followup.get("turn_discussion_text") == review_context_followup.get("planner_dual_run_comparison", {}).get("planner_turn_discussion"), "review snapshot should expose planner-owned turn discussion text"
     mutated_turn_plan = TurnPlan.from_snapshot((review_context_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {})
+    compact_summary_text = mutated_turn_plan.to_compact_summary({
+      "scenario_name": review_context_followup.get("scenario_name"),
+      "turn_label": review_context_followup.get("turn_label"),
+      "execution_intent": review_context_followup.get("execution_intent"),
+      "state_summary": review_context_followup.get("state_summary"),
+      "selected_action": {},
+      "ranked_trainings": [],
+      "reasoning_notes": review_context_followup.get("reasoning_notes"),
+      "planned_clicks": review_context_followup.get("planned_clicks"),
+    }, include_prompt=False)
+    assert compact_summary_text == review_context_followup.get("compact_summary_text"), "review snapshot should expose planner-owned compact summary text"
+    quick_bar_payload = mutated_turn_plan.to_quick_bar({
+      "planned_clicks": review_context_followup.get("planned_clicks"),
+    })
+    assert quick_bar_payload == review_context_followup.get("quick_bar"), "review snapshot should expose planner-owned quick-bar payload"
     planner_text = mutated_turn_plan.to_turn_discussion({
       "scenario_name": review_context_followup.get("scenario_name"),
       "turn_label": review_context_followup.get("turn_label"),
