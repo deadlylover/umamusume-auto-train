@@ -2364,11 +2364,16 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
   budget_plan = _plan_budgeted_skill_targets(context, preview_scan)
   selected_targets = list(budget_plan.get("selected_targets") or [])
   preview_has_actionable_targets = bool(selected_targets)
-  if preview_flow.get("scanned") and preview_has_actionable_targets:
+  if preview_flow.get("scanned"):
+    # Respect cooldown after any completed preview scan, even when nothing was
+    # affordable/actionable. Otherwise the bot can rescan the same skill page
+    # multiple times within the same turn because action_count only advances
+    # after the turn is finalized.
     mark_skill_purchase_checked(
       current_action_count,
       selected_race=bool(context.get("scheduled_g1_race")),
     )
+  if preview_flow.get("scanned") and preview_has_actionable_targets:
     state_obj["skill_purchase_check"] = {
       **get_skill_purchase_check_state(),
       **context,
