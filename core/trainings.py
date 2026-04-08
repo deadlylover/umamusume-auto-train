@@ -40,6 +40,11 @@ def create_training_score_entry(training_name, training_data, score_tuple):
     "total_rainbow_friends": total_rainbow_friends,
     "total_friendship_increases": total_friendship_increases
   }
+  if training_data.get("failure_bypassed_by_items"):
+    entry["failure_bypassed_by_items"] = True
+  failure_bypass_items = training_data.get("trackblazer_failure_bypass_items")
+  if isinstance(failure_bypass_items, list) and failure_bypass_items:
+    entry["trackblazer_failure_bypass_items"] = list(failure_bypass_items)
   if constants.SCENARIO_NAME == "unity":
     entry["unity_gauge_fills"] = training_data["unity_gauge_fills"]
     entry["unity_trainings"] = training_data["unity_trainings"]

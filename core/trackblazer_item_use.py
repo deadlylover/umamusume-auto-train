@@ -775,7 +775,52 @@ def _smallest_held_vita_item(inventory, held_quantities):
   return candidates[0][1]
 
 
-def _training_snapshot(training_name, training_data):
+def _preview_training_score_from_gains(state_obj, training_name, training_data):
+  training_data = training_data if isinstance(training_data, dict) else {}
+  stat_gains = training_data.get("stat_gains") or {}
+  current_stats = (state_obj or {}).get("current_stats") or {}
+  preview_score = 0.0
+
+  try:
+    import core.config as config
+    stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+    stat_caps = getattr(config, "STAT_CAPS", None)
+  except Exception:
+    stat_weights = None
+    stat_caps = None
+
+  if not isinstance(stat_weights, dict) or not stat_weights:
+    stat_weights = {}
+  if not isinstance(stat_caps, dict):
+    stat_caps = {}
+
+  for stat_name, gain in stat_gains.items():
+    if stat_name == "sp":
+      continue
+    stat_cap = stat_caps.get(stat_name)
+    current_stat = _safe_int(current_stats.get(stat_name), 0)
+    if stat_cap is not None and current_stat >= _safe_int(stat_cap, current_stat):
+      continue
+    preview_score += _safe_float(gain, 0.0) * _safe_float(stat_weights.get(stat_name, 1.0), 1.0)
+
+  if bot.get_trackblazer_bond_boost_enabled():
+    cutoff = bot.get_trackblazer_bond_boost_cutoff()
+    current_year = str((state_obj or {}).get("year") or "")
+    try:
+      bond_boost_active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
+    except ValueError:
+      bond_boost_active = False
+    if bond_boost_active:
+      friendship_levels = training_data.get("total_friendship_levels") or {}
+      raiseable_friends = _safe_int(friendship_levels.get("blue"), 0) + _safe_int(friendship_levels.get("green"), 0)
+      if raiseable_friends > 0:
+        per_friend = 15 if training_name == "wit" else 10
+        preview_score += raiseable_friends * per_friend
+
+  return preview_score
+
+
+def _training_snapshot(state_obj, training_name, training_data):
   training_data = training_data if isinstance(training_data, dict) else {}
   stat_gains = training_data.get("stat_gains") or {}
   total_stat_gain = sum(
@@ -783,10 +828,15 @@ def _training_snapshot(training_name, training_data):
     for stat_name, value in stat_gains.items()
     if stat_name != "sp"
   )
+  score_tuple = training_data.get("score_tuple")
+  if isinstance(score_tuple, (list, tuple)) and score_tuple:
+    score_value = _safe_float(score_tuple[0], 0.0)
+  else:
+    score_value = _preview_training_score_from_gains(state_obj, training_name, training_data)
   return {
     "training_name": training_name,
     "failure": _safe_int(training_data.get("failure"), 0),
-    "score": _safe_float((training_data.get("score_tuple") or (0.0, 0))[0], 0.0),
+    "score": score_value,
     "supports": _safe_int(training_data.get("total_supports"), 0),
     "matching_stat_gain": _safe_int(stat_gains.get(training_name), 0),
     "total_stat_gain": total_stat_gain,
@@ -945,7 +995,7 @@ def _summer_reroll_signal(state_obj, current_context):
   for training_name, training_data in training_results.items():
     if training_name == "wit":
       continue
-    snapshot = _training_snapshot(training_name, training_data)
+    snapshot = _training_snapshot(state_obj, training_name, training_data)
     if snapshot["failure"] <= max_failure:
       safe_non_wit_exists = True
     if snapshot["failure"] <= max_failure:
@@ -1034,7 +1084,6 @@ def _usage_context(state_obj, action, policy=None):
     if stat_name != "sp"
   )
   matching_stat_gain = _safe_int(stat_gains.get(training_name), 0)
-  score_tuple = training_data.get("score_tuple") or (0.0, 0)
   weighted_stat_score = training_data.get("weighted_stat_score")
   timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
   timeline_label = timeline.get("timeline_label") or ""
@@ -1043,7 +1092,11 @@ def _usage_context(state_obj, action, policy=None):
   if weighted_stat_score is not None:
     score_value = _safe_float(weighted_stat_score, 0.0)
   else:
-    score_value = _safe_float(score_tuple[0], 0.0)
+    score_tuple = training_data.get("score_tuple")
+    if isinstance(score_tuple, (list, tuple)) and score_tuple:
+      score_value = _safe_float(score_tuple[0], 0.0)
+    else:
+      score_value = _preview_training_score_from_gains(state_obj, training_name, training_data)
   past_final_summer = _past_final_summer(timeline_index)
   score_over_50 = score_value > 50.0
   # Stop hoarding "save for summer" items when no summer windows remain, or
