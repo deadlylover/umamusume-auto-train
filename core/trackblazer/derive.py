@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import copy
 from typing import Any, Dict
 
+import core.config as config
+from core.trackblazer_item_use import _usage_context
 from core.trackblazer.models import DerivedTurnState, ObservedTurnState
+from core.trackblazer_race_logic import (
+  get_optional_race_low_energy_override,
+  get_race_lookahead_energy_advice,
+)
 
 
 _SUMMER_TOKENS = ("early jul", "late jul", "early aug", "late aug")
@@ -18,9 +25,10 @@ def _safe_ratio(numerator, denominator):
     return None
 
 
-def derive_turn_state(observed: ObservedTurnState, planner_state=None) -> DerivedTurnState:
+def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj=None, action=None) -> DerivedTurnState:
   observed_data = observed.to_dict()
   planner_state = planner_state if isinstance(planner_state, dict) else {}
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
   turn_label = str(observed_data.get("turn") or "").lower()
   training_data = (observed_data.get("selected_action") or {}).get("training_data") or {}
   score_tuple = training_data.get("score_tuple") or ()
@@ -35,11 +43,45 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None) -> Derive
     for value in stat_gains.values()
     if isinstance(value, (int, float))
   )
+  usage_context = {}
+  if hasattr(action, "get") and state_obj:
+    try:
+      usage_context = _usage_context(
+        state_obj,
+        action,
+        policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      ) or {}
+    except Exception:
+      usage_context = {}
+
+  race_low_energy_override = {}
+  race_lookahead = {}
+  if state_obj:
+    try:
+      race_low_energy_override = get_optional_race_low_energy_override(state_obj) or {}
+    except Exception:
+      race_low_energy_override = {}
+    try:
+      race_lookahead = get_race_lookahead_energy_advice(
+        state_obj,
+        getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      ) or {}
+    except Exception:
+      race_lookahead = {}
+
+  observation_status = copy.deepcopy(observed_data.get("observation_status") or {})
+  missing_inputs = sorted(
+    key for key, value in observation_status.items()
+    if isinstance(value, dict) and value.get("stale")
+  )
+  selected_action = observed_data.get("selected_action") or {}
   data: Dict[str, Any] = {
     "turn_key": f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}",
     "timeline_label": observed_data.get("turn"),
     "is_summer": any(token in turn_label for token in _SUMMER_TOKENS),
     "energy_ratio": _safe_ratio(observed_data.get("energy_level"), observed_data.get("max_energy")),
+    "observation_status": observation_status,
+    "missing_inputs": missing_inputs,
     "race_available_summary": {
       "rival_indicator": bool(observed_data.get("rival_indicator_detected")),
       "race_mission_available": bool(observed_data.get("race_mission_available")),
@@ -47,14 +89,80 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None) -> Derive
       "climax_locked_race": bool(observed_data.get("trackblazer_climax_locked_race")),
     },
     "training_value_summary": {
-      "best_training_name": (observed_data.get("selected_action") or {}).get("training_name"),
+      "best_training_name": selected_action.get("training_name"),
       "best_score": best_score,
       "best_total": training_total,
+      "failure_rate": training_data.get("failure"),
+      "support_count": training_data.get("total_supports"),
+      "rainbow_count": training_data.get("total_rainbow_friends"),
+    },
+    "action_summary": {
+      "func": selected_action.get("func"),
+      "race_name": selected_action.get("race_name"),
+      "scheduled_race": bool(selected_action.get("scheduled_race")),
+      "trackblazer_lobby_scheduled_race": bool(selected_action.get("trackblazer_lobby_scheduled_race")),
+      "trackblazer_climax_race_day": bool(selected_action.get("trackblazer_climax_race_day")),
+      "race_mission_available": bool(selected_action.get("race_mission_available")),
     },
     "inventory_source": planner_state.get("inventory_source"),
     "shop_buy_count": len(planner_state.get("shop_buy_plan") or []),
     "pre_action_item_count": len(planner_state.get("pre_action_items") or []),
     "reassess_after_item_use": bool(planner_state.get("reassess_after_item_use")),
     "skill_scan_state": (((planner_state.get("turn_plan") or {}).get("planner_metadata") or {}).get("runtime") or {}).get("pending_skill_scan") or {},
+    "usage_context_summary": {
+      key: usage_context.get(key)
+      for key in (
+        "timeline_label",
+        "timeline_index",
+        "past_final_summer",
+        "climax_window",
+        "summer_window",
+        "energy_level",
+        "max_energy",
+        "energy_deficit",
+        "safe_energy_target",
+        "held_vita_restore_total",
+        "spendable_vita_restore_total",
+        "held_reset_whistles",
+        "held_vita_reaches_safe_energy",
+        "spendable_vita_reaches_safe_energy",
+        "action_func",
+        "training_name",
+        "training_score",
+        "matching_stat_gain",
+        "total_stat_gain",
+        "failure_rate",
+        "rainbow_count",
+        "support_count",
+        "failure_bypassed_by_items",
+        "high_value_training",
+        "very_high_value_training",
+        "committed_value_training",
+        "strong_burst_training",
+        "weak_summer_training",
+        "weak_climax_training",
+        "energy_rescue",
+        "commit_training_after_items",
+        "training_survives_race_gate",
+        "zero_energy_optional_race",
+        "race_low_energy_vita_rescue",
+        "scheduled_race_low_energy_vita_item_key",
+        "race_lookahead_active",
+        "race_lookahead_energy_item_key",
+        "race_lookahead_safe_energy_target",
+        "race_lookahead_reason",
+        "held_energy_available",
+        "held_charm_available",
+        "affordable_shop_energy_available",
+        "affordable_shop_charm_available",
+        "has_followup_failsafe",
+        "held_recovery_cover_available",
+      )
+      if key in usage_context
+    },
+    "race_logic_summary": {
+      "low_energy_override": race_low_energy_override,
+      "lookahead": race_lookahead,
+    },
   }
   return DerivedTurnState(data=data)

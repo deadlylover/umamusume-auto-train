@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import json
 from typing import Any, Dict, List, Tuple
 
 import core.config as config
+import utils.constants as constants
 from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
 from core.trackblazer_item_use import plan_item_usage
@@ -16,6 +18,7 @@ from core.trackblazer.models import (
   PlannerFreshness,
   PlannerRuntimeState,
   TurnPlan,
+  render_turn_discussion,
 )
 
 
@@ -341,6 +344,203 @@ def _shop_scan_status(shop_flow):
   return shop_status
 
 
+def _action_func(action):
+  return getattr(action, "func", None) if action is not None else None
+
+
+def _action_value(action, key, default=None):
+  if hasattr(action, "get"):
+    return action.get(key, default)
+  return default
+
+
+def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[str, Any]:
+  planner_state = planner_state if isinstance(planner_state, dict) else {}
+  legacy_shared_plan = planner_state.get("legacy_shared_plan") or {}
+  inventory_plan = legacy_shared_plan.get("inventory_scan") or {}
+  shop_plan = legacy_shared_plan.get("shop_scan") or {}
+  would_buy = list(legacy_shared_plan.get("would_buy") or [])
+  would_use = list(legacy_shared_plan.get("would_use") or [])
+  deferred_use = list(legacy_shared_plan.get("deferred_use") or [])
+
+  race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
+  rival_scout = _action_value(action, "rival_scout", {}) or {}
+  race_planned = {}
+  race_check = {}
+  race_entry_gate = {}
+  race_scout_planned = {}
+  rival_indicator_detected = (state_obj or {}).get("rival_indicator_detected")
+  forced_climax_race_day = bool((state_obj or {}).get("trackblazer_climax_race_day"))
+  scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+  lobby_scheduled_race = bool((state_obj or {}).get("trackblazer_lobby_scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+  scheduled_race_source = None
+  if lobby_scheduled_race:
+    scheduled_race_source = "lobby_button"
+  elif scheduled_race:
+    scheduled_race_source = "config_schedule"
+  if rival_indicator_detected is not None or forced_climax_race_day or scheduled_race:
+    race_check = {
+      "phase": "collecting_race_state",
+      "sub_phase": (
+        "check_scheduled_race"
+        if scheduled_race else
+        ("check_rival_indicator" if not forced_climax_race_day else "check_forced_race_day")
+      ),
+      "method": (
+        "scheduled_race_signal"
+        if scheduled_race else
+        ("lobby_race_button_indicator" if not forced_climax_race_day else "climax_race_day_banner_or_button")
+      ),
+      "rival_indicator_detected": bool(rival_indicator_detected),
+      "forced_climax_race_day": forced_climax_race_day,
+      "forced_climax_race_day_banner": bool((state_obj or {}).get("trackblazer_climax_race_day_banner")),
+      "forced_climax_race_day_button": bool((state_obj or {}).get("trackblazer_climax_race_day_button")),
+      "scheduled_race": scheduled_race,
+      "scheduled_race_source": scheduled_race_source,
+      "lobby_scheduled_race_detected": lobby_scheduled_race,
+      "scout_required": bool(_action_func(action) == "do_race" and _action_value(action, "prefer_rival_race")),
+    }
+  if isinstance(race_decision, dict) and race_decision:
+    race_info = race_decision.get("race_tier_info") or {}
+    race_planned = {
+      "should_race": race_decision.get("should_race"),
+      "reason": race_decision.get("reason"),
+      "training_total_stats": race_decision.get("training_total_stats"),
+      "training_score": race_decision.get("training_score"),
+      "is_summer": race_decision.get("is_summer"),
+      "g1_forced": race_decision.get("g1_forced"),
+      "prefer_rival_race": race_decision.get("prefer_rival_race"),
+      "fallback_non_rival_race": race_decision.get("fallback_non_rival_race"),
+      "prefer_rest_over_weak_training": race_decision.get("prefer_rest_over_weak_training"),
+      "forced_race_day": race_decision.get("forced_race_day"),
+      "race_tier_target": race_decision.get("race_tier_target"),
+      "race_name": race_decision.get("race_name"),
+      "race_available": race_decision.get("race_available"),
+      "rival_indicator": race_decision.get("rival_indicator"),
+      "available_grades": race_info.get("available_grades"),
+      "best_grade": race_info.get("best_grade"),
+      "race_count": race_info.get("race_count"),
+      "scheduled_race": scheduled_race,
+      "scheduled_race_source": scheduled_race_source,
+    }
+  if scheduled_race:
+    race_entry_gate = {
+      "opens_from_lobby": True,
+      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+      "warning_meaning": "This scheduled race would become the third consecutive race",
+      "ok_action": "continue_to_race_list",
+      "cancel_action": "return_to_lobby",
+      "expected_branch": "continue_to_race_list",
+      "scheduled_race": True,
+      "scheduled_race_source": scheduled_race_source,
+      "force_accept_warning": True,
+    }
+  elif isinstance(race_decision, dict) and race_decision and (_action_func(action) == "do_race" or race_decision.get("should_race")):
+    rest_promoted_optional_race = bool(
+      race_decision.get("prefer_rival_race")
+      and _action_value(action, "_rival_fallback_func") == "do_rest"
+      and not _action_value(action, "scheduled_race")
+      and not _action_value(action, "trackblazer_lobby_scheduled_race")
+      and not _action_value(action, "is_race_day")
+    )
+    if race_decision.get("fallback_non_rival_race") or rest_promoted_optional_race:
+      expected_branch = "return_to_lobby"
+    elif race_decision.get("g1_forced") or race_decision.get("should_race"):
+      expected_branch = "continue_to_race_list"
+    else:
+      expected_branch = "return_to_lobby"
+    race_entry_gate = {
+      "opens_from_lobby": True,
+      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+      "warning_meaning": "This race would become the third consecutive race",
+      "ok_action": "continue_to_race_list",
+      "cancel_action": "return_to_lobby",
+      "expected_branch": expected_branch,
+    }
+  if isinstance(rival_scout, dict) and rival_scout:
+    race_scout_planned = {
+      "phase": "scouting_rival_race",
+      "executed": True,
+      "rival_found": rival_scout.get("rival_found"),
+      "selected_race_name": rival_scout.get("race_name"),
+      "selected_match_count": rival_scout.get("match_count"),
+      "selected_grade": rival_scout.get("grade"),
+      "reverted_to_training": bool(rival_scout.get("rival_found") is False),
+    }
+  elif _action_value(action, "prefer_rival_race"):
+    race_scout_planned = {
+      "phase": "scouting_rival_race",
+      "executed": False,
+      "status": "pending_execute_commit",
+      "reason": "Full rival scout only runs after commit.",
+    }
+
+  return {
+    "race_check": race_check,
+    "race_decision": race_planned,
+    "race_entry_gate": race_entry_gate,
+    "race_scout": race_scout_planned,
+    "inventory_scan": inventory_plan,
+    "would_use": would_use,
+    "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
+    "deferred_use": deferred_use,
+    "shop_scan": shop_plan,
+    "would_buy": would_buy,
+  }
+
+
+def _turn_discussion_diff_lines(legacy_text: str, planner_text: str, limit: int = 80) -> List[str]:
+  diff_lines = list(
+    difflib.unified_diff(
+      legacy_text.splitlines(),
+      planner_text.splitlines(),
+      fromfile="legacy",
+      tofile="planner",
+      lineterm="",
+    )
+  )
+  return diff_lines[: max(0, int(limit))]
+
+
+def update_turn_discussion_dual_run(state_obj, snapshot_context, legacy_planned_actions=None) -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  planner_state = state_obj.get(PLANNER_STATE_KEY) or {}
+  if not planner_state:
+    return {}
+
+  dual_run = copy.deepcopy(planner_state.get("dual_run") or {})
+  turn_plan_snapshot = planner_state.get("turn_plan") or {}
+  turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot)
+  legacy_planned_actions = legacy_planned_actions if isinstance(legacy_planned_actions, dict) else dict(planner_state.get("legacy_shared_plan") or {})
+
+  legacy_text = render_turn_discussion(snapshot_context or {}, legacy_planned_actions)
+  planner_text = turn_plan.to_turn_discussion(snapshot_context or {})
+  match = legacy_text == planner_text
+  diff_lines = [] if match else _turn_discussion_diff_lines(legacy_text, planner_text)
+  comparison = {
+    "mode": "read_only",
+    "match": match,
+    "legacy_hash": _hash_payload(legacy_text),
+    "planner_hash": _hash_payload(planner_text),
+    "diverged_keys": [] if match else ["turn_discussion_text"],
+    "notes": (
+      "Planner dual-run is hydrated from cached state only; no additional inventory/shop/skills traversal."
+      if match else
+      "Planner dual-run discussion diverged from legacy text. Review diff_lines for the exact mismatch."
+    ),
+    "legacy_turn_discussion": legacy_text,
+    "planner_turn_discussion": planner_text,
+    "diff_lines": diff_lines,
+  }
+  dual_run["comparison"] = comparison
+  planner_state["dual_run"] = dual_run
+  state_obj[PLANNER_STATE_KEY] = planner_state
+  return comparison
+
+
 def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
   if not isinstance(state_obj, dict):
     return {}
@@ -435,7 +635,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "inventory_source": inventory_source,
     "shop_buy_plan": shop_buy_plan,
     "pre_action_items": execution_items,
+    "deferred_use": deferred_use,
     "reassess_after_item_use": bool(reassess_after_item_use),
+    "runtime": runtime_state,
   })
   derived = derive_turn_state(observed, planner_state={
     "inventory_source": inventory_source,
@@ -443,10 +645,10 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "pre_action_items": execution_items,
     "reassess_after_item_use": bool(reassess_after_item_use),
     "turn_plan": {"planner_metadata": {"runtime": runtime_state}},
-  })
-  candidates = enumerate_candidate_actions(observed, derived)
+  }, state_obj=state_obj, action=action)
+  candidates = enumerate_candidate_actions(observed, derived, state_obj=state_obj, action=action)
 
-  legacy_shared_plan = {
+  legacy_base_plan = {
     "race_check": {},
     "race_decision": {},
     "race_entry_gate": {},
@@ -474,6 +676,14 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     },
     "would_buy": shop_buy_plan,
   }
+  review_planned_actions = build_review_planned_actions(
+    state_obj,
+    action,
+    planner_state={
+      "legacy_shared_plan": legacy_base_plan,
+      "item_use_context": item_context,
+    },
+  )
 
   turn_plan = TurnPlan(
     version=PLANNER_VERSION,
@@ -515,7 +725,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "inventory_source": inventory_source,
       "runtime": copy.deepcopy(runtime_state),
     },
-    legacy_shared_plan=legacy_shared_plan,
+    legacy_shared_plan=review_planned_actions,
   )
 
   plan_payload = {
@@ -531,7 +741,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "inventory_source": inventory_source,
     "inventory_source_summary": copy.deepcopy(inventory_summary),
     "projected_inventory_summary": projected_summary,
-    "legacy_shared_plan": legacy_shared_plan,
+    "legacy_shared_plan": review_planned_actions,
     "dual_run": {
       "observed": observed.to_dict(),
       "derived": derived.to_dict(),
@@ -539,11 +749,11 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "turn_plan": turn_plan.to_snapshot(),
       "comparison": {
         "mode": "read_only",
-        "match": True,
-        "legacy_hash": _hash_payload(legacy_shared_plan),
-        "planner_hash": _hash_payload(turn_plan.to_planned_actions()),
+        "match": None,
+        "legacy_hash": "",
+        "planner_hash": "",
         "diverged_keys": [],
-        "notes": "Planner dual-run is hydrated from cached state only; no additional inventory/shop/skills traversal.",
+        "notes": "Awaiting Turn Discussion serialization context from build_review_snapshot().",
       },
     },
   }

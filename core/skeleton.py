@@ -31,7 +31,9 @@ from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.planner import (
   PLANNER_RUNTIME_KEY,
   PLANNER_STATE_KEY,
+  build_review_planned_actions,
   plan_once,
+  update_turn_discussion_dual_run,
 )
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
@@ -1908,143 +1910,7 @@ def _build_trackblazer_planned_actions(state_obj, action):
     return {}
 
   planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
-  legacy_shared_plan = planner_state.get("legacy_shared_plan") or {}
-  inventory_plan = legacy_shared_plan.get("inventory_scan") or {}
-  shop_plan = legacy_shared_plan.get("shop_scan") or {}
-  would_buy = list(legacy_shared_plan.get("would_buy") or [])
-  would_use = list(legacy_shared_plan.get("would_use") or [])
-  deferred_use = list(legacy_shared_plan.get("deferred_use") or [])
-
-  race_decision = action.get("trackblazer_race_decision") if hasattr(action, "get") else {}
-  rival_scout = action.get("rival_scout") if hasattr(action, "get") else {}
-  race_planned = {}
-  race_check = {}
-  race_entry_gate = {}
-  race_scout_planned = {}
-  rival_indicator_detected = state_obj.get("rival_indicator_detected")
-  forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day"))
-  scheduled_race = bool(hasattr(action, "get") and (action.get("scheduled_race") or action.get("trackblazer_lobby_scheduled_race")))
-  lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race") or (hasattr(action, "get") and action.get("trackblazer_lobby_scheduled_race")))
-  scheduled_race_source = None
-  if lobby_scheduled_race:
-    scheduled_race_source = "lobby_button"
-  elif scheduled_race:
-    scheduled_race_source = "config_schedule"
-  if rival_indicator_detected is not None or forced_climax_race_day or scheduled_race:
-    race_check = {
-      "phase": "collecting_race_state",
-      "sub_phase": (
-        "check_scheduled_race"
-        if scheduled_race else
-        ("check_rival_indicator" if not forced_climax_race_day else "check_forced_race_day")
-      ),
-      "method": (
-        "scheduled_race_signal"
-        if scheduled_race else
-        ("lobby_race_button_indicator" if not forced_climax_race_day else "climax_race_day_banner_or_button")
-      ),
-      "rival_indicator_detected": bool(rival_indicator_detected),
-      "forced_climax_race_day": forced_climax_race_day,
-      "forced_climax_race_day_banner": bool(state_obj.get("trackblazer_climax_race_day_banner")),
-      "forced_climax_race_day_button": bool(state_obj.get("trackblazer_climax_race_day_button")),
-      "scheduled_race": scheduled_race,
-      "scheduled_race_source": scheduled_race_source,
-      "lobby_scheduled_race_detected": lobby_scheduled_race,
-      "scout_required": bool(hasattr(action, "get") and _action_func(action) == "do_race" and action.get("prefer_rival_race")),
-    }
-  if isinstance(race_decision, dict) and race_decision:
-    race_info = race_decision.get("race_tier_info") or {}
-    race_planned = {
-      "should_race": race_decision.get("should_race"),
-      "reason": race_decision.get("reason"),
-      "training_total_stats": race_decision.get("training_total_stats"),
-      "training_score": race_decision.get("training_score"),
-      "is_summer": race_decision.get("is_summer"),
-      "g1_forced": race_decision.get("g1_forced"),
-      "prefer_rival_race": race_decision.get("prefer_rival_race"),
-      "fallback_non_rival_race": race_decision.get("fallback_non_rival_race"),
-      "prefer_rest_over_weak_training": race_decision.get("prefer_rest_over_weak_training"),
-      "forced_race_day": race_decision.get("forced_race_day"),
-      "race_tier_target": race_decision.get("race_tier_target"),
-      "race_name": race_decision.get("race_name"),
-      "race_available": race_decision.get("race_available"),
-      "rival_indicator": race_decision.get("rival_indicator"),
-      "available_grades": race_info.get("available_grades"),
-      "best_grade": race_info.get("best_grade"),
-      "race_count": race_info.get("race_count"),
-      "scheduled_race": scheduled_race,
-      "scheduled_race_source": scheduled_race_source,
-    }
-  if scheduled_race:
-    race_entry_gate = {
-      "opens_from_lobby": True,
-      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
-      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
-      "warning_meaning": "This scheduled race would become the third consecutive race",
-      "ok_action": "continue_to_race_list",
-      "cancel_action": "return_to_lobby",
-      "expected_branch": "continue_to_race_list",
-      "scheduled_race": True,
-      "scheduled_race_source": scheduled_race_source,
-      "force_accept_warning": True,
-    }
-  elif isinstance(race_decision, dict) and race_decision and (_action_func(action) == "do_race" or race_decision.get("should_race")):
-    # Decide expected consecutive-race warning behavior.
-    # The race gate already filters weak signals, so should_race=True means
-    # the signal was strong enough to justify racing. G1 or should_race both
-    # continue; otherwise back out to the lobby.
-    rest_promoted_optional_race = bool(
-      race_decision.get("prefer_rival_race")
-      and _action_value(action, "_rival_fallback_func") == "do_rest"
-      and not _action_value(action, "scheduled_race")
-      and not _action_value(action, "trackblazer_lobby_scheduled_race")
-      and not _action_value(action, "is_race_day")
-    )
-    if race_decision.get("fallback_non_rival_race") or rest_promoted_optional_race:
-      expected_branch = "return_to_lobby"
-    elif race_decision.get("g1_forced") or race_decision.get("should_race"):
-      expected_branch = "continue_to_race_list"
-    else:
-      expected_branch = "return_to_lobby"
-    race_entry_gate = {
-      "opens_from_lobby": True,
-      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
-      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
-      "warning_meaning": "This race would become the third consecutive race",
-      "ok_action": "continue_to_race_list",
-      "cancel_action": "return_to_lobby",
-      "expected_branch": expected_branch,
-    }
-  if isinstance(rival_scout, dict) and rival_scout:
-    race_scout_planned = {
-      "phase": "scouting_rival_race",
-      "executed": True,
-      "rival_found": rival_scout.get("rival_found"),
-      "selected_race_name": rival_scout.get("race_name"),
-      "selected_match_count": rival_scout.get("match_count"),
-      "selected_grade": rival_scout.get("grade"),
-      "reverted_to_training": bool(rival_scout.get("rival_found") is False),
-    }
-  elif hasattr(action, "get") and action.get("prefer_rival_race"):
-    race_scout_planned = {
-      "phase": "scouting_rival_race",
-      "executed": False,
-      "status": "pending_execute_commit",
-      "reason": "Full rival scout only runs after commit.",
-    }
-
-  return {
-    "race_check": race_check,
-    "race_decision": race_planned,
-    "race_entry_gate": race_entry_gate,
-    "race_scout": race_scout_planned,
-    "inventory_scan": inventory_plan,
-    "would_use": would_use,
-    "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
-    "deferred_use": deferred_use,
-    "shop_scan": shop_plan,
-    "would_buy": would_buy,
-  }
+  return build_review_planned_actions(state_obj, action, planner_state=planner_state)
 
 
 def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
@@ -3709,6 +3575,25 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       available_trainings=available_trainings,
       training_function=selected_action.get("training_function"),
     )
+  resolved_planned_clicks = planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action)
+  planned_actions = _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {}
+  planner_dual_run_comparison = {}
+  if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
+    planner_dual_run_comparison = update_turn_discussion_dual_run(
+      state_obj,
+      {
+        "scenario_name": constants.SCENARIO_NAME or "default",
+        "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+        "execution_intent": bot.get_execution_intent(),
+        "state_summary": state_summary,
+        "selected_action": selected_action,
+        "ranked_trainings": ranked_trainings,
+        "reasoning_notes": reasoning_notes or "",
+        "planned_clicks": resolved_planned_clicks,
+      },
+      legacy_planned_actions=planned_actions,
+    )
+    state_summary["trackblazer_planner_state"] = state_obj.get(PLANNER_STATE_KEY)
   return {
     "scenario_name": constants.SCENARIO_NAME or "default",
     "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
@@ -3724,12 +3609,13 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "trackblazer_shop_items": state_obj.get("trackblazer_shop_items") if isinstance(state_obj, dict) else None,
     "trackblazer_planner_runtime": state_obj.get(PLANNER_RUNTIME_KEY) if isinstance(state_obj, dict) else None,
     "trackblazer_planner_state": state_obj.get(PLANNER_STATE_KEY) if isinstance(state_obj, dict) else None,
-    "planned_actions": _build_trackblazer_planned_actions(state_obj, action) if isinstance(state_obj, dict) else {},
+    "planner_dual_run_comparison": planner_dual_run_comparison,
+    "planned_actions": planned_actions,
     "reasoning_notes": reasoning_notes or "",
     "min_scores": action.get("min_scores") if hasattr(action, "get") else None,
     "backend_state": backend_state,
     "ocr_debug": debug_entries,
-    "planned_clicks": planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action),
+    "planned_clicks": resolved_planned_clicks,
   }
 
 
