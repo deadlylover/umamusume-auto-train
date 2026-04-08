@@ -31,7 +31,9 @@ from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.planner import (
   PLANNER_RUNTIME_KEY,
   PLANNER_STATE_KEY,
+  apply_turn_plan_action_payload,
   build_review_planned_actions,
+  get_turn_plan,
   plan_once,
   update_turn_discussion_dual_run,
 )
@@ -1217,7 +1219,7 @@ def _should_retry_training_after_consecutive_warning(action):
     return False
   if _action_value(action, "_consecutive_warning_cancel_reason") != "optional_rival_promoted_from_rest":
     return False
-  item_context = _action_value(action, "trackblazer_item_use_context")
+  item_context = _trackblazer_item_use_context(action)
   if not isinstance(item_context, dict) or not item_context.get("energy_rescue"):
     return False
   return _trackblazer_has_training_fallback(action)
@@ -1339,6 +1341,30 @@ def _trackblazer_pre_action_items(action):
   if isinstance(action, dict):
     return list(action.get("trackblazer_pre_action_items") or [])
   return []
+
+
+def _trackblazer_shop_buy_plan(action):
+  if hasattr(action, "get"):
+    return list(action.get("trackblazer_shop_buy_plan") or [])
+  if isinstance(action, dict):
+    return list(action.get("trackblazer_shop_buy_plan") or [])
+  return []
+
+
+def _trackblazer_item_use_context(action):
+  if hasattr(action, "get"):
+    return dict(action.get("trackblazer_item_use_context") or {})
+  if isinstance(action, dict):
+    return dict(action.get("trackblazer_item_use_context") or {})
+  return {}
+
+
+def _trackblazer_reassess_after_item_use(action):
+  if hasattr(action, "get"):
+    return bool(action.get("trackblazer_reassess_after_item_use"))
+  if isinstance(action, dict):
+    return bool(action.get("trackblazer_reassess_after_item_use"))
+  return False
 
 
 def _skill_purchase_plan(action):
@@ -1691,7 +1717,7 @@ def _order_trackblazer_pre_action_items(items):
 def _planned_clicks_for_action(action):
   action_func = _action_func(action)
   pre_action_items = _trackblazer_pre_action_items(action)
-  shop_buy_plan = list(action.get("trackblazer_shop_buy_plan") or []) if hasattr(action, "get") else []
+  shop_buy_plan = _trackblazer_shop_buy_plan(action)
   skill_purchase_plan = _skill_purchase_plan(action)
   skill_clicks = list(skill_purchase_plan.get("planned_clicks") or [])
 
@@ -1759,7 +1785,7 @@ def _planned_clicks_for_action(action):
         ),
       )
     )
-    if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use"):
+    if _trackblazer_reassess_after_item_use(action):
       pre_action_clicks.append(
         _planned_click(
           "Rescan trainings after item use",
@@ -2010,11 +2036,8 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     return action
 
   planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
-  action["trackblazer_shop_buy_plan"] = list(planner_state.get("shop_buy_plan") or [])
-  action["trackblazer_pre_action_items"] = list(planner_state.get("pre_action_items") or [])
-  action["trackblazer_item_use_context"] = dict(planner_state.get("item_use_context") or {})
-  # Reassess only when the shared per-snapshot planner result requires it.
-  action["trackblazer_reassess_after_item_use"] = bool(planner_state.get("reassess_after_item_use"))
+  turn_plan = get_turn_plan(state_obj, action, planner_state=planner_state, limit=8)
+  apply_turn_plan_action_payload(action, turn_plan)
   return action
 
 
@@ -2217,7 +2240,9 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   commit_mode="dry_run" — non-destructive simulation: opens, scans, detects
     controls, then closes without increment clicks or confirm.
   """
-  planned_items = _trackblazer_pre_action_items(action)
+  turn_plan = get_turn_plan(state_obj, action, limit=8)
+  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
     return {"status": "skipped"}
 
@@ -2233,7 +2258,9 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   else:
     _invalidate_trackblazer_inventory_cache()
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
-  planned_items = _trackblazer_pre_action_items(action)
+  turn_plan = get_turn_plan(state_obj, action, limit=8)
+  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
     return {
       "status": "skipped",
@@ -2275,11 +2302,12 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
     _apply_trackblazer_used_items_to_state(state_obj, item_keys)
     _cache_trackblazer_inventory(state_obj, turn_key=action_count)
 
-  if action.get("trackblazer_reassess_after_item_use"):
+  planner_reassess_transition = dict(planner_item_execution.get("reassess_transition") or {})
+  if planner_reassess_transition.get("required"):
     return {
       "status": "reassess",
       "result": result,
-      "reason": "trackblazer_item_use_requires_reassessment",
+      "reason": planner_reassess_transition.get("reason") or "trackblazer_item_use_requires_reassessment",
     }
 
   return {
@@ -2295,7 +2323,7 @@ def _trackblazer_action_failure_should_block_retry(state_obj, action):
   if not hasattr(action, "get"):
     return False
 
-  planned_items = list(action.get("trackblazer_pre_action_items") or [])
+  planned_items = _trackblazer_pre_action_items(action)
   inventory_flow = state_obj.get("trackblazer_inventory_flow") or {}
   inventory_reason = str(inventory_flow.get("reason") or "").strip()
   if planned_items and inventory_reason in {
@@ -3397,7 +3425,7 @@ def _run_trackblazer_shop_purchases(state_obj, action):
   # Recompute against the current state so execute mode does not use a stale
   # pre-review shop plan after a refresh, recovery, or overlay mismatch.
   _attach_trackblazer_pre_action_item_plan(state_obj, action)
-  planned_buys = list(action.get("trackblazer_shop_buy_plan") or [])
+  planned_buys = _trackblazer_shop_buy_plan(action)
   if not planned_buys:
     return {"status": "skipped"}
 
@@ -3508,6 +3536,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     planner_state = plan_once(state_obj, action, limit=8)
   turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
   planner_turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot) if turn_plan_snapshot else None
+  if planner_turn_plan is not None and hasattr(action, "__setitem__"):
+    apply_turn_plan_action_payload(action, planner_turn_plan)
   planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})
   planner_review_context = dict((planner_turn_plan.review_context if planner_turn_plan else {}) or {})
   planner_selected_action = dict(planner_review_context.get("selected_action") or {})
@@ -3632,7 +3662,15 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       }
       planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
       state_obj[PLANNER_STATE_KEY] = planner_state
-  resolved_planned_clicks = planned_clicks if planned_clicks is not None else _planned_clicks_for_action(action)
+  resolved_planned_clicks = (
+    planned_clicks
+    if planned_clicks is not None else
+    (
+      planner_turn_plan.to_planned_clicks()
+      if planner_turn_plan is not None else
+      _planned_clicks_for_action(action)
+    )
+  )
   resolved_reasoning_notes = reasoning_notes or ""
   if planner_turn_plan is not None:
     planner_turn_plan.review_context = {
@@ -3701,6 +3739,11 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "backend_state": backend_state,
     "ocr_debug": debug_entries,
     "planned_clicks": resolved_planned_clicks,
+    "planner_execution_payload": (
+      planner_turn_plan.to_execution_payload()
+      if planner_turn_plan is not None else
+      {}
+    ),
     "quick_bar": quick_bar,
     "compact_summary_text": compact_summary_text,
     "turn_discussion_text": turn_discussion_text,

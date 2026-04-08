@@ -88,12 +88,15 @@ class CandidateAction:
 
 @dataclass
 class ExecutionStep:
+  step_id: str = ""
   step_type: str = ""
   intent: str = ""
   screen_preconditions: List[str] = field(default_factory=list)
   success_transition: str = ""
   failure_transition: str = ""
+  notes: str = ""
   retry_policy: Dict[str, Any] = field(default_factory=dict)
+  metadata: Dict[str, Any] = field(default_factory=dict)
   planned_clicks: List[Dict[str, Any]] = field(default_factory=list)
 
   def to_dict(self) -> Dict[str, Any]:
@@ -738,6 +741,56 @@ def _format_short_list(payload):
   return lines
 
 
+def _format_item_plan_subgraph_lines(payload):
+  if not isinstance(payload, dict):
+    return []
+
+  lines = []
+  binding = payload.get("binding_label")
+  if binding:
+    lines.append(f"binding: {binding}")
+
+  inventory_refresh = payload.get("inventory_refresh") or {}
+  refresh_trigger = inventory_refresh.get("trigger")
+  refresh_reason = inventory_refresh.get("reason")
+  if refresh_trigger or refresh_reason:
+    label = refresh_trigger or "inventory_refresh"
+    if refresh_reason:
+      label += f" ({refresh_reason})"
+    lines.append(f"refresh: {label}")
+
+  execution_items = list(payload.get("execution_items") or [])
+  if execution_items:
+    lines.append(f"use_now: {_format_candidate_list(execution_items)}")
+
+  deferred_items = list(payload.get("deferred_items") or [])
+  if deferred_items:
+    lines.append(f"defer_until_reassess: {_format_candidate_list(deferred_items, include_reason=True)}")
+
+  path = list(payload.get("path") or [])
+  if path:
+    lines.append(f"path: {' -> '.join(str(part) for part in path)}")
+
+  for transition in list(payload.get("transitions") or []):
+    if not isinstance(transition, dict):
+      continue
+    source = transition.get("from")
+    target = transition.get("to")
+    if not source and not target:
+      continue
+    parts = [f"{source or '?'} -> {target or '?'}"]
+    reason = transition.get("reason")
+    if reason:
+      parts.append(f"reason={reason}")
+    trigger_items = list(transition.get("trigger_items") or [])
+    if trigger_items:
+      parts.append(f"trigger={', '.join(str(item) for item in trigger_items)}")
+    if transition.get("reobserve"):
+      parts.append("reobserve=yes")
+    lines.append(f"transition: {' | '.join(parts)}")
+  return lines
+
+
 def _format_planned_action_sections(planned, state_summary):
   lines = []
   for section_name, payload in (
@@ -749,6 +802,9 @@ def _format_planned_action_sections(planned, state_summary):
     ("Inventory Scan", planned.get("inventory_scan") or {}),
     ("Would Use", planned.get("would_use") or []),
     ("Deferred Use", planned.get("deferred_use") or []),
+    ("Item Plan", planned.get("item_plan_subgraph") or {}),
+    ("Reassess Boundary", planned.get("reassess_boundary") or {}),
+    ("Reobserve Boundaries", planned.get("reobserve_boundaries") or []),
     ("Shop Scan", planned.get("shop_scan") or {}),
     ("Would Buy", planned.get("would_buy") or []),
   ):
@@ -757,6 +813,8 @@ def _format_planned_action_sections(planned, state_summary):
       summary = _format_short_mapping(payload)
       if section_name == "Skill Check":
         summary = _format_skill_check_lines(state_summary)
+      elif section_name == "Item Plan":
+        summary = _format_item_plan_subgraph_lines(payload)
       if summary:
         lines.extend([f"    {line}" for line in summary])
       else:
@@ -959,6 +1017,7 @@ class TurnPlan:
   candidate_ranking: List[Dict[str, Any]] = field(default_factory=list)
   shop_plan: Dict[str, Any] = field(default_factory=dict)
   item_plan: Dict[str, Any] = field(default_factory=dict)
+  reobserve_boundaries: List[Dict[str, Any]] = field(default_factory=list)
   inventory_snapshot: Dict[str, Any] = field(default_factory=dict)
   timing: Dict[str, Any] = field(default_factory=dict)
   debug_summary: Dict[str, Any] = field(default_factory=dict)
@@ -996,6 +1055,17 @@ class TurnPlan:
     if item_context:
       planned["would_use_context"] = item_context
 
+    item_subgraph = dict((self.item_plan or {}).get("subgraph") or {})
+    if item_subgraph:
+      planned["item_plan_subgraph"] = item_subgraph
+
+    reassess_boundary = dict((self.item_plan or {}).get("reassess_boundary") or {})
+    if reassess_boundary:
+      planned["reassess_boundary"] = reassess_boundary
+
+    if self.reobserve_boundaries:
+      planned["reobserve_boundaries"] = copy.deepcopy(self.reobserve_boundaries)
+
     return planned
 
   @classmethod
@@ -1015,6 +1085,7 @@ class TurnPlan:
       candidate_ranking=list(snapshot.get("candidate_ranking") or []),
       shop_plan=dict(snapshot.get("shop_plan") or {}),
       item_plan=dict(snapshot.get("item_plan") or {}),
+      reobserve_boundaries=list(snapshot.get("reobserve_boundaries") or []),
       inventory_snapshot=dict(snapshot.get("inventory_snapshot") or {}),
       timing=dict(snapshot.get("timing") or {}),
       debug_summary=dict(snapshot.get("debug_summary") or {}),
@@ -1040,6 +1111,23 @@ class TurnPlan:
     merged_context = self._merged_review_context(snapshot_context)
     return build_quick_bar_payload(merged_context, self.to_planned_actions())
 
+  def to_planned_clicks(self) -> List[Dict[str, Any]]:
+    clicks = []
+    for step in self.step_sequence:
+      if not isinstance(step, ExecutionStep):
+        continue
+      for click in list(step.planned_clicks or []):
+        if isinstance(click, dict):
+          clicks.append(copy.deepcopy(click))
+    return clicks
+
+  def to_execution_payload(self) -> Dict[str, Any]:
+    return {
+      "item_execution": copy.deepcopy((self.item_plan or {}).get("execution_payload") or {}),
+      "reobserve_boundaries": copy.deepcopy(self.reobserve_boundaries),
+      "step_sequence": [step.to_dict() for step in self.step_sequence],
+    }
+
   def _merged_review_context(self, snapshot_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
     merged_context = dict(snapshot_context)
@@ -1060,6 +1148,7 @@ class TurnPlan:
       "candidate_ranking": list(self.candidate_ranking),
       "shop_plan": dict(self.shop_plan),
       "item_plan": dict(self.item_plan),
+      "reobserve_boundaries": copy.deepcopy(self.reobserve_boundaries),
       "inventory_snapshot": dict(self.inventory_snapshot),
       "timing": dict(self.timing),
       "debug_summary": dict(self.debug_summary),

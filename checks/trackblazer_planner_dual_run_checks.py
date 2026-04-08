@@ -6,7 +6,7 @@ from unittest.mock import patch
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
-from core.skeleton import build_review_snapshot
+from core.skeleton import _planned_clicks_for_action, build_review_snapshot
 from core.trackblazer.models import TurnPlan
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
@@ -411,6 +411,8 @@ def main():
       assert review_context.get("selected_action"), f"{case_name}: missing planner-owned selected_action review context"
       assert review_context.get("ranked_trainings"), f"{case_name}: missing planner-owned ranked trainings"
       assert review_context.get("ranked_trainings") == snapshot.get("ranked_trainings"), f"{case_name}: planner-owned ranked trainings should match review snapshot"
+      assert TurnPlan.from_snapshot(turn_plan).to_planned_clicks() == snapshot.get("planned_clicks"), f"{case_name}: planner-owned planned clicks should come from TurnPlan step payloads"
+      assert snapshot.get("planned_clicks") == _planned_clicks_for_action(action), f"{case_name}: planner-owned planned clicks should preserve legacy visible click order"
 
       planner_only_turn_plan = copy.deepcopy(turn_plan)
       planner_only_legacy_plan = planner_only_turn_plan.get("legacy_shared_plan") or {}
@@ -594,6 +596,158 @@ def main():
     assert freshness_followup.get("ranked_trainings") == refreshed_ranked_trainings, "review snapshot should reuse refreshed planner-owned ranked trainings"
     assert freshness_initial.get("planner_dual_run_comparison", {}).get("match") is True, "initial freshness case should produce a valid planner comparison"
     assert freshness_followup.get("planner_dual_run_comparison", {}).get("match") is True, "refreshed freshness case should preserve planner comparison parity"
+
+    whistle_state, whistle_action = _prepare_case("training")
+    whistle_state["trackblazer_shop_summary"] = {
+      "shop_coins": 180,
+      "items_detected": ["vita_20"],
+      "purchasable_items": ["vita_20"],
+    }
+    whistle_state["trackblazer_shop_items"] = ["vita_20"]
+    with patch(
+      "core.trackblazer.planner._candidate_shop_buys",
+      return_value=[
+        {
+          "key": "vita_20",
+          "name": "Vita 20",
+          "priority": "HIGH",
+          "cost": 30,
+          "held_quantity": 1,
+          "max_quantity": 4,
+          "reason": "synthetic shop refresh before whistle",
+        }
+      ],
+    ), patch(
+      "core.trackblazer.planner.plan_item_usage",
+      return_value={
+        "context": {
+          "training_name": "speed",
+          "training_score": 42.0,
+          "energy_rescue": False,
+          "commit_training_after_items": False,
+        },
+        "candidates": [
+          {
+            "key": "reset_whistle",
+            "name": "Reset Whistle",
+            "usage_group": "burst_setup",
+            "reason": "synthetic weak board reroll",
+          },
+          {
+            "key": "motivating_megaphone",
+            "name": "Motivating Megaphone",
+            "usage_group": "training_burst",
+            "reason": "synthetic burst after reroll",
+          },
+        ],
+        "deferred": [],
+      },
+    ):
+      whistle_snapshot = build_review_snapshot(
+        whistle_state,
+        whistle_action,
+        reasoning_notes="synthetic whistle reassess case",
+        ocr_debug=[],
+      )
+    whistle_turn_plan = TurnPlan.from_snapshot((whistle_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {})
+    whistle_item_plan = dict(whistle_turn_plan.item_plan or {})
+    whistle_execution_payload = dict((whistle_snapshot.get("planner_execution_payload") or {}).get("item_execution") or {})
+    whistle_subgraph = dict(whistle_item_plan.get("subgraph") or {})
+    whistle_reobserve_boundaries = list(whistle_turn_plan.reobserve_boundaries or [])
+    whistle_selected_action = whistle_snapshot.get("selected_action") or {}
+    whistle_planned_actions = whistle_snapshot.get("planned_actions") or {}
+    assert [entry.get("key") for entry in whistle_selected_action.get("pre_action_item_use") or []] == ["reset_whistle"], "whistle case should expose planner-owned first-pass item execution"
+    assert whistle_selected_action.get("reassess_after_item_use") is True, "whistle case should expose planner-owned reassess flag"
+    assert whistle_execution_payload.get("inventory_refresh", {}).get("trigger") == "post_shop_purchase_refresh", "shop purchases should force planner-owned inventory refresh before item execution"
+    assert whistle_execution_payload.get("reassess_transition", {}).get("transition_kind") == "reset_whistle_reroll", "whistle case should model planner-first Reset Whistle reassess transitions"
+    assert "Reset Whistle" in (whistle_execution_payload.get("reassess_transition", {}).get("reason") or ""), "whistle case should explain why the planner invalidated the selected action"
+    assert whistle_subgraph.get("path") == [
+      "inventory_refresh",
+      "replan_items",
+      "execute_pre_action_items",
+      "await_lobby_after_items",
+      "reassess",
+    ], "whistle item plan should expose a planner-owned reassess subgraph"
+    assert any(
+      transition.get("to") == "reassess" and transition.get("reobserve")
+      for transition in whistle_subgraph.get("transitions") or []
+    ), "whistle item subgraph should model reassess as an explicit transition"
+    assert whistle_planned_actions.get("item_plan_subgraph", {}).get("path") == whistle_subgraph.get("path"), "planned actions should surface the planner-owned item subgraph"
+    assert whistle_planned_actions.get("reassess_boundary", {}).get("required") is True, "planned actions should surface reassess boundary metadata"
+    deferred_keys = [entry.get("key") for entry in whistle_planned_actions.get("deferred_use") or []]
+    assert "motivating_megaphone" in deferred_keys, "whistle case should defer follow-up burst items into the planner reassess pass"
+    deferred_entry = next(entry for entry in whistle_planned_actions.get("deferred_use") or [] if entry.get("key") == "motivating_megaphone")
+    assert "post-whistle reassess" in (deferred_entry.get("reason") or ""), "whistle case should explain why the burst item was deferred"
+    assert whistle_reobserve_boundaries and whistle_reobserve_boundaries[0].get("trigger_items") == ["reset_whistle"], "whistle case should register a planner-owned reobserve boundary"
+    whistle_step_sequence = [step.to_dict() for step in whistle_turn_plan.step_sequence]
+    whistle_refresh_step = next(step for step in whistle_step_sequence if step.get("step_type") == "refresh_inventory_for_items")
+    whistle_transition_step = next(step for step in whistle_step_sequence if step.get("step_type") == "transition_reassess_after_items")
+    whistle_item_step = next(step for step in whistle_step_sequence if step.get("step_type") == "execute_pre_action_items")
+    assert any(click.get("label") == "Open use-items inventory" for click in whistle_refresh_step.get("planned_clicks") or []), "planner-owned refresh step should surface the inventory re-entry clicks"
+    assert any(click.get("label") == "Increment Reset Whistle" for click in whistle_item_step.get("planned_clicks") or []), "whistle execution step should carry planner-owned item-use clicks"
+    assert whistle_transition_step.get("success_transition") == "reassess", "planner transition step should hand off whistle turns to reassess"
+    assert whistle_snapshot.get("planned_clicks") == _planned_clicks_for_action(whistle_action), "planner-owned whistle clicks should preserve legacy visible click order"
+
+    energy_state, energy_action = _prepare_case("training")
+    energy_state["trackblazer_shop_summary"] = {
+      "shop_coins": 0,
+      "items_detected": [],
+      "purchasable_items": [],
+    }
+    energy_state["trackblazer_shop_items"] = []
+    with patch(
+      "core.trackblazer.planner.plan_item_usage",
+      return_value={
+        "context": {
+          "training_name": "speed",
+          "training_score": 42.0,
+          "energy_rescue": True,
+          "commit_training_after_items": False,
+        },
+        "candidates": [
+          {
+            "key": "vita_20",
+            "name": "Vita 20",
+            "usage_group": "energy",
+            "reason": "synthetic energy rescue",
+          },
+          {
+            "key": "good_luck_charm",
+            "name": "Good-Luck Charm",
+            "usage_group": "support",
+            "reason": "synthetic fail-safe pairing",
+          },
+        ],
+        "deferred": [],
+      },
+    ):
+      energy_snapshot = build_review_snapshot(
+        energy_state,
+        energy_action,
+        reasoning_notes="synthetic energy reassess case",
+        ocr_debug=[],
+      )
+    energy_turn_plan = TurnPlan.from_snapshot((energy_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {})
+    energy_item_plan = dict(energy_turn_plan.item_plan or {})
+    energy_execution_payload = dict((energy_snapshot.get("planner_execution_payload") or {}).get("item_execution") or {})
+    energy_subgraph = dict(energy_item_plan.get("subgraph") or {})
+    energy_selected_action = energy_snapshot.get("selected_action") or {}
+    assert [entry.get("key") for entry in energy_selected_action.get("pre_action_item_use") or []] == ["vita_20", "good_luck_charm"], "energy rescue case should keep the planner-owned energy/failsafe item set"
+    assert energy_selected_action.get("reassess_after_item_use") is True, "energy rescue should remain a planner-owned reassess transition"
+    assert energy_execution_payload.get("inventory_refresh", {}).get("trigger") == "pre_action_refresh", "energy rescue without shop buys should refresh inventory immediately before item use"
+    assert energy_execution_payload.get("reassess_transition", {}).get("transition_kind") == "energy_rescue_reassess", "energy rescue should model planner-first reassess transitions"
+    assert "Energy items change" in (energy_execution_payload.get("reassess_transition", {}).get("reason") or ""), "energy rescue should explain why the planner invalidated the selected action"
+    assert energy_subgraph.get("path", [])[-1:] == ["reassess"], "energy rescue subgraph should end in reassess"
+    assert any(
+      transition.get("to") == "reassess" and "vita_20" in list(transition.get("trigger_items") or [])
+      for transition in energy_subgraph.get("transitions") or []
+    ), "energy rescue subgraph should tie the reassess transition to the energy item"
+    energy_reobserve = list(energy_snapshot.get("planner_execution_payload", {}).get("reobserve_boundaries") or [])
+    assert energy_reobserve and "Energy items change" in (energy_reobserve[0].get("reason") or ""), "planner execution payload should expose energy-item reassess boundaries before execute"
+    energy_step_sequence = [step.to_dict() for step in energy_turn_plan.step_sequence]
+    energy_transition_step = next(step for step in energy_step_sequence if step.get("step_type") == "transition_reassess_after_items")
+    assert energy_transition_step.get("metadata", {}).get("transition_kind") == "energy_rescue_reassess", "energy case should expose the explicit reassess transition on the planner step"
+    assert energy_snapshot.get("planned_clicks") == _planned_clicks_for_action(energy_action), "planner-owned energy-rescue clicks should preserve legacy visible click order"
 
   assert all(count == 0 for count in traversal_calls.values()), traversal_calls
   print(json.dumps({

@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Tuple
 
+import core.bot as bot
 import core.config as config
 import utils.constants as constants
 from core.trackblazer.candidates import enumerate_candidate_actions
@@ -26,7 +27,7 @@ from core.trackblazer.models import (
 
 PLANNER_STATE_KEY = "trackblazer_planner_state"
 PLANNER_RUNTIME_KEY = "trackblazer_planner_runtime"
-PLANNER_VERSION = 1
+PLANNER_VERSION = 2
 
 
 def _normalize_for_hash(value):
@@ -152,7 +153,6 @@ def _build_selected_action_review_context(action, pre_action_items=None, reasses
     "trackblazer_race_decision": copy.deepcopy(action.get("trackblazer_race_decision") or {}),
     "trackblazer_race_lookahead": copy.deepcopy(action.get("trackblazer_race_lookahead") or {}),
   }
-
 
 def _skill_shortlist_hash(skill_context_key: str) -> str:
   return _hash_payload({"skill_context_key": skill_context_key})
@@ -339,12 +339,16 @@ def _resolve_inventory_source(state_obj) -> Tuple[Dict[str, Any], Dict[str, Any]
   return current_inventory, current_summary, current_flow, "current"
 
 
-def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reassess_after_item_use) -> List[ExecutionStep]:
+def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payload) -> List[ExecutionStep]:
   action_func = _action_func(action)
   prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
   skill_purchase_plan = dict((state_obj or {}).get("skill_purchase_plan") or {})
+  execution_items = list((item_execution_payload or {}).get("execution_items") or [])
+  reassess_transition = dict((item_execution_payload or {}).get("reassess_transition") or {})
+  reassess_after_item_use = bool(reassess_transition.get("required"))
   step_sequence = [
     ExecutionStep(
+      step_id="await_operator_review",
       step_type="await_operator_review",
       intent="review_current_turn",
       screen_preconditions=["lobby_snapshot_ready"],
@@ -356,6 +360,7 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reas
   if skill_purchase_plan:
     step_sequence.append(
       ExecutionStep(
+        step_id="execute_skill_purchases",
         step_type="execute_skill_purchases",
         intent="commit_skill_purchase_plan",
         screen_preconditions=["skills_menu_accessible"],
@@ -368,15 +373,18 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reas
   if shop_buy_plan:
     step_sequence.append(
       ExecutionStep(
+        step_id="execute_shop_purchases",
         step_type="execute_shop_purchases",
         intent="buy_planned_trackblazer_items",
         screen_preconditions=["shop_entry_available"],
         success_transition="shop_purchase_complete",
         failure_transition="shop_purchase_failed",
+        planned_clicks=_build_shop_step_planned_clicks(shop_buy_plan),
       )
     )
     step_sequence.append(
       ExecutionStep(
+        step_id="await_lobby_after_shop",
         step_type="await_lobby_after_shop",
         intent="return_to_lobby_after_shop",
         screen_preconditions=["shop_overlay_open"],
@@ -388,26 +396,73 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reas
   if execution_items:
     step_sequence.append(
       ExecutionStep(
+        step_id="refresh_inventory_for_items",
+        step_type="refresh_inventory_for_items",
+        intent="refresh_inventory_before_item_use",
+        screen_preconditions=["inventory_entry_available"],
+        success_transition="inventory_refreshed_for_item_use",
+        failure_transition="inventory_refresh_failed",
+        notes="Planner-owned inventory refresh before item execution.",
+        planned_clicks=_build_item_refresh_step_planned_clicks(),
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_id="replan_pre_action_items",
+        step_type="replan_pre_action_items",
+        intent="recompute_pre_action_item_plan",
+        screen_preconditions=["refreshed_inventory_snapshot_ready"],
+        success_transition="pre_action_item_plan_ready",
+        failure_transition="pre_action_item_plan_failed",
+        notes="Planner-owned replan against the refreshed inventory snapshot.",
+        metadata={
+          "execution_items": copy.deepcopy(execution_items),
+          "reassess_transition": copy.deepcopy(reassess_transition),
+        },
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_id="execute_pre_action_items",
         step_type="execute_pre_action_items",
         intent="use_planned_pre_action_items",
         screen_preconditions=["inventory_entry_available"],
         success_transition="reassess_required" if reassess_after_item_use else "item_use_complete",
         failure_transition="item_use_failed",
+        metadata={
+          "execution_items": copy.deepcopy(execution_items),
+        },
+        planned_clicks=_build_item_execute_step_planned_clicks(item_execution_payload),
       )
     )
     step_sequence.append(
       ExecutionStep(
+        step_id="await_lobby_after_items",
         step_type="await_lobby_after_items",
         intent="return_to_lobby_after_item_use",
         screen_preconditions=["inventory_overlay_open"],
-        success_transition="reassess" if reassess_after_item_use else "lobby_restored",
+        success_transition="lobby_restored",
         failure_transition="lobby_return_failed",
+      )
+    )
+    step_sequence.append(
+      ExecutionStep(
+        step_id="transition_after_pre_action_items",
+        step_type="transition_reassess_after_items" if reassess_after_item_use else "transition_continue_after_items",
+        intent="reassess_after_item_use" if reassess_after_item_use else "continue_selected_action",
+        screen_preconditions=["lobby_restored"],
+        success_transition="reassess" if reassess_after_item_use else "main_action_ready",
+        failure_transition="transition_resolution_failed",
+        notes=reassess_transition.get("reason") or "",
+        metadata=copy.deepcopy(reassess_transition),
+        planned_clicks=_build_item_transition_step_planned_clicks(item_execution_payload),
       )
     )
 
   if action_func == "do_race":
     step_sequence.append(
       ExecutionStep(
+        step_id="enforce_race_gate",
         step_type="enforce_race_gate",
         intent="apply_operator_race_gate",
         screen_preconditions=["race_action_selected"],
@@ -418,6 +473,7 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reas
     if prefer_rival_race:
       step_sequence.append(
         ExecutionStep(
+          step_id="execute_rival_scout",
           step_type="execute_rival_scout",
           intent="verify_rival_race_before_commit",
           screen_preconditions=["race_list_accessible"],
@@ -429,15 +485,18 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, execution_items, reas
   if action_func:
     step_sequence.append(
       ExecutionStep(
+        step_id="execute_main_action",
         step_type="execute_main_action",
         intent=action_func,
         screen_preconditions=["main_action_ready"],
         success_transition="action_click_complete",
         failure_transition="action_click_failed",
+        planned_clicks=_build_main_action_step_planned_clicks(action),
       )
     )
     step_sequence.append(
       ExecutionStep(
+        step_id="resolve_post_action",
         step_type="resolve_post_action",
         intent="stabilize_after_action",
         screen_preconditions=["post_action_transition_expected"],
@@ -505,6 +564,442 @@ def _action_value(action, key, default=None):
   if hasattr(action, "get"):
     return action.get(key, default)
   return default
+
+
+def _planned_click(label, template=None, *, target=None, region_key=None, note=None):
+  payload = {
+    "label": label,
+    "input_backend": bot.get_active_control_backend(),
+    "screenshot_backend": bot.get_screenshot_backend(),
+  }
+  if template:
+    payload["template"] = template
+  if target is not None:
+    payload["target"] = target
+  if region_key:
+    payload["region_key"] = region_key
+  if note:
+    payload["note"] = note
+  return payload
+
+
+def _item_binding_label(action) -> str:
+  action_func = _action_func(action) or "unknown"
+  training_name = _action_value(action, "training_name")
+  race_name = _action_value(action, "race_name")
+  if action_func == "do_training" and training_name:
+    return f"{action_func}:{training_name}"
+  if action_func == "do_race" and race_name:
+    return f"{action_func}:{race_name}"
+  return action_func
+
+
+def _item_reassess_reason(execution_items):
+  trigger_items = [entry.get("key") for entry in list(execution_items or []) if isinstance(entry, dict) and entry.get("key")]
+  if "reset_whistle" in trigger_items:
+    return "Reset Whistle rerolls the board, so the selected action must be rebuilt from a fresh training scan"
+  if any(entry.get("usage_group") == "energy" for entry in list(execution_items or []) if isinstance(entry, dict)):
+    return "Energy items change post-item energy and failure state before the selected action can be committed"
+  return "Selected pre-action items change board state before the selected action is committed"
+
+
+def _build_shop_step_planned_clicks(shop_buy_plan):
+  clicks = []
+  if not shop_buy_plan:
+    return clicks
+  clicks.append(_planned_click("Open shop for purchases", note="Trackblazer shop buy step before the main action"))
+  for entry in list(shop_buy_plan or []):
+    item_name = entry.get("display_name") or entry.get("name") or str(entry.get("key", "item")).replace("_", " ").title()
+    cost = entry.get("cost")
+    cost_label = f" ({cost} coins)" if cost else ""
+    clicks.append(
+      _planned_click(
+        f"Buy {item_name}{cost_label}",
+        note=f"policy={entry.get('priority', '?')}; hold {entry.get('held_quantity', '?')}/{entry.get('max_quantity', '?')}",
+      )
+    )
+  clicks.append(_planned_click("Confirm shop purchase", note="Press confirm to finalize all selected shop items"))
+  clicks.append(_planned_click("Close shop", note="Return to lobby after purchase"))
+  return clicks
+
+
+def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferred_use, reassess_after_item_use, item_context):
+  trigger_items = [entry.get("key") for entry in list(execution_items or []) if isinstance(entry, dict) and entry.get("key")]
+  reassess_reason = _item_reassess_reason(execution_items) if reassess_after_item_use else "Selected pre-action items can flow directly into the already selected action"
+  reassess_kind = "continue_selected_action"
+  if "reset_whistle" in trigger_items:
+    reassess_kind = "reset_whistle_reroll"
+  elif any(entry.get("usage_group") == "energy" for entry in list(execution_items or []) if isinstance(entry, dict)):
+    reassess_kind = "energy_rescue_reassess" if item_context.get("energy_rescue") else "energy_item_reassess"
+  inventory_refresh = {
+    "trigger": "post_shop_purchase_refresh" if shop_buy_plan else "pre_action_refresh",
+    "reason": (
+      "refresh inventory against purchased items before item-use planning"
+      if shop_buy_plan else
+      "refresh inventory immediately before item-use planning"
+    ),
+  }
+  path = [
+    "inventory_refresh" if execution_items else "selected_action_ready",
+    "replan_items" if execution_items else "selected_action_ready",
+    "execute_pre_action_items" if execution_items else "skip_pre_action_items",
+    "await_lobby_after_items" if execution_items else "selected_action_ready",
+    "reassess" if reassess_after_item_use else "selected_action_ready",
+  ]
+  transitions = [
+    {
+      "from": "inventory_refresh",
+      "to": "replan_items",
+      "reason": inventory_refresh["reason"],
+      "reobserve": False,
+      "trigger_items": [],
+    },
+  ]
+  if execution_items:
+    transitions.append(
+      {
+        "from": "replan_items",
+        "to": "execute_pre_action_items",
+        "reason": "planner-owned item execution payload is now authoritative",
+        "reobserve": False,
+        "trigger_items": trigger_items,
+      }
+    )
+    transitions.append(
+      {
+        "from": "execute_pre_action_items",
+        "to": "await_lobby_after_items",
+        "reason": "inventory overlay must close before the turn can continue",
+        "reobserve": False,
+        "trigger_items": trigger_items,
+      }
+    )
+    transitions.append(
+      {
+        "from": "await_lobby_after_items",
+        "to": "reassess" if reassess_after_item_use else "selected_action_ready",
+        "reason": reassess_reason or "selected action remains valid after item use",
+        "reobserve": bool(reassess_after_item_use),
+        "trigger_items": trigger_items,
+      }
+    )
+
+  action_mutations = {
+    "trackblazer_shop_buy_plan": copy.deepcopy(list(shop_buy_plan or [])),
+    "trackblazer_pre_action_items": copy.deepcopy(list(execution_items or [])),
+    "trackblazer_item_use_context": copy.deepcopy(dict(item_context or {})),
+    "trackblazer_reassess_after_item_use": bool(reassess_after_item_use),
+  }
+  return {
+    "planner_owned": True,
+    "binding_label": _item_binding_label(action),
+    "inventory_refresh": inventory_refresh,
+    "execution_items": copy.deepcopy(list(execution_items or [])),
+    "deferred_items": copy.deepcopy(list(deferred_use or [])),
+    "reassess_transition": {
+      "required": bool(reassess_after_item_use),
+      "transition_kind": reassess_kind,
+      "reason": reassess_reason,
+      "trigger_items": trigger_items,
+      "selected_action_invalidated": bool(reassess_after_item_use),
+      "requires_reobserve": bool(reassess_after_item_use),
+      "requires_training_rescan": bool(reassess_after_item_use),
+      "target_phase": "collecting_main_state" if reassess_after_item_use else "execute_main_action",
+    },
+    "path": path,
+    "transitions": transitions,
+    "compatibility_action_fields": action_mutations,
+    "action_mutations": action_mutations,
+  }
+
+
+def _build_item_refresh_step_planned_clicks():
+  return [
+    _planned_click(
+      "Open use-items inventory",
+      region_key="SCREEN_BOTTOM_BBOX",
+      note="Trackblazer pre-action item step before the main action",
+    ),
+    _planned_click(
+      "Scan inventory item rows",
+      region_key="MANT_INVENTORY_ITEMS_REGION",
+      note="Pair the planned pre-action items to increment controls",
+    ),
+  ]
+
+
+def _build_item_execute_step_planned_clicks(item_execution_payload):
+  payload = item_execution_payload if isinstance(item_execution_payload, dict) else {}
+  execution_items = list(payload.get("execution_items") or [])
+  if not execution_items:
+    return []
+  clicks = []
+  for item in execution_items:
+    clicks.append(
+      _planned_click(
+        f"Increment {item.get('name') or item.get('key') or 'item'}",
+        note=item.get("reason") or "Select this item once before the main action",
+      )
+    )
+  clicks.append(
+    _planned_click(
+      "Confirm planned item use",
+      note=(
+        "In execute mode the bot should commit the planned item use before the main action. "
+        "In check-only/preview modes this remains a simulation step."
+      ),
+    )
+  )
+  return clicks
+
+
+def _build_item_transition_step_planned_clicks(item_execution_payload):
+  payload = item_execution_payload if isinstance(item_execution_payload, dict) else {}
+  if (payload.get("reassess_transition") or {}).get("required"):
+    return [
+      _planned_click(
+        "Rescan trainings after item use",
+        region_key="GAME_WINDOW_BBOX",
+        note="Item use changes board state (whistle reroll or energy reducing failure), so the follow-up action must be re-evaluated",
+      )
+    ]
+  return []
+
+
+def _build_reobserve_boundaries(item_execution_payload):
+  payload = item_execution_payload if isinstance(item_execution_payload, dict) else {}
+  reassess_transition = dict(payload.get("reassess_transition") or {})
+  if not reassess_transition.get("required"):
+    return []
+  return [
+    {
+      "boundary_id": "post_item_use_reobserve",
+      "from_step": "transition_after_pre_action_items",
+      "to_state": "collect_main_state",
+      "reason": reassess_transition.get("reason"),
+      "trigger_items": list(reassess_transition.get("trigger_items") or []),
+      "selected_action_invalidated": bool(reassess_transition.get("selected_action_invalidated")),
+      "transition_kind": reassess_transition.get("transition_kind"),
+    }
+  ]
+
+
+def _build_item_plan_subgraph(item_execution_payload):
+  payload = item_execution_payload if isinstance(item_execution_payload, dict) else {}
+  execution_items = copy.deepcopy(list(payload.get("execution_items") or []))
+  deferred_items = copy.deepcopy(list(payload.get("deferred_items") or []))
+  reassess_transition = copy.deepcopy(dict(payload.get("reassess_transition") or {}))
+  nodes = [
+    {
+      "node_id": "preview_item_plan",
+      "node_type": "item_plan_preview",
+      "binding_label": payload.get("binding_label"),
+      "execution_items": execution_items,
+      "deferred_items": deferred_items,
+    }
+  ]
+  transitions = []
+  if execution_items:
+    nodes.extend([
+      {
+        "node_id": "refresh_inventory_for_items",
+        "node_type": "inventory_refresh",
+        "reason": (payload.get("inventory_refresh") or {}).get("reason"),
+      },
+      {
+        "node_id": "replan_pre_action_items",
+        "node_type": "item_replan",
+        "reason": "Recompute item usage against the refreshed inventory snapshot",
+      },
+      {
+        "node_id": "execute_pre_action_items",
+        "node_type": "item_execute",
+        "items": execution_items,
+      },
+      {
+        "node_id": "transition_after_pre_action_items",
+        "node_type": "item_transition",
+        "transition": reassess_transition,
+      },
+    ])
+    transitions.extend([
+      {
+        "source_node_id": "preview_item_plan",
+        "target_node_id": "refresh_inventory_for_items",
+        "transition_type": "refresh_before_item_use",
+      },
+      {
+        "source_node_id": "refresh_inventory_for_items",
+        "target_node_id": "replan_pre_action_items",
+        "transition_type": "replan_from_refreshed_inventory",
+      },
+      {
+        "source_node_id": "replan_pre_action_items",
+        "target_node_id": "execute_pre_action_items",
+        "transition_type": "commit_pre_action_items",
+      },
+      {
+        "source_node_id": "execute_pre_action_items",
+        "target_node_id": "transition_after_pre_action_items",
+        "transition_type": reassess_transition.get("transition_kind") or "continue_selected_action",
+      },
+    ])
+  return {
+    "graph_type": "trackblazer_pre_action_items",
+    "binding_label": payload.get("binding_label"),
+    "inventory_refresh": copy.deepcopy(payload.get("inventory_refresh") or {}),
+    "execution_items": execution_items,
+    "deferred_items": deferred_items,
+    "path": copy.deepcopy(payload.get("path") or []),
+    "nodes": nodes,
+    "node_transitions": transitions,
+    "transitions": copy.deepcopy(payload.get("transitions") or []),
+  }
+
+
+def _build_main_action_step_planned_clicks(action):
+  action_func = _action_func(action)
+  if not action_func:
+    return []
+  if action_func == "do_training":
+    training_name = _action_value(action, "training_name")
+    return [
+      _planned_click("Open training menu", "assets/buttons/training_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+      _planned_click(
+        f"Select training: {training_name or 'unknown'}",
+        target=constants.TRAINING_BUTTON_POSITIONS.get(training_name),
+        note="Double-click training slot",
+      ),
+    ]
+  if action_func == "do_rest":
+    return [
+      _planned_click("Click rest button", "assets/buttons/rest_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+      _planned_click("Fallback summer rest button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+    ]
+  if action_func == "do_recreation":
+    return [
+      _planned_click("Open recreation menu", "assets/buttons/recreation_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+      _planned_click("Fallback summer recreation button", "assets/buttons/rest_summer_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+    ]
+  if action_func == "do_infirmary":
+    return [_planned_click("Click infirmary button", "assets/buttons/infirmary_btn.png", region_key="SCREEN_BOTTOM_BBOX")]
+  if action_func == "do_race":
+    race_name = _action_value(action, "race_name")
+    race_grade_target = _action_value(action, "race_grade_target")
+    prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
+    fallback_non_rival_race = bool(_action_value(action, "fallback_non_rival_race"))
+    is_race_day = bool(_action_value(action, "is_race_day"))
+    is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
+    scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+    race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
+    if is_race_day and is_trackblazer_climax_race_day:
+      return [
+        _planned_click(
+          "Click forced Climax race button",
+          constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button"),
+          note="Race-day screen replaces the normal training/rest/races buttons.",
+        ),
+        _planned_click(
+          "Confirm race-day prompt",
+          "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note="Advance from the race-day prompt after entering the forced race.",
+        ),
+        _planned_click("Confirm race", "assets/buttons/race_btn.png"),
+        _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
+      ]
+    return [
+      _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+      _planned_click(
+        "Check consecutive-race warning",
+        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+        region_key="GAME_WINDOW_BBOX",
+        note=(
+          "If this warning appears after clicking Races, continue with OK for scheduled races; "
+          "otherwise follow the race gate before opening the race list."
+          if scheduled_race else
+          "Fallback non-rival race: cancel and revert to training if consecutive-race warning appears."
+          if fallback_non_rival_race else
+          "If this warning appears after clicking Races, decide whether to continue with OK "
+          "or back out with Cancel before opening the race list."
+        ),
+      ),
+      _planned_click(
+        "Continue through warning (OK)",
+        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note=(
+          "Scheduled race override: click the warning dialog OK and continue into the race list."
+          if scheduled_race else
+          "Use the warning-dialog OK when the race gate accepts a third consecutive race."
+        ),
+      ),
+      _planned_click(
+        "Fallback warning OK",
+        "assets/buttons/ok_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note="Generic fallback if the warning-specific OK template is not matched.",
+      ),
+      _planned_click(
+        "Back out from warning (Cancel)",
+        "assets/buttons/cancel_btn.png",
+        region_key="GAME_WINDOW_BBOX",
+        note=(
+          "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
+          if scheduled_race else
+          "Use this when the race gate rejects a third consecutive race and returns to lobby."
+        ),
+      ),
+      _planned_click(
+        "Scan/select race entry",
+        race_template,
+        region_key="RACE_LIST_BOX_BBOX",
+        note=(
+          f"target={race_grade_target or 'any'}"
+          + ("; prefer rival row when present" if prefer_rival_race else "")
+        ),
+      ),
+      _planned_click("Confirm race", "assets/buttons/race_btn.png"),
+      _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
+    ]
+  if action_func == "buy_skill":
+    return [
+      _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+      _planned_click("Scan skill rows", region_key="SCROLLING_SKILL_SCREEN_BBOX", note="OCR and template scan only"),
+      _planned_click("Confirm selected skills", "assets/buttons/confirm_btn.png"),
+      _planned_click("Learn selected skills", "assets/buttons/learn_btn.png"),
+      _planned_click("Exit skill screen", "assets/buttons/back_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
+    ]
+  if action_func == "check_inventory":
+    return [
+      _planned_click("Open use-items inventory", region_key="SCREEN_BOTTOM_BBOX", note="Locate the Trackblazer use-items entry button"),
+      _planned_click("Scan inventory item rows", region_key="MANT_INVENTORY_ITEMS_REGION", note="OCR and native-scale template scan only"),
+      _planned_click("Verify inventory controls", region_key="GAME_WINDOW_BBOX", note="Check use/close button visibility"),
+      _planned_click("Close inventory", note="Dismiss the inventory overlay after scan"),
+    ]
+  if action_func == "execute_training_items":
+    commit_mode = _action_value(action, "commit_mode") or "dry_run"
+    clicks = [
+      _planned_click("Open use-items inventory", region_key="SCREEN_BOTTOM_BBOX", note="Locate the Trackblazer use-items entry button"),
+      _planned_click("Scan inventory item rows", region_key="MANT_INVENTORY_ITEMS_REGION", note="Pair items to increment controls"),
+    ]
+    if commit_mode == "dry_run":
+      clicks.append(_planned_click("Detect controls (no increment clicks)", note="Simulated — no destructive clicks in dry_run"))
+      clicks.append(_planned_click("Close inventory", note=f"commit_mode={commit_mode}"))
+    else:
+      clicks.append(_planned_click("Increment Vita 65", note="Select one Vita 65"))
+      clicks.append(_planned_click("Increment Reset Whistle", note="Select one Reset Whistle"))
+      clicks.append(_planned_click("Verify confirm-use controls", note="Ensure confirm/cancel controls are available"))
+      clicks.append(_planned_click("Press confirm-use", note=f"commit_mode={commit_mode}"))
+    return clicks
+  if action_func == "check_shop":
+    return [
+      _planned_click("Open Trackblazer shop", region_key="GAME_WINDOW_BBOX", note="Locate the shop entry button"),
+      _planned_click("Scan shop coin display", region_key="MANT_SHOP_COIN_REGION", note="OCR coin count"),
+      _planned_click("Scan shop item rows", region_key="GAME_WINDOW_BBOX", note="Template scan for visible shop stock"),
+      _planned_click("Close shop", note="Dismiss the shop overlay after scan"),
+    ]
+  return []
 
 
 def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[str, Any]:
@@ -657,6 +1152,29 @@ def _turn_discussion_diff_lines(legacy_text: str, planner_text: str, limit: int 
   return diff_lines[: max(0, int(limit))]
 
 
+def get_turn_plan(state_obj, action, planner_state=None, limit=8) -> TurnPlan:
+  planner_state = (
+    planner_state if isinstance(planner_state, dict) else
+    (plan_once(state_obj, action, limit=limit) if isinstance(state_obj, dict) else {})
+  )
+  return TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
+
+
+def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
+  if not hasattr(action, "__setitem__"):
+    return action
+
+  item_plan = dict((turn_plan.item_plan if turn_plan else {}) or {})
+  shop_plan = dict((turn_plan.shop_plan if turn_plan else {}) or {})
+  execution_payload = dict(item_plan.get("execution_payload") or {})
+  action_mutations = dict(execution_payload.get("action_mutations") or {})
+  for key, value in action_mutations.items():
+    action[key] = copy.deepcopy(value)
+  if "trackblazer_shop_buy_plan" not in action_mutations:
+    action["trackblazer_shop_buy_plan"] = copy.deepcopy(list(shop_plan.get("would_buy") or []))
+  return action
+
+
 def update_turn_discussion_dual_run(state_obj, snapshot_context, legacy_planned_actions=None) -> Dict[str, Any]:
   if not isinstance(state_obj, dict):
     return {}
@@ -714,7 +1232,11 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
 
   existing = state_obj.get(PLANNER_STATE_KEY) or {}
   existing_freshness = dict(existing.get("freshness") or {})
-  if existing and existing_freshness == freshness.to_dict():
+  if (
+    existing
+    and int(existing.get("version") or 0) == PLANNER_VERSION
+    and existing_freshness == freshness.to_dict()
+  ):
     return existing
 
   inventory, inventory_summary, inventory_flow, inventory_source = _resolve_inventory_source(state_obj)
@@ -750,6 +1272,15 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     limit=limit,
   )
   execution_items, deferred_use, reassess_after_item_use = _attach_execution_item_plan(item_use_plan)
+  item_execution_payload = _build_item_execution_payload(
+    action,
+    shop_buy_plan,
+    execution_items,
+    deferred_use,
+    reassess_after_item_use,
+    item_use_plan.get("context") or {},
+  )
+  reobserve_boundaries = _build_reobserve_boundaries(item_execution_payload)
 
   items_detected = list((inventory_summary or {}).get("items_detected") or [])
   if not items_detected and isinstance(inventory, dict):
@@ -870,6 +1401,8 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "deferred_use": copy.deepcopy(deferred_use),
       "reassess_after_item_use": bool(reassess_after_item_use),
       "context": copy.deepcopy(item_context),
+      "execution_payload": copy.deepcopy(item_execution_payload),
+      "subgraph": _build_item_plan_subgraph(item_execution_payload),
       "selected_action_binding": {
         "func": getattr(action, "func", None),
         "training_name": action.get("training_name") if hasattr(action, "get") else None,
@@ -878,13 +1411,11 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "reassess_boundary": {
         "required": bool(reassess_after_item_use),
         "trigger_items": [entry.get("key") for entry in execution_items if isinstance(entry, dict) and entry.get("key")],
-        "reason": (
-          "selected pre-action items change board state and require a fresh evaluation"
-          if reassess_after_item_use else
-          "selected pre-action items can flow directly into the already selected action"
-        ),
+        "reason": (item_execution_payload.get("reassess_transition") or {}).get("reason"),
+        "transition_kind": (item_execution_payload.get("reassess_transition") or {}).get("transition_kind"),
       },
     },
+    reobserve_boundaries=copy.deepcopy(reobserve_boundaries),
     inventory_snapshot={
       "source": inventory_source,
       "scan": {
@@ -929,10 +1460,13 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       state_obj,
       action,
       shop_buy_plan,
-      execution_items,
-      reassess_after_item_use,
+      item_execution_payload,
     ),
   )
+  turn_plan.review_context = {
+    **dict(turn_plan.review_context or {}),
+    "planned_clicks": turn_plan.to_planned_clicks(),
+  }
 
   plan_payload = {
     "version": PLANNER_VERSION,
