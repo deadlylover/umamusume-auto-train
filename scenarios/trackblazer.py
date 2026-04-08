@@ -3556,8 +3556,15 @@ def prepare_trackblazer_shop_item_selection(
     return flow
 
 
-def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
-    """Buy the requested Trackblazer shop items once each, then close the shop."""
+def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_shop_scan=None):
+    """Buy the requested Trackblazer shop items once each, then close the shop.
+
+    If *cached_shop_scan* is supplied (the dict returned by
+    ``scan_all_trackblazer_shop_items`` during the earlier check phase), the
+    execute path skips its own full-scroll scan and uses the cached scroll
+    positions to seek directly to each target item.  This avoids the
+    redundant second scroll through the entire shop.
+    """
     requested_keys = [str(item_key) for item_key in (item_keys or []) if item_key]
     clear_runtime_ocr_debug()
 
@@ -3627,11 +3634,17 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic"):
             return result
 
         select_t0 = _time()
-        shared_scan = scan_all_trackblazer_shop_items(
-            threshold=0.7,
-            checkbox_threshold=0.8,
-            confirm_threshold=0.7,
-        )
+        if cached_shop_scan and (cached_shop_scan.get("purchasable_items") or cached_shop_scan.get("all_items")):
+            shared_scan = cached_shop_scan
+            flow["scan_source"] = "cached"
+            info("[TB_SHOP] Using cached shop scan from check phase — skipping redundant full scroll.")
+        else:
+            shared_scan = scan_all_trackblazer_shop_items(
+                threshold=0.7,
+                checkbox_threshold=0.8,
+                confirm_threshold=0.7,
+            )
+            flow["scan_source"] = "live"
         flow["scan_timing"] = (shared_scan.get("flow") or {}).get("timing") or {}
         scanned_purchasable = set(shared_scan.get("purchasable_items") or [])
         requested_but_not_purchasable = [

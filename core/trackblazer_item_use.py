@@ -1035,11 +1035,15 @@ def _usage_context(state_obj, action, policy=None):
   )
   matching_stat_gain = _safe_int(stat_gains.get(training_name), 0)
   score_tuple = training_data.get("score_tuple") or (0.0, 0)
+  weighted_stat_score = training_data.get("weighted_stat_score")
   timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
   timeline_label = timeline.get("timeline_label") or ""
   timeline_index = timeline.get("timeline_index")
   climax_window = bool(timeline.get("is_climax"))
-  score_value = _safe_float(score_tuple[0], 0.0)
+  if weighted_stat_score is not None:
+    score_value = _safe_float(weighted_stat_score, 0.0)
+  else:
+    score_value = _safe_float(score_tuple[0], 0.0)
   past_final_summer = _past_final_summer(timeline_index)
   score_over_50 = score_value > 50.0
   # Stop hoarding "save for summer" items when no summer windows remain, or
@@ -1083,19 +1087,7 @@ def _usage_context(state_obj, action, policy=None):
   climax_committed_training = bool(
     action_func == "do_training"
     and climax_window
-    and (
-      score_value >= climax_commit_thresholds["score"]
-      or matching_stat_gain >= climax_commit_thresholds["matching"]
-      or total_stat_gain >= climax_commit_thresholds["total"]
-      or (
-        rainbow_count >= 2
-        and (
-          score_value >= 24.0
-          or matching_stat_gain >= 16
-          or total_stat_gain >= 24
-        )
-      )
-    )
+    and score_value >= climax_commit_thresholds["score"]
   )
   strong_burst_training = bool(
     action_func == "do_training"
@@ -1103,8 +1095,7 @@ def _usage_context(state_obj, action, policy=None):
       climax_committed_training
       if climax_window else
       (
-        matching_stat_gain >= 30
-        or total_stat_gain >= 30
+        score_value >= 30.0
         or (rainbow_count > 0 and score_value >= 6.0)
       )
     )
@@ -1147,8 +1138,6 @@ def _usage_context(state_obj, action, policy=None):
     action_func == "do_training"
     and (
       score_value >= 20.0
-      or matching_stat_gain >= 10
-      or total_stat_gain >= 18
       or rainbow_count > 0
     )
   )
@@ -1156,8 +1145,6 @@ def _usage_context(state_obj, action, policy=None):
     action_func == "do_training"
     and (
       score_value >= 30.0
-      or matching_stat_gain >= 14
-      or total_stat_gain >= 24
       or rainbow_count >= 2
     )
   )
@@ -1165,12 +1152,10 @@ def _usage_context(state_obj, action, policy=None):
     action_func == "do_training"
     and (
       score_value >= 35.0
-      or matching_stat_gain >= 25
-      or total_stat_gain >= 35
     )
   )
   failure_bypassed_by_items = bool(training_data.get("failure_bypassed_by_items"))
-  info(f"[ITEM_USE_CTX] failure_bypassed={failure_bypassed_by_items} failure_rate={failure_rate} committed_value={committed_value_training} score={score_value} matching={matching_stat_gain} total={total_stat_gain} training_data_keys={list(training_data.keys())[:10]}")
+  info(f"[ITEM_USE_CTX] failure_bypassed={failure_bypassed_by_items} failure_rate={failure_rate} committed_value={committed_value_training} score={score_value} matching={matching_stat_gain} total={total_stat_gain} weighted_score={weighted_stat_score} training_data_keys={list(training_data.keys())[:10]}")
   commit_training_after_items = bool(
     strong_burst_training
     or committed_value_training

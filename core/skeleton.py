@@ -18,7 +18,9 @@ from core.claw_machine import play_claw_machine
 from core.skill import (
   get_skill_purchase_check_state,
   get_skill_purchase_context,
+  get_all_skills_obtained,
   init_skill_py,
+  mark_all_skills_obtained,
   mark_skill_purchase_checked,
   update_skill_action_count,
 )
@@ -42,6 +44,7 @@ from core.trackblazer_item_use import get_training_behavior_strong_training_scor
 from core.trackblazer_race_logic import (
   evaluate_trackblazer_race,
   get_race_lookahead_energy_advice,
+  get_trackblazer_training_score,
 )
 
 pyautogui.useImageNotFoundException(False)
@@ -1556,16 +1559,7 @@ def _trackblazer_items_require_reassess(items):
 
 
 def _trackblazer_training_score(action):
-  training_data = _action_value(action, "training_data")
-  if not isinstance(training_data, dict):
-    return None
-  score_tuple = training_data.get("score_tuple")
-  if not isinstance(score_tuple, (tuple, list)) or not score_tuple:
-    return None
-  try:
-    return float(score_tuple[0])
-  except (TypeError, ValueError):
-    return None
+  return get_trackblazer_training_score(action)
 
 
 def _trackblazer_training_score_threshold():
@@ -1992,7 +1986,14 @@ def _build_trackblazer_planned_actions(state_obj, action):
     # The race gate already filters weak signals, so should_race=True means
     # the signal was strong enough to justify racing. G1 or should_race both
     # continue; otherwise back out to the lobby.
-    if race_decision.get("fallback_non_rival_race"):
+    rest_promoted_optional_race = bool(
+      race_decision.get("prefer_rival_race")
+      and _action_value(action, "_rival_fallback_func") == "do_rest"
+      and not _action_value(action, "scheduled_race")
+      and not _action_value(action, "trackblazer_lobby_scheduled_race")
+      and not _action_value(action, "is_race_day")
+    )
+    if race_decision.get("fallback_non_rival_race") or rest_promoted_optional_race:
       expected_branch = "return_to_lobby"
     elif race_decision.get("g1_forced") or race_decision.get("should_race"):
       expected_branch = "continue_to_race_list"
@@ -2237,6 +2238,39 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
   preview_scan = preview_result.get("skill_purchase_scan") or {}
   state_obj["skill_purchase_flow"] = preview_flow
   state_obj["skill_purchase_scan"] = preview_scan
+
+  # Detect if every shortlist skill is already learned (obtained badge, no increment).
+  # If so, permanently skip skill checks for the rest of this run.
+  if preview_flow.get("scanned") and not get_all_skills_obtained():
+    shortlist = [_normalize_skill_name(s) for s in list((context or {}).get("shopping_list") or []) if _normalize_skill_name(s)]
+    target_results = list((preview_scan or {}).get("target_results") or [])
+    if shortlist and target_results:
+      result_by_skill = {}
+      for entry in target_results:
+        if not isinstance(entry, dict):
+          continue
+        skill_key = _normalize_skill_name(entry.get("target_skill"))
+        if skill_key:
+          result_by_skill[skill_key] = entry.get("reason") or ""
+      all_obtained = all(
+        result_by_skill.get(skill) == "target_obtained_no_increment"
+        for skill in shortlist
+        if skill in result_by_skill
+      ) and all(skill in result_by_skill for skill in shortlist)
+      if all_obtained:
+        mark_all_skills_obtained()
+        mark_skill_purchase_checked(
+          current_action_count,
+          selected_race=bool(context.get("scheduled_g1_race")),
+        )
+        state_obj["skill_purchase_check"] = {
+          **get_skill_purchase_check_state(),
+          **context,
+          "reason": "All configured skills are already learned. Skill checks permanently skipped for this run.",
+        }
+        state_obj.pop("skill_purchase_plan", None)
+        state_obj.pop("skill_purchase_preview_key", None)
+        return "skipped"
 
   budget_plan = _plan_budgeted_skill_targets(context, preview_scan)
   selected_targets = list(budget_plan.get("selected_targets") or [])
@@ -3544,7 +3578,12 @@ def _run_trackblazer_shop_purchases(state_obj, action):
   # purchase changes what we hold, so stale cache must not survive failures.
   _invalidate_trackblazer_inventory_cache()
 
-  result = execute_trackblazer_shop_purchases(item_keys, trigger="automatic")
+  # Re-use the scan result from the earlier check phase so the execute path
+  # can seek directly to cached scroll positions instead of re-scrolling the
+  # entire shop.
+  cached_shop_scan = (state_obj.get("trackblazer_shop_flow") or {}).get("scan_result")
+
+  result = execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_shop_scan=cached_shop_scan)
   state_obj["trackblazer_shop_items"] = result.get("trackblazer_shop_items")
   state_obj["trackblazer_shop_summary"] = result.get("trackblazer_shop_summary")
   state_obj["trackblazer_shop_flow"] = result.get("trackblazer_shop_flow")
@@ -4090,17 +4129,28 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     skill_result = skill_purchase_result.get("result") or {}
     skill_flow = (skill_result.get("skill_purchase_flow") or {})
     if skill_flow.get("opened") and not skill_flow.get("closed"):
-      update_operator_snapshot(
-        state_obj,
-        action,
-        phase="recovering",
-        status="error",
-        error_text=f"Skill purchase left skills page open: {skill_purchase_result.get('reason')}",
-        sub_phase=sub_phase,
-        ocr_debug=ocr_debug,
-        planned_clicks=planned_clicks,
-      )
-      return "blocked"
+      # Try an emergency close: the skills page (or a learned popup) may
+      # still be visible.  _close_skills_page now handles lingering
+      # "skills learned" popups as well as the normal back-button flow.
+      from core.skill_scanner import _close_skills_page
+      warning("[SKILL] Skill purchase left page open — attempting emergency close.")
+      emergency_close = _close_skills_page()
+      if emergency_close.get("closed"):
+        info("[SKILL] Emergency close succeeded; continuing with turn.")
+        skill_flow["closed"] = True
+        skill_flow["emergency_close"] = True
+      else:
+        update_operator_snapshot(
+          state_obj,
+          action,
+          phase="recovering",
+          status="error",
+          error_text=f"Skill purchase left skills page open: {skill_purchase_result.get('reason')}",
+          sub_phase=sub_phase,
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        return "blocked"
     warning(
       f"[SKILL] Skill purchase failed: {skill_purchase_result.get('reason')}. "
       "Continuing with the rest of the turn."
@@ -5501,7 +5551,30 @@ def career_lobby(dry_run_turn=False):
             info(f"Action {action.func} failed, trying other actions.")
           info(f"Available actions: {action.available_actions}")
 
+          # When a selected/scheduled race is active, never fall back to
+          # do_rest — the race should be retried on the next loop iteration
+          # instead of wasting a turn on rest.
+          _fallback_gate = get_race_gate_for_turn_label(
+            state_obj.get("year"), getattr(config, "OPERATOR_RACE_SELECTOR", None),
+          ) if constants.SCENARIO_NAME in ("mant", "trackblazer") else {}
+          has_selected_race = bool(
+            (action.get("trackblazer_race_decision") or {}).get("should_race")
+            or action.get("scheduled_race")
+            or action.get("is_race_day")
+            or action.get("trackblazer_lobby_scheduled_race")
+            or (_fallback_gate.get("race_allowed") and _fallback_gate.get("selected_race"))
+          )
+          allow_rest_fallback_for_optional_rival = bool(
+            action.get("prefer_rival_race")
+            and action.get("_rival_fallback_func") == "do_rest"
+            and not action.get("scheduled_race")
+            and not action.get("trackblazer_lobby_scheduled_race")
+            and not action.get("is_race_day")
+          )
           for function_name in action.available_actions:
+            if function_name == "do_rest" and has_selected_race and not allow_rest_fallback_for_optional_rival:
+              info(f"[FALLBACK] Skipping do_rest fallback — selected race is still pending.")
+              continue
             sleep(1)
             info(f"Trying action: {function_name}")
             action.func = function_name

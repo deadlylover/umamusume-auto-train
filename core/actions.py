@@ -249,6 +249,16 @@ def go_to_racebox_top():
 
 def _should_accept_consecutive_race_warning(options=None):
   options = options or {}
+  # Optional rival races promoted from an original rest decision should back
+  # out on consecutive-race warning and let rest proceed.
+  if (
+    options.get("prefer_rival_race")
+    and options.get("_rival_fallback_func") == "do_rest"
+    and not options.get("scheduled_race")
+    and not options.get("trackblazer_lobby_scheduled_race")
+    and not options.get("is_race_day")
+  ):
+    return False
   if options.get("fallback_non_rival_race"):
     return False
   return bool(
@@ -263,8 +273,23 @@ def enter_race(race_name="any", race_image_path="", options=None):
   consecutive_cancel_btn = device_action.locate("assets/buttons/cancel_btn.png", min_search_time=get_secs(1))
   accept_warning = _should_accept_consecutive_race_warning(options)
   is_fallback_race = bool(options and options.get("fallback_non_rival_race"))
+  is_rest_promoted_optional_race = bool(
+    options
+    and options.get("prefer_rival_race")
+    and options.get("_rival_fallback_func") == "do_rest"
+    and not options.get("scheduled_race")
+    and not options.get("trackblazer_lobby_scheduled_race")
+    and not options.get("is_race_day")
+  )
   if consecutive_cancel_btn and is_fallback_race:
     device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Consecutive-race warning on fallback non-rival race. Cancelling — not worth a 3rd consecutive race for a weak-training fallback.")
+    return False
+  if consecutive_cancel_btn and is_rest_promoted_optional_race:
+    device_action.locate_and_click(
+      "assets/buttons/cancel_btn.png",
+      min_search_time=get_secs(1),
+      text="[INFO] Consecutive-race warning on optional rival race promoted from rest. Cancelling and preserving rest fallback.",
+    )
     return False
   if config.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn and not accept_warning:
     device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Already raced 3+ times consecutively. Cancelling race and doing training.")

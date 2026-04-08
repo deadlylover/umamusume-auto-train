@@ -185,9 +185,16 @@ def _total_stat_gain(action):
 
 
 def _training_score(action):
+  return get_trackblazer_training_score(action)
+
+
+def get_trackblazer_training_score(action):
   training_data = action.get("training_data") if hasattr(action, "get") else None
   if not isinstance(training_data, dict):
     return None
+  weighted_score = training_data.get("weighted_stat_score")
+  if weighted_score is not None:
+    return _safe_float(weighted_score)
   score_tuple = training_data.get("score_tuple")
   if not isinstance(score_tuple, (tuple, list)) or not score_tuple:
     return None

@@ -1217,7 +1217,7 @@ def _click_learn_and_close():
     if (constants.SCENARIO_NAME or "") in ("mant", "trackblazer"):
         learned_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned")
         close_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned_close")
-        deadline = _time() + get_secs(2)
+        deadline = _time() + get_secs(5)
         learned_detected = False
         close_clicked = False
         popup_visible_since = None
@@ -2457,8 +2457,11 @@ def _open_skills_page():
 def _close_skills_page():
     """Click back to close the skills page.
 
-    If skills were incremented but not learned, a confirmation dialog
-    ("exit without learning skills?") appears. Detect and click OK on it.
+    Handles two possible popups before the page can close:
+    1. "Skills learned" popup — if _click_learn_and_close() failed to dismiss it
+       during finalize, detect it here and click its close button.
+    2. "Exit without learning skills?" dialog — if skills were incremented but
+       not learned, detect and click OK.
 
     Returns a close_result dict with timing.
     """
@@ -2466,9 +2469,38 @@ def _close_skills_page():
     result = {
         "closed": False,
         "clicked": False,
+        "learned_popup_dismissed": False,
         "exit_dialog_clicked": False,
         "timing": {},
     }
+
+    # Before clicking back, check for a lingering "skills learned" popup that
+    # _click_learn_and_close() failed to dismiss.  If present, dismiss it first
+    # so that the back button is reachable.
+    if (constants.SCENARIO_NAME or "") in ("mant", "trackblazer"):
+        t_popup = _time()
+        close_template = constants.TRACKBLAZER_SKILL_UI_TEMPLATES.get("skills_learned_close")
+        if close_template:
+            screenshot = _capture_live_skill_screenshot()
+            close_matches = device_action.match_template(
+                close_template,
+                screenshot,
+                threshold=_TRACKBLAZER_SKILLS_LEARNED_CLOSE_THRESHOLD,
+                template_scaling=_INVERSE_GLOBAL_SCALE,
+            )
+            if close_matches:
+                match = close_matches[0]
+                ui_left, ui_top, _, _ = [int(v) for v in _skill_ui_region()]
+                click_x = ui_left + match[0] + match[2] // 2
+                click_y = ui_top + match[1] + match[3] // 2
+                info(f"[SKILL] Lingering learned popup detected in close step, clicking at ({click_x}, {click_y})")
+                device_action.click(target=(click_x, click_y), duration=0.15)
+                result["learned_popup_dismissed"] = True
+                sleep(_CLOSE_SETTLE_SECONDS_POST_LEARN)
+                result["timing"]["learned_popup_dismiss"] = round(_time() - t_popup, 4)
+            else:
+                result["timing"]["learned_popup_check"] = round(_time() - t_popup, 4)
+
     t_click = _time()
     clicked = device_action.locate_and_click(
         _BACK_BTN_TEMPLATE,

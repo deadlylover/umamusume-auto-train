@@ -20,14 +20,16 @@ _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
 previous_action_count = -1
 previous_skill_check_action_count = -1
 previous_selected_race_skill_check_action_count = -1
+_all_skills_obtained = False
 SKILL_RECHECK_TURNS = 6
 SKILL_SELECTED_RACE_RECHECK_TURNS = 3
 
 def init_skill_py():
-  global previous_action_count, previous_skill_check_action_count, previous_selected_race_skill_check_action_count
+  global previous_action_count, previous_skill_check_action_count, previous_selected_race_skill_check_action_count, _all_skills_obtained
   previous_action_count = -1
   previous_skill_check_action_count = -1
   previous_selected_race_skill_check_action_count = -1
+  _all_skills_obtained = False
 
 
 def update_skill_action_count(action_count):
@@ -42,6 +44,16 @@ def mark_skill_purchase_checked(action_count, selected_race=False):
     previous_selected_race_skill_check_action_count = action_count
 
 
+def mark_all_skills_obtained():
+  global _all_skills_obtained
+  _all_skills_obtained = True
+  info("[SKILL] All configured skills are already learned. Skill checks disabled for the rest of this run.")
+
+
+def get_all_skills_obtained():
+  return _all_skills_obtained
+
+
 def get_skill_purchase_check_state():
   return {
     "last_skill_purchase_action_count": previous_action_count,
@@ -49,6 +61,7 @@ def get_skill_purchase_check_state():
     "last_selected_race_skill_purchase_check_action_count": previous_selected_race_skill_check_action_count,
     "skill_recheck_turns": SKILL_RECHECK_TURNS,
     "skill_selected_race_recheck_turns": SKILL_SELECTED_RACE_RECHECK_TURNS,
+    "all_skills_obtained": _all_skills_obtained,
   }
 
 
@@ -99,6 +112,12 @@ def get_skill_purchase_context(state, action_count, race_check=False, action=Non
     ],
   }
 
+  if state.get("trackblazer_climax"):
+    result["reason"] = "Climax finale races phase — no events can grant new skills; skipping skill check."
+    return result
+  if _all_skills_obtained:
+    result["reason"] = "All configured skills are already learned. Skill checks permanently skipped for this run."
+    return result
   if not bot.get_skill_auto_buy_enabled():
     result["reason"] = "Auto-buy skill is disabled in the runtime toggle."
     return result
@@ -140,6 +159,9 @@ def buy_skill(state, action_count, race_check=False):
     f"Skill buy: action={action_count}, last_purchase={previous_action_count}, "
     f"last_review={previous_skill_check_action_count}, race_check={race_check}"
   )
+  if _all_skills_obtained:
+    debug("Skill buy: all configured skills already learned; skipping.")
+    return False
   if (bot.get_skill_auto_buy_enabled() and state["current_stats"]["sp"] >= config.SKILL_PTS_CHECK):
     pass
   else:

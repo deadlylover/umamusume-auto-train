@@ -5,7 +5,11 @@ import core.config as config
 from utils.shared import CleanDefaultDict
 import utils.constants as constants
 import core.bot as bot
-from core.trackblazer_item_use import should_allow_wit_training, get_planned_failure_bypass_items
+from core.trackblazer_item_use import (
+  should_allow_wit_training,
+  get_planned_failure_bypass_items,
+  get_training_behavior_settings,
+)
 
 # Training function names:
 # max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
@@ -263,6 +267,7 @@ def stat_weight_training(state, training_template, action):
       weight = stat_weights.get(stat, 1)
       total_value += gain * weight
 
+    weighted_stat_score = total_value
     # Bond boost: +10 per blue/green friend on this training (+15 on wit)
     bond_boost = 0
     if bot.get_trackblazer_bond_boost_enabled():
@@ -286,10 +291,25 @@ def stat_weight_training(state, training_template, action):
     training_scores[training_name] = create_training_score_entry(
       training_name, training_data, (total_value, tiebreaker)
     )
+    training_scores[training_name]["weighted_stat_score"] = weighted_stat_score
+    training_scores[training_name]["bond_boost"] = bond_boost
     bond_str = f" bond_boost=+{bond_boost}" if bond_boost else ""
-    debug(f"stat_weight_training: {training_name} -> score={total_value:.1f} gains={stat_gains}{bond_str}")
+    debug(
+      f"stat_weight_training: {training_name} -> weighted_score={weighted_stat_score:.1f} "
+      f"score={total_value:.1f} gains={stat_gains}{bond_str}"
+    )
 
   info(f"stat_weight_training scores: {training_scores}")
+  if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    training_behavior = get_training_behavior_settings(
+      getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None)
+    )
+    if not action.get("min_scores"):
+      action["min_scores"] = CleanDefaultDict()
+    action["min_scores"]["stat_weight_training"] = (
+      training_behavior.get("weak_training_fallback_race_score_threshold", 30),
+      0,
+    )
   action = fill_trainings_for_action(action, training_scores)
   return action
 

@@ -5,6 +5,7 @@ from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer_race_logic import (
   get_optional_race_low_energy_override,
   get_race_lookahead_energy_advice,
+  get_trackblazer_training_score,
 )
 from utils.shared import check_status_effects
 from core.actions import Action
@@ -455,6 +456,7 @@ class Strategy:
     # (mediocre training → try a race instead) is relevant here.
     if constants.SCENARIO_NAME in ("mant", "trackblazer"):
       min_score = self._get_min_score(action)
+      training_score = get_trackblazer_training_score(action)
       blocked, gate = _optional_race_blocked(state)
       low_energy_override = get_optional_race_low_energy_override(state)
       action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
@@ -493,6 +495,20 @@ class Strategy:
             f"[RACE_LOOKAHEAD] Resting before scheduled race gauntlet; "
             f"training score {training_score} < {exceptional_threshold}. {race_lookahead.get('reason')}"
           )
+        return action
+
+      if (
+        blocked
+        and state["turn"] != "Race Day"
+        and training_score is not None
+        and training_score < min_score
+      ):
+        action.func = "do_rest"
+        action["disable_skip_turn_fallback"] = True
+        info(
+          f"[ENERGY_MGMT] → TRACKBLAZER REST: optional race gate blocks rival fallback and "
+          f"weighted training score ({training_score}) is below minimum ({min_score})"
+        )
         return action
 
       if (
