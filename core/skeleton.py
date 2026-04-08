@@ -1187,6 +1187,86 @@ def _revert_optional_race_to_fallback(action):
   return True
 
 
+def _trackblazer_has_training_fallback(action):
+  training_name = (
+    _action_value(action, "_rival_fallback_training_name")
+    or _action_value(action, "training_name")
+  )
+  training_data = (
+    _action_value(action, "_rival_fallback_training_data")
+    or _action_value(action, "training_data")
+  )
+  return bool(training_name) and isinstance(training_data, dict) and bool(training_data)
+
+
+def _should_retry_training_after_consecutive_warning(action):
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return False
+  if _action_value(action, "_consecutive_warning_cancel_reason") != "optional_rival_promoted_from_rest":
+    return False
+  item_context = _action_value(action, "trackblazer_item_use_context")
+  if not isinstance(item_context, dict) or not item_context.get("energy_rescue"):
+    return False
+  return _trackblazer_has_training_fallback(action)
+
+
+def _prepare_training_fallback_after_consecutive_warning(action):
+  if not _trackblazer_has_training_fallback(action):
+    return False
+
+  training_name = (
+    _action_value(action, "_rival_fallback_training_name")
+    or _action_value(action, "training_name")
+  )
+  training_data = (
+    _action_value(action, "_rival_fallback_training_data")
+    or _action_value(action, "training_data")
+  )
+
+  if not training_name or not isinstance(training_data, dict) or not training_data:
+    return False
+
+  action["_rival_fallback_func"] = "do_training"
+  action["_rival_fallback_training_name"] = training_name
+  action["_rival_fallback_training_data"] = training_data
+  action["training_name"] = training_name
+  action["training_data"] = training_data
+  if isinstance(action, dict):
+    action["func"] = "do_training"
+  else:
+    action.func = "do_training"
+
+  race_decision = _action_value(action, "trackblazer_race_decision") or {}
+  if isinstance(race_decision, dict):
+    action["trackblazer_race_decision"] = {
+      **race_decision,
+      "should_race": False,
+      "prefer_rival_race": False,
+      "reason": (
+        "Consecutive-race warning blocked optional rival race after energy rescue; "
+        "reconsidering rescued training fallback"
+      ),
+      "race_available": False,
+    }
+
+  _clear_optional_race_action_fields(action)
+  for key in (
+    "_consecutive_warning_force_rest",
+    "_consecutive_warning_cancelled",
+    "_consecutive_warning_cancel_reason",
+  ):
+    _action_option_pop(action, key)
+
+  available_actions = list(getattr(action, "available_actions", []) or [])
+  if "do_training" in available_actions:
+    available_actions = ["do_training"] + [name for name in available_actions if name != "do_training"]
+  else:
+    available_actions.insert(0, "do_training")
+  if hasattr(action, "available_actions"):
+    action.available_actions = available_actions
+  return True
+
+
 def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
   if _action_func(action) != "do_race":
     return None
@@ -5558,7 +5638,22 @@ def career_lobby(dry_run_turn=False):
           if action.available_actions:  # Check if the list is not empty
             action.available_actions.pop(0)
 
-          consecutive_warning_force_rest = bool(action.get("_consecutive_warning_force_rest"))
+          consecutive_warning_retry_training = _should_retry_training_after_consecutive_warning(action)
+          if consecutive_warning_retry_training:
+            if _prepare_training_fallback_after_consecutive_warning(action):
+              info(
+                "[FALLBACK] Consecutive-race warning blocked optional rival race after energy rescue. "
+                "Retrying the rescued training fallback."
+              )
+            else:
+              warning(
+                "[FALLBACK] Consecutive-race warning suggested a rescued training retry, "
+                "but no valid training fallback was available."
+              )
+          consecutive_warning_force_rest = (
+            bool(action.get("_consecutive_warning_force_rest"))
+            and not consecutive_warning_retry_training
+          )
           if consecutive_warning_force_rest:
             info(
               "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "

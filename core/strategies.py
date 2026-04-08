@@ -23,6 +23,17 @@ def _optional_race_blocked(state):
   blocked = bool(gate.get("enabled") and not gate.get("race_allowed"))
   return blocked, gate
 
+
+def _remember_training_fallback(action):
+  if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
+    return
+  training_name = action.get("training_name")
+  training_data = action.get("training_data")
+  if training_name:
+    action["_rival_fallback_training_name"] = training_name
+  if isinstance(training_data, dict) and training_data:
+    action["_rival_fallback_training_data"] = training_data
+
 class Strategy:
 
   def __init__(self):
@@ -85,6 +96,8 @@ class Strategy:
       if action.func != "do_race":
         if "Early Jun" in state["year"] or "Late Jun" in state["year"]:
           if state["turn"] != "Race Day" and state["energy_level"] < config.REST_BEFORE_SUMMER_ENERGY:
+            if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+              _remember_training_fallback(action)
             action.func = "do_rest"
             info(f"Resting before summer: {state['energy_level']} < {config.REST_BEFORE_SUMMER_ENERGY}")
             return action
@@ -505,6 +518,7 @@ class Strategy:
       ):
         action.func = "do_rest"
         action["disable_skip_turn_fallback"] = True
+        _remember_training_fallback(action)
         info(
           f"[ENERGY_MGMT] → TRACKBLAZER REST: optional race gate blocks rival fallback and "
           f"weighted training score ({training_score}) is below minimum ({min_score})"
@@ -518,6 +532,7 @@ class Strategy:
         and state["turn"] != "Race Day"
       ):
         if low_energy_override.get("prefer_rest"):
+          _remember_training_fallback(action)
           action.func = "do_rest"
           info(
             f"[ENERGY_MGMT] → TRACKBLAZER REST: {low_energy_override.get('reason')} "
