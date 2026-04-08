@@ -266,6 +266,36 @@ def _should_accept_consecutive_race_warning(options=None):
     or options.get("trackblazer_lobby_scheduled_race")
   )
 
+
+def _mark_consecutive_warning_outcome(options=None, *, force_rest=False, reason=None):
+  if not isinstance(options, dict):
+    return
+  options["_consecutive_warning_cancelled"] = True
+  if force_rest:
+    options["_consecutive_warning_force_rest"] = True
+  if reason:
+    options["_consecutive_warning_cancel_reason"] = str(reason)
+
+
+def _should_force_rest_after_optional_warning(options=None):
+  if not isinstance(options, dict):
+    return False
+  if options.get("scheduled_race") or options.get("trackblazer_lobby_scheduled_race") or options.get("is_race_day"):
+    return False
+  race_decision = options.get("trackblazer_race_decision") or {}
+  if not isinstance(race_decision, dict):
+    return False
+  if race_decision.get("g1_forced"):
+    return False
+  if race_decision.get("fallback_non_rival_race"):
+    return True
+  # Weak-training optional rival path should rest when 3rd-race warning blocks.
+  return bool(
+    race_decision.get("should_race")
+    and race_decision.get("prefer_rival_race")
+    and options.get("_rival_fallback_func") == "do_training"
+  )
+
 def enter_race(race_name="any", race_image_path="", options=None):
   device_action.locate_and_click("assets/buttons/races_btn.png", min_search_time=get_secs(10), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
   debug(f"race_name: {race_name}, race_image_path: {race_image_path}")
@@ -282,9 +312,19 @@ def enter_race(race_name="any", race_image_path="", options=None):
     and not options.get("is_race_day")
   )
   if consecutive_cancel_btn and is_fallback_race:
+    _mark_consecutive_warning_outcome(
+      options,
+      force_rest=True,
+      reason="optional_fallback_non_rival_race",
+    )
     device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Consecutive-race warning on fallback non-rival race. Cancelling — not worth a 3rd consecutive race for a weak-training fallback.")
     return False
   if consecutive_cancel_btn and is_rest_promoted_optional_race:
+    _mark_consecutive_warning_outcome(
+      options,
+      force_rest=True,
+      reason="optional_rival_promoted_from_rest",
+    )
     device_action.locate_and_click(
       "assets/buttons/cancel_btn.png",
       min_search_time=get_secs(1),
@@ -292,7 +332,17 @@ def enter_race(race_name="any", race_image_path="", options=None):
     )
     return False
   if config.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn and not accept_warning:
-    device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Already raced 3+ times consecutively. Cancelling race and doing training.")
+    force_rest = _should_force_rest_after_optional_warning(options)
+    _mark_consecutive_warning_outcome(
+      options,
+      force_rest=force_rest,
+      reason="cancel_consecutive_race_setting",
+    )
+    device_action.locate_and_click(
+      "assets/buttons/cancel_btn.png",
+      min_search_time=get_secs(1),
+      text="[INFO] Already raced 3+ times consecutively. Cancelling race and using fallback action.",
+    )
     return False
   elif consecutive_cancel_btn:
     warning_reason = "scheduled race override" if accept_warning else "config allows consecutive race"

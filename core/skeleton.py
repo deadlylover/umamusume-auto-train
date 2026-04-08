@@ -5545,6 +5545,20 @@ def career_lobby(dry_run_turn=False):
           if action.available_actions:  # Check if the list is not empty
             action.available_actions.pop(0)
 
+          consecutive_warning_force_rest = bool(action.get("_consecutive_warning_force_rest"))
+          if consecutive_warning_force_rest:
+            info(
+              "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
+              "Prioritizing rest fallback."
+            )
+            action["_rival_fallback_func"] = "do_rest"
+            if "do_rest" in action.available_actions:
+              action.available_actions = (
+                ["do_rest"] + [name for name in action.available_actions if name != "do_rest"]
+              )
+            else:
+              action.available_actions.insert(0, "do_rest")
+
           if action.get("race_mission_available") and action.func == "do_race":
             info(f"Couldn't match race mission to aptitudes, trying next action.")
           else:
@@ -5564,6 +5578,8 @@ def career_lobby(dry_run_turn=False):
             or action.get("trackblazer_lobby_scheduled_race")
             or (_fallback_gate.get("race_allowed") and _fallback_gate.get("selected_race"))
           )
+          if consecutive_warning_force_rest:
+            has_selected_race = False
           allow_rest_fallback_for_optional_rival = bool(
             action.get("prefer_rival_race")
             and action.get("_rival_fallback_func") == "do_rest"
