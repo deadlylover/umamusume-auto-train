@@ -1256,6 +1256,15 @@ def _skill_purchase_plan(action):
   return {}
 
 
+def _clear_skill_purchase_plan_state(state_obj, action=None):
+  if isinstance(state_obj, dict):
+    state_obj.pop("skill_purchase_plan", None)
+    state_obj.pop("skill_purchase_preview_key", None)
+  if action is not None:
+    _action_option_pop(action, "skill_purchase_plan")
+    _action_option_pop(action, "skill_purchase_context")
+
+
 def _skill_purchase_has_actionable_targets(scan_result):
   if not isinstance(scan_result, dict):
     return False
@@ -2335,6 +2344,7 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
   plan = _skill_purchase_plan(action)
   context = plan.get("context") or {}
   if not plan or not context.get("should_check"):
+    _clear_skill_purchase_plan_state(state_obj, action)
     return {"status": "skipped"}
 
   purchase_result = collect_skill_purchase(
@@ -2352,6 +2362,9 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
     **context,
     "reason": purchase_flow.get("reason") or context.get("reason"),
   }
+  # The plan is single-use for the current action. Clear it so stale queued
+  # targets do not get reattached/retried on subsequent snapshots/retries.
+  _clear_skill_purchase_plan_state(state_obj, action)
 
   target_results = list(purchase_scan.get("target_results") or [])
   purchased_any = any((entry.get("increment_click_result") or {}).get("target") for entry in target_results)

@@ -55,6 +55,10 @@ _SCROLLBAR_BOTTOM_COMPLETION_DRAG_DURATION_SECONDS = 0.8
 _EXACT_MATCH_THRESHOLD = 0.92     # Levenshtein ratio for "exact" match
 _FUZZY_MATCH_THRESHOLD = 0.75     # Levenshtein ratio for fuzzy fallback
 _FUZZY_MATCH_MIN_LENGTH = 4       # Minimum skill name length for fuzzy
+_TOKEN_MERGE_FALLBACK_THRESHOLD = 0.73
+_TOKEN_MERGE_MIN_SHARED = 2
+_TOKEN_MERGE_MIN_COVERAGE = 0.66
+_TOKEN_MERGE_MAX_ROW_TOKENS = 6
 
 # Increment button pairing.
 _INCREMENT_MATCH_THRESHOLD = 0.65
@@ -67,6 +71,11 @@ _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
 _OBTAINED_TEMPLATE = "assets/custom/skill_obtained.png"
 _OBTAINED_MATCH_THRESHOLD = 0.85
 _OBTAINED_Y_TOLERANCE = 55  # Similar to increment Y tolerance
+_OBTAINED_RECHECK_MATCH_THRESHOLD = 0.8
+_OBTAINED_RECHECK_Y_TOLERANCE = 65
+_OBTAINED_RECHECK_THRESHOLDS = (_OBTAINED_RECHECK_MATCH_THRESHOLD, 0.76)
+_OBTAINED_TEXT_Y_TOLERANCE = 72
+_OBTAINED_TEXT_MIN_SIMILARITY = 0.72
 
 # Confirm detection.
 _CONFIRM_TEMPLATE = "assets/buttons/confirm_btn.png"
@@ -97,6 +106,17 @@ _SKILL_OCR_CANVAS_SIZE = 1600
 _SKILL_OCR_MIN_SIZE = 12
 _SKILL_OCR_GPU_BATCH_SIZE = 8
 _SKILL_OCR_CPU_BATCH_SIZE = 1
+_SKILL_OCR_DIM_ENABLE = True
+_SKILL_OCR_DIM_SHARPEN = True
+_SKILL_OCR_DIM_CLAHE_CLIP = 2.2
+_SKILL_OCR_DIM_CONTRAST_ALPHA = 1.45
+_SKILL_OCR_DIM_CONTRAST_BETA = 10
+_SKILL_OCR_DIM_ADAPTIVE_BLOCK = 31
+_SKILL_OCR_DIM_ADAPTIVE_C = 7
+_SKILL_OCR_DIM_ADAPTIVE_C_ALT = 11
+_SKILL_OCR_STITCH_Y_TOLERANCE = 24
+_SKILL_OCR_STITCH_X_GAP = 190
+_SKILL_OCR_STITCH_MAX_TEXT_LENGTH = 40
 
 
 _SKILL_SHORTLIST_CACHE = {}
@@ -458,25 +478,189 @@ def _finalize_waterfall_summary(flow, live_index, timeout=10.0):
 # OCR extraction from the name band
 # ---------------------------------------------------------------------------
 
-def _extract_ocr_rows_from_name_band(screenshot):
-    """OCR the skill name band and return raw EasyOCR results with bounding boxes.
+_OCR_SYMBOL_VARIANTS = (
+    ("○", " o "),
+    ("◯", " o "),
+    ("〇", " o "),
+    ("●", " o "),
+    ("◎", " o "),
+    ("◉", " o "),
+    ("•", " "),
+    ("・", " "),
+    ("’", "'"),
+    ("“", "\""),
+    ("”", "\""),
+)
+_SKILL_TOKEN_STOPWORDS = frozenset({"and", "for", "the", "with"})
+_NAME_MATCH_METHOD_PRIORITY = {"exact": 3, "token_merge": 2, "fuzzy": 1}
+_OCR_VARIANT_PRIORITY = {"normal": 3, "merged": 2, "dim": 1}
 
-    Returns a list of dicts with text, confidence, and Y-coordinate info
-    for each detected text region.
-    """
-    crop = _crop_absolute_bbox(
-        screenshot,
-        constants.SKILL_NAME_BAND_BBOX,
-        base_region_ltrb=_skill_ui_region(),
+
+def _name_match_method_rank(method):
+    return int(_NAME_MATCH_METHOD_PRIORITY.get(method, 0))
+
+
+def _ocr_variant_rank(variant):
+    return int(_OCR_VARIANT_PRIORITY.get(variant, 0))
+
+
+def _ocr_row_quality_key(row):
+    confidence = float(row.get("confidence") or 0.0)
+    normalized_len = len(str(row.get("text_normalized") or ""))
+    return (
+        confidence,
+        _ocr_variant_rank(row.get("ocr_variant")),
+        normalized_len,
     )
+
+
+def _dedupe_ocr_rows(rows):
+    """Dedupe OCR rows by nearby Y/X+text while keeping the strongest candidate."""
+    deduped = {}
+    for row in (rows or []):
+        normalized = row.get("text_normalized") or ""
+        if not normalized:
+            continue
+        crop_bbox = row.get("crop_bbox") or [0, 0, 0, 0]
+        key = (
+            normalized,
+            int(round(float(row.get("abs_y_center") or 0.0) / 6.0)),
+            int(round(float(crop_bbox[0]) / 26.0)),
+        )
+        current = deduped.get(key)
+        if current is None or _ocr_row_quality_key(row) > _ocr_row_quality_key(current):
+            deduped[key] = dict(row)
+    return sorted(
+        deduped.values(),
+        key=lambda item: (
+            float(item.get("abs_y_center") or 0.0),
+            int((item.get("crop_bbox") or [0, 0, 0, 0])[0]),
+        ),
+    )
+
+
+def _build_dim_text_variants(crop):
+    """Create OCR-friendly variants for dim/greyed-out skill rows."""
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
+    if len(crop.shape) == 3:
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = np.asarray(crop)
+    if gray is None or getattr(gray, "size", 0) == 0:
+        return []
+    clahe = cv2.createCLAHE(clipLimit=_SKILL_OCR_DIM_CLAHE_CLIP, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    enhanced = cv2.convertScaleAbs(
+        enhanced,
+        alpha=_SKILL_OCR_DIM_CONTRAST_ALPHA,
+        beta=_SKILL_OCR_DIM_CONTRAST_BETA,
+    )
+    if _SKILL_OCR_DIM_SHARPEN:
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.1)
+        enhanced = cv2.addWeighted(enhanced, 1.22, blurred, -0.22, 0)
+    adaptive_mean = cv2.adaptiveThreshold(
+        enhanced,
+        255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY,
+        _SKILL_OCR_DIM_ADAPTIVE_BLOCK,
+        _SKILL_OCR_DIM_ADAPTIVE_C,
+    )
+    adaptive_gaussian = cv2.adaptiveThreshold(
+        enhanced,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        _SKILL_OCR_DIM_ADAPTIVE_BLOCK,
+        _SKILL_OCR_DIM_ADAPTIVE_C_ALT,
+    )
+    return [enhanced, adaptive_mean, adaptive_gaussian]
 
-    from core.ocr import reader
-    allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#? "
-    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
-    if str(getattr(reader, "device", "cpu")) != "cpu":
-        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+
+@lru_cache(maxsize=4096)
+def _extract_key_tokens(normalized_text):
+    tokens = [tok for tok in str(normalized_text or "").split() if tok]
+    if not tokens:
+        return frozenset()
+    key_tokens = [
+        tok for tok in tokens
+        if len(tok) >= 3 and not tok.isdigit() and tok not in _SKILL_TOKEN_STOPWORDS
+    ]
+    if len(key_tokens) < 2:
+        key_tokens = [tok for tok in tokens if len(tok) >= 3 and not tok.isdigit()]
+    if len(key_tokens) < 2:
+        key_tokens = tokens
+    return frozenset(key_tokens)
+
+
+def _stitch_split_skill_rows(rows):
+    """Create merged rows for split OCR fragments (e.g. "Corner" + "Recovery")."""
+    stitched = []
+    sorted_rows = sorted(
+        (dict(row) for row in (rows or []) if row.get("text_normalized")),
+        key=lambda item: (
+            float(item.get("abs_y_center") or 0.0),
+            int((item.get("crop_bbox") or [0, 0, 0, 0])[0]),
+        ),
+    )
+    for idx, row in enumerate(sorted_rows):
+        row_bbox = row.get("crop_bbox") or [0, 0, 0, 0]
+        row_left = int(row_bbox[0])
+        row_right = row_left + int(row_bbox[2])
+        row_abs_y = float(row.get("abs_y_center") or 0.0)
+        for other in sorted_rows[idx + 1: idx + 6]:
+            other_bbox = other.get("crop_bbox") or [0, 0, 0, 0]
+            other_abs_y = float(other.get("abs_y_center") or 0.0)
+            if abs(other_abs_y - row_abs_y) > _SKILL_OCR_STITCH_Y_TOLERANCE:
+                continue
+            other_left = int(other_bbox[0])
+            other_right = other_left + int(other_bbox[2])
+            if other_right <= row_left:
+                continue
+            x_gap = other_left - row_right
+            if x_gap > _SKILL_OCR_STITCH_X_GAP:
+                continue
+            parts = sorted([row, other], key=lambda item: int((item.get("crop_bbox") or [0, 0, 0, 0])[0]))
+            merged_raw = " ".join(str(part.get("text_raw") or "").strip() for part in parts).strip()
+            merged_normalized = _normalize_skill_text(merged_raw)
+            if not merged_normalized:
+                continue
+            if merged_normalized in {parts[0].get("text_normalized"), parts[1].get("text_normalized")}:
+                continue
+            if len(merged_normalized) > _SKILL_OCR_STITCH_MAX_TEXT_LENGTH:
+                continue
+            left_bbox = parts[0].get("crop_bbox") or [0, 0, 0, 0]
+            right_bbox = parts[1].get("crop_bbox") or [0, 0, 0, 0]
+            merged_left = int(min(left_bbox[0], right_bbox[0]))
+            merged_top = int(min(left_bbox[1], right_bbox[1]))
+            merged_right = int(max(left_bbox[0] + left_bbox[2], right_bbox[0] + right_bbox[2]))
+            merged_bottom = int(max(left_bbox[1] + left_bbox[3], right_bbox[1] + right_bbox[3]))
+            stitched.append({
+                "text_raw": merged_raw,
+                "text_normalized": merged_normalized,
+                "confidence": round(
+                    (
+                        float(parts[0].get("confidence") or 0.0)
+                        + float(parts[1].get("confidence") or 0.0)
+                    ) / 2.0,
+                    4,
+                ),
+                "crop_y_center": round((merged_top + merged_bottom) / 2.0, 1),
+                "abs_y_center": round((row_abs_y + other_abs_y) / 2.0, 1),
+                "crop_bbox": [
+                    merged_left,
+                    merged_top,
+                    max(1, merged_right - merged_left),
+                    max(1, merged_bottom - merged_top),
+                ],
+                "ocr_variant": "merged",
+                "ocr_sources": [parts[0].get("ocr_variant"), parts[1].get("ocr_variant")],
+            })
+    return stitched
+
+
+def _run_skill_name_ocr_pass(crop, bbox_top, reader, allowlist, batch_size, ocr_variant="normal"):
     raw_results = reader.readtext(
         crop,
         allowlist=allowlist,
@@ -487,20 +671,19 @@ def _extract_ocr_rows_from_name_band(screenshot):
         batch_size=batch_size,
         workers=0,
     )
-
-    # Convert raw EasyOCR results to row entries with absolute Y coordinates.
-    bbox_left, bbox_top, _, _ = [int(v) for v in constants.SKILL_NAME_BAND_BBOX]
     rows = []
     for bbox, text, confidence in raw_results:
-        # bbox is [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+        normalized_text = _normalize_skill_text(text)
+        if not normalized_text:
+            continue
         y_coords = [pt[1] for pt in bbox]
         x_coords = [pt[0] for pt in bbox]
         row_top = min(y_coords)
         row_bottom = max(y_coords)
-        row_center_y = (row_top + row_bottom) / 2
+        row_center_y = (row_top + row_bottom) / 2.0
         rows.append({
             "text_raw": text,
-            "text_normalized": _normalize_skill_text(text),
+            "text_normalized": normalized_text,
             "confidence": round(float(confidence), 4),
             "crop_y_center": round(row_center_y, 1),
             "abs_y_center": round(bbox_top + row_center_y, 1),
@@ -510,13 +693,65 @@ def _extract_ocr_rows_from_name_band(screenshot):
                 int(round(max(x_coords) - min(x_coords))),
                 int(round(row_bottom - row_top)),
             ],
+            "ocr_variant": ocr_variant,
         })
     return rows
 
 
+def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
+    """OCR the skill name band with normal + dim-text passes."""
+    crop = _crop_absolute_bbox(
+        screenshot,
+        constants.SKILL_NAME_BAND_BBOX,
+        base_region_ltrb=_skill_ui_region(),
+    )
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return []
+
+    from core.ocr import reader
+    allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#?() "
+    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
+    if str(getattr(reader, "device", "cpu")) != "cpu":
+        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+    _bbox_left, bbox_top, _bbox_right, _bbox_bottom = [int(v) for v in constants.SKILL_NAME_BAND_BBOX]
+
+    normal_rows = _run_skill_name_ocr_pass(
+        crop,
+        bbox_top,
+        reader,
+        allowlist,
+        batch_size,
+        ocr_variant="normal",
+    )
+    if not include_dim_pass or not _SKILL_OCR_DIM_ENABLE:
+        return _dedupe_ocr_rows(normal_rows)
+
+    dim_rows = []
+    for dim_crop in _build_dim_text_variants(crop):
+        dim_rows.extend(
+            _run_skill_name_ocr_pass(
+                dim_crop,
+                bbox_top,
+                reader,
+                allowlist,
+                batch_size,
+                ocr_variant="dim",
+            )
+        )
+    merged_base = _dedupe_ocr_rows(normal_rows + dim_rows)
+    stitched_rows = _stitch_split_skill_rows(merged_base)
+    return _dedupe_ocr_rows(merged_base + stitched_rows)
+
+
 @lru_cache(maxsize=4096)
 def _normalize_skill_text(text):
-    """Normalize OCR text for matching: lowercase, strip punctuation, collapse whitespace."""
+    """Normalize OCR/shortlist text for matching."""
+    text = str(text or "")
+    for source, replacement in _OCR_SYMBOL_VARIANTS:
+        text = text.replace(source, replacement)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[/_+]+", " ", text)
+    text = re.sub(r"[-]+", " ", text)
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9\s]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -542,6 +777,7 @@ def _normalize_skill_shortlist(skill_shortlist):
             "skill_normalized": normalized_name,
             "skill_compact": normalized_name.replace(" ", ""),
             "skill_tokens": frozenset(normalized_name.split()),
+            "skill_key_tokens": _extract_key_tokens(normalized_name),
         })
 
     cached = tuple(normalized)
@@ -573,30 +809,53 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
     if cached is not None:
         return [dict(row) for row in cached]
 
-    matched = []
+    matched_by_skill = {}
     for row in ocr_rows:
         normalized = row["text_normalized"]
         if not normalized or len(normalized) < 3:
             continue
         normalized_compact = normalized.replace(" ", "")
         row_tokens = frozenset(normalized.split())
+        row_key_tokens = _extract_key_tokens(normalized)
         best_match = None
         best_score = 0.0
+        best_method = "fuzzy"
+        best_shared_key_tokens = 0
+        best_key_coverage = 0.0
         for skill_entry in normalized_shortlist:
             skill_name = skill_entry["skill_name"]
             skill_normalized = skill_entry["skill_normalized"]
             skill_compact = skill_entry["skill_compact"]
             skill_tokens = skill_entry["skill_tokens"]
+            skill_key_tokens = skill_entry.get("skill_key_tokens") or skill_tokens
 
             score = max(
                 Levenshtein.ratio(normalized, skill_normalized),
                 Levenshtein.ratio(normalized_compact, skill_compact),
             )
+            method = "fuzzy"
             shorter_len = min(len(normalized), len(skill_normalized))
             longer_len = max(len(normalized), len(skill_normalized))
             if ((skill_normalized in normalized or normalized in skill_normalized)
                     and shorter_len >= max(6, int(longer_len * 0.55))):
                 score = max(score, 0.96)
+                method = "exact"
+
+            shared_key_tokens = _shared_skill_tokens(row_key_tokens, skill_key_tokens)
+            key_coverage = shared_key_tokens / max(1, len(skill_key_tokens))
+            row_key_coverage = shared_key_tokens / max(1, len(row_key_tokens))
+            if (
+                len(skill_key_tokens) >= _TOKEN_MERGE_MIN_SHARED
+                and len(row_tokens) <= _TOKEN_MERGE_MAX_ROW_TOKENS
+                and shared_key_tokens >= _TOKEN_MERGE_MIN_SHARED
+                and key_coverage >= _TOKEN_MERGE_MIN_COVERAGE
+                and row_key_coverage >= 0.5
+            ):
+                token_score = 0.74 + (key_coverage * 0.16) + min(0.08, row_key_coverage * 0.08)
+                if token_score > score:
+                    score = token_score
+                    method = "token_merge"
+
             if skill_tokens:
                 shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
                 token_overlap = shared_tokens / max(1, len(skill_tokens))
@@ -607,36 +866,77 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
                     score = max(score, 0.78 + (token_overlap * 0.18))
                 elif shared_tokens >= 2 and token_overlap >= 0.5:
                     score = max(score, 0.72 + (token_overlap * 0.12))
-            if score > best_score:
+            if score > best_score or (
+                score == best_score and _name_match_method_rank(method) > _name_match_method_rank(best_method)
+            ):
                 best_score = score
                 best_match = skill_name
+                best_method = method
+                best_shared_key_tokens = shared_key_tokens
+                best_key_coverage = key_coverage
 
+        accepted = False
         if best_match and best_score >= _EXACT_MATCH_THRESHOLD:
-            matched.append({
-                **row,
-                "match_name": best_match,
-                "match_score": round(best_score, 4),
-                "match_type": "exact" if best_score >= _EXACT_MATCH_THRESHOLD else "fuzzy",
-            })
+            accepted = True
+        elif best_match and best_method == "token_merge" and best_score >= _TOKEN_MERGE_FALLBACK_THRESHOLD:
+            accepted = True
         elif best_match and best_score >= _FUZZY_MATCH_THRESHOLD and len(normalized) >= _FUZZY_MATCH_MIN_LENGTH:
-            # Guard: fuzzy-range matches based only on Levenshtein distance
-            # require at least 2 shared tokens. A single shared word (e.g.
-            # "corner" in description fragment "corner late" vs skill name
-            # "corner adept") is not reliable enough — descriptions contain
-            # skill-adjacent vocabulary that creates false positives.
+            accepted = True
+        if not accepted:
+            continue
+
+        if best_score < _EXACT_MATCH_THRESHOLD:
             best_entry = next(
                 (e for e in normalized_shortlist if e["skill_name"] == best_match), None
             )
-            if best_entry and best_entry["skill_tokens"] and len(best_entry["skill_tokens"]) >= 2:
+            if (
+                best_method == "fuzzy"
+                and best_entry
+                and best_entry["skill_tokens"]
+                and len(best_entry["skill_tokens"]) >= 2
+            ):
                 shared = _shared_skill_tokens(row_tokens, best_entry["skill_tokens"])
                 if shared < 2:
                     continue
-            matched.append({
-                **row,
-                "match_name": best_match,
-                "match_score": round(best_score, 4),
-                "match_type": "fuzzy",
-            })
+
+        candidate = {
+            **row,
+            "match_name": best_match,
+            "match_score": round(best_score, 4),
+            "match_type": "exact" if best_score >= _EXACT_MATCH_THRESHOLD else "fuzzy",
+            "name_match_method": best_method,
+            "shared_key_tokens": int(best_shared_key_tokens),
+            "key_token_coverage": round(float(best_key_coverage), 4),
+        }
+        skill_key = _normalize_skill_text(best_match)
+        existing = matched_by_skill.get(skill_key)
+        if existing is None:
+            matched_by_skill[skill_key] = candidate
+            continue
+        current_rank = (
+            float(candidate.get("match_score") or 0.0),
+            float(candidate.get("confidence") or 0.0),
+            _name_match_method_rank(candidate.get("name_match_method")),
+            _ocr_variant_rank(candidate.get("ocr_variant")),
+            len(candidate.get("text_normalized") or ""),
+        )
+        existing_rank = (
+            float(existing.get("match_score") or 0.0),
+            float(existing.get("confidence") or 0.0),
+            _name_match_method_rank(existing.get("name_match_method")),
+            _ocr_variant_rank(existing.get("ocr_variant")),
+            len(existing.get("text_normalized") or ""),
+        )
+        if current_rank > existing_rank:
+            matched_by_skill[skill_key] = candidate
+
+    matched = sorted(
+        matched_by_skill.values(),
+        key=lambda item: (
+            float(item.get("abs_y_center") or 0.0),
+            int((item.get("crop_bbox") or [0, 0, 0, 0])[0]),
+        ),
+    )
     with _SKILL_MATCH_CACHE_LOCK:
         _SKILL_MATCH_CACHE[cache_key] = tuple(dict(row) for row in matched)
     return matched
@@ -689,7 +989,7 @@ def _detect_increment_buttons(screenshot):
     return device_action.deduplicate_boxes(all_matches)
 
 
-def _detect_obtained_badges(screenshot):
+def _detect_obtained_badges(screenshot, threshold=None):
     """Find all 'Obtained' badges in the skill list area.
 
     Returns matches as (x, y, w, h) relative to SCROLLING_SKILL_SCREEN_BBOX.
@@ -702,26 +1002,179 @@ def _detect_obtained_badges(screenshot):
     )
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
+    match_threshold = _OBTAINED_MATCH_THRESHOLD if threshold is None else float(threshold)
     matches = device_action.match_template(
         _OBTAINED_TEMPLATE,
         crop,
-        threshold=_OBTAINED_MATCH_THRESHOLD,
+        threshold=match_threshold,
         template_scaling=_INVERSE_GLOBAL_SCALE,
     )
     return device_action.deduplicate_boxes(matches)
 
 
-def _row_has_obtained_badge(row, obtained_matches):
+def _row_has_obtained_badge(row, obtained_matches, y_tolerance=None):
     """Check if an OCR row is near an 'Obtained' badge by vertical proximity."""
     if not obtained_matches:
         return False
     row_abs_y = row["abs_y_center"]
     scroll_bbox_top = int(constants.SCROLLING_SKILL_SCREEN_BBOX[1])
+    tolerance = _OBTAINED_Y_TOLERANCE if y_tolerance is None else int(y_tolerance)
     for match in obtained_matches:
         badge_abs_cy = scroll_bbox_top + match[1] + match[3] // 2
-        if abs(badge_abs_cy - row_abs_y) <= _OBTAINED_Y_TOLERANCE:
+        if abs(badge_abs_cy - row_abs_y) <= tolerance:
             return True
     return False
+
+
+def _detect_obtained_text_tokens(screenshot):
+    """Detect OCR text that looks like 'Obtained' in the scrolling skill list."""
+    crop = _crop_absolute_bbox(
+        screenshot,
+        constants.SCROLLING_SKILL_SCREEN_BBOX,
+        base_region_ltrb=_skill_ui_region(),
+    )
+    if crop is None or getattr(crop, "size", 0) == 0:
+        return []
+    from core.ocr import reader
+    allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
+    if str(getattr(reader, "device", "cpu")) != "cpu":
+        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+    _scroll_left, scroll_top, _scroll_right, _scroll_bottom = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
+    ocr_inputs = [crop]
+    ocr_inputs.extend(_build_dim_text_variants(crop))
+    matches = []
+    seen = {}
+    for candidate in ocr_inputs:
+        raw_results = reader.readtext(
+            candidate,
+            allowlist=allowlist,
+            detail=1,
+            paragraph=False,
+            min_size=_SKILL_OCR_MIN_SIZE,
+            canvas_size=_SKILL_OCR_CANVAS_SIZE,
+            batch_size=batch_size,
+            workers=0,
+        )
+        for bbox, text, confidence in raw_results:
+            normalized = _normalize_skill_text(text)
+            if not normalized:
+                continue
+            compact = normalized.replace(" ", "")
+            token_score = max(
+                Levenshtein.ratio(compact, "obtained"),
+                Levenshtein.ratio(compact.replace("0", "o").replace("1", "l"), "obtained"),
+            )
+            if "obtain" not in compact and token_score < _OBTAINED_TEXT_MIN_SIMILARITY:
+                continue
+            y_coords = [pt[1] for pt in bbox]
+            x_coords = [pt[0] for pt in bbox]
+            row_top = min(y_coords)
+            row_bottom = max(y_coords)
+            row_center_y = (row_top + row_bottom) / 2.0
+            row_abs_y = float(scroll_top + row_center_y)
+            key = int(round(row_abs_y / 5.0))
+            payload = {
+                "text_raw": text,
+                "text_normalized": normalized,
+                "confidence": round(float(confidence), 4),
+                "score": round(float(token_score), 4),
+                "abs_y_center": round(row_abs_y, 1),
+                "crop_bbox": [
+                    int(round(min(x_coords))),
+                    int(round(row_top)),
+                    int(round(max(x_coords) - min(x_coords))),
+                    int(round(row_bottom - row_top)),
+                ],
+            }
+            current = seen.get(key)
+            rank = (float(payload["score"]), float(payload["confidence"]))
+            if current is None or rank > (float(current["score"]), float(current["confidence"])):
+                seen[key] = payload
+    matches.extend(seen.values())
+    matches.sort(key=lambda item: float(item.get("abs_y_center") or 0.0))
+    return matches
+
+
+def _row_has_obtained_text(row, obtained_text_matches, y_tolerance=None):
+    if not obtained_text_matches:
+        return False
+    try:
+        row_abs_y = float(row.get("abs_y_center"))
+    except (TypeError, ValueError):
+        return False
+    tolerance = _OBTAINED_TEXT_Y_TOLERANCE if y_tolerance is None else int(y_tolerance)
+    for match in obtained_text_matches:
+        if abs(float(match.get("abs_y_center") or 0.0) - row_abs_y) <= tolerance:
+            return True
+    return False
+
+
+def _collect_obtained_evidence_for_row(row, screenshot):
+    """Collect template/text evidence that a no-increment row is already purchased."""
+    evidence = {
+        "obtained": False,
+        "template": False,
+        "text": False,
+        "source": "none",
+    }
+    if not isinstance(row, dict):
+        return evidence
+    if row.get("obtained"):
+        existing = str(row.get("obtained_evidence") or "template")
+        evidence["obtained"] = True
+        evidence["template"] = existing in ("template", "both")
+        evidence["text"] = existing in ("text", "both")
+        evidence["source"] = existing
+        return evidence
+    if screenshot is None:
+        return evidence
+
+    template_found = False
+    for threshold in _OBTAINED_RECHECK_THRESHOLDS:
+        obtained_matches = _detect_obtained_badges(screenshot, threshold=threshold)
+        if _row_has_obtained_badge(
+            row,
+            obtained_matches,
+            y_tolerance=_OBTAINED_RECHECK_Y_TOLERANCE,
+        ):
+            template_found = True
+            break
+    text_matches = _detect_obtained_text_tokens(screenshot)
+    text_found = _row_has_obtained_text(
+        row,
+        text_matches,
+        y_tolerance=_OBTAINED_TEXT_Y_TOLERANCE,
+    )
+    if template_found and text_found:
+        source = "both"
+    elif template_found:
+        source = "template"
+    elif text_found:
+        source = "text"
+    else:
+        source = "none"
+    evidence.update({
+        "obtained": bool(template_found or text_found),
+        "template": bool(template_found),
+        "text": bool(text_found),
+        "source": source,
+    })
+    return evidence
+
+
+def _classify_no_increment_row(row, screenshot):
+    """Classify no-increment matches as obtained when evidence is visible live."""
+    if not isinstance(row, dict):
+        return "target_reacquired_but_no_increment_paired"
+    evidence = _collect_obtained_evidence_for_row(row, screenshot)
+    row["obtained_evidence"] = evidence.get("source", "none")
+    row["obtained_recheck"] = True
+    if evidence.get("obtained"):
+        row["obtained"] = True
+        return "target_obtained_no_increment"
+    row["obtained"] = False
+    return "target_reacquired_but_no_increment_paired"
 
 
 def _pair_skill_row_to_increment(row, increment_matches):
@@ -794,7 +1247,8 @@ def _analyze_skill_frame(frame_payload):
 
     # OCR the name band.
     t_ocr = _time()
-    ocr_rows = _extract_ocr_rows_from_name_band(screenshot)
+    include_dim_pass = (constants.SCENARIO_NAME or "") in ("mant", "trackblazer")
+    ocr_rows = _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=include_dim_pass)
     ocr_elapsed = _time() - t_ocr
 
     # Match against shortlist.
@@ -817,22 +1271,29 @@ def _analyze_skill_frame(frame_payload):
     # Pair matched targets to increment buttons.
     paired_increment_keys = set()
     for target in matched_targets:
+        if not target.get("name_match_method"):
+            target["name_match_method"] = target.get("match_type") or "fuzzy"
         if _row_has_obtained_badge(target, obtained_matches):
             target["increment_match"] = None
             target["increment_pairing"] = None
             target["increment_vertical_distance"] = None
             target["obtained"] = True
+            target["obtained_evidence"] = "template"
             continue
         inc = _pair_skill_row_to_increment(target, increment_matches)
         if inc:
             target["increment_match"] = list(inc)
             target["increment_pairing"] = "vertical"
             target["increment_vertical_distance"] = round(_increment_match_vertical_distance(target, inc) or 0.0, 1)
+            target["obtained"] = False
+            target["obtained_evidence"] = "none"
             paired_increment_keys.add(tuple(int(v) for v in inc))
         else:
             target["increment_match"] = None
             target["increment_pairing"] = None
             target["increment_vertical_distance"] = None
+            target["obtained"] = bool(target.get("obtained"))
+            target["obtained_evidence"] = target.get("obtained_evidence") or ("template" if target.get("obtained") else "none")
 
     # Fallback: if a matched row still has no increment pair, assign the
     # nearest remaining button when it is still plausibly aligned. The skill
@@ -862,6 +1323,8 @@ def _analyze_skill_frame(frame_payload):
             target["increment_match"] = list(inc)
             target["increment_pairing"] = "fallback_nearest"
             target["increment_vertical_distance"] = round(distance, 1)
+            target["obtained"] = False
+            target["obtained_evidence"] = "none"
             paired_increment_keys.add(tuple(int(v) for v in inc))
             remaining_targets = [item for item in remaining_targets if item is not target]
             remaining_increments = [item for item in remaining_increments if item != inc]
@@ -1515,9 +1978,12 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
             return flow
 
         if not reacquire_match.get("increment_match"):
-            flow["reason"] = "target_reacquired_but_no_increment_paired"
+            flow["reason"] = _classify_no_increment_row(reacquire_match, reacquire_screenshot)
             flow["scan_timing"] = _build_scan_timing(t_flow, t_scan_done, t_seekback)
-            info("Skill scanner: target reacquired but no increment button paired live.")
+            if flow["reason"] == "target_obtained_no_increment":
+                info("Skill scanner: target reacquired with Obtained badge and no increment.")
+            else:
+                info("Skill scanner: target reacquired but no increment button paired live.")
             _log_scan_debug(flow, live_index.get_frames())
             return flow
         if not _match_has_safe_increment(reacquire_match):
@@ -1567,10 +2033,26 @@ def _choose_best_candidate(all_frames, target_skill):
     if not actionable:
         actionable = [c for c in candidates if c["row"].get("increment_match")]
     if not actionable:
-        return max(candidates, key=lambda c: c["row"].get("match_score", 0))
+        return max(
+            candidates,
+            key=lambda c: (
+                float((c.get("row") or {}).get("match_score") or 0.0),
+                float((c.get("row") or {}).get("confidence") or 0.0),
+                _name_match_method_rank((c.get("row") or {}).get("name_match_method")),
+                _ocr_variant_rank((c.get("row") or {}).get("ocr_variant")),
+            ),
+        )
 
-    # Sort by match score descending.
-    actionable.sort(key=lambda c: c["row"].get("match_score", 0), reverse=True)
+    # Sort by shortlist similarity first, then OCR confidence.
+    actionable.sort(
+        key=lambda c: (
+            float((c.get("row") or {}).get("match_score") or 0.0),
+            float((c.get("row") or {}).get("confidence") or 0.0),
+            _name_match_method_rank((c.get("row") or {}).get("name_match_method")),
+            _ocr_variant_rank((c.get("row") or {}).get("ocr_variant")),
+        ),
+        reverse=True,
+    )
     return actionable[0]
 
 
@@ -1585,8 +2067,12 @@ def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):
         "target_increment_safe": bool(_match_has_safe_increment(match)),
         "match_name": (match or {}).get("match_name"),
         "match_score": (match or {}).get("match_score"),
+        "ocr_variant_used": (match or {}).get("ocr_variant"),
+        "name_match_method": (match or {}).get("name_match_method") or (match or {}).get("match_type"),
+        "obtained_evidence": (match or {}).get("obtained_evidence") or ("template" if (match or {}).get("obtained") else "none"),
         "increment_pairing": (match or {}).get("increment_pairing"),
         "increment_vertical_distance": (match or {}).get("increment_vertical_distance"),
+        "increment_present": bool((match or {}).get("increment_match")),
         "scrollbar_ratio": scrollbar.get("position_ratio"),
         "seek_ratio": seek_ratio,
         "nudge_attempts": list(nudge_attempts or []),
@@ -1761,14 +2247,26 @@ def _find_best_target_match(frame, target_skill):
     matched = frame.get("matched_targets", [])
     if not matched:
         return None
+    def _match_rank(match):
+        return (
+            1 if _match_has_safe_increment(match) else 0,
+            1 if match.get("increment_match") else 0,
+            float(match.get("match_score") or 0.0),
+            float(match.get("confidence") or 0.0),
+            _name_match_method_rank(match.get("name_match_method")),
+            _ocr_variant_rank(match.get("ocr_variant")),
+        )
     if target_skill:
         target_normalized = _normalize_skill_text(target_skill)
-        for m in matched:
-            if _normalize_skill_text(m.get("match_name", "")) == target_normalized:
-                return m
-        return None
+        target_matches = [
+            m for m in matched
+            if _normalize_skill_text(m.get("match_name", "")) == target_normalized
+        ]
+        if not target_matches:
+            return None
+        return max(target_matches, key=_match_rank)
     # No specific target — return highest-scoring match.
-    return max(matched, key=lambda m: m.get("match_score", 0))
+    return max(matched, key=_match_rank)
 
 
 # ---------------------------------------------------------------------------
@@ -1868,8 +2366,62 @@ def _build_scan_entry(target_skill, source=None):
         "increment_click_result": None,
         "confirm_detect_result": None,
         "confirm_available": False,
+        "ocr_variant_used": None,
+        "name_match_method": None,
+        "obtained_evidence": "none",
+        "increment_present": False,
+        "final_reason": "",
         "reason": "",
     }
+
+
+def _sync_target_entry_telemetry(entry, match_row=None):
+    if not isinstance(entry, dict):
+        return entry
+    row = match_row or {}
+    if isinstance(row, dict):
+        ocr_variant = row.get("ocr_variant") or row.get("ocr_variant_used")
+        if ocr_variant:
+            entry["ocr_variant_used"] = ocr_variant
+        match_method = row.get("name_match_method") or row.get("match_type")
+        if match_method:
+            entry["name_match_method"] = match_method
+        obtained_evidence = row.get("obtained_evidence")
+        if obtained_evidence:
+            entry["obtained_evidence"] = obtained_evidence
+        elif row.get("obtained"):
+            entry["obtained_evidence"] = "template"
+        elif not entry.get("obtained_evidence"):
+            entry["obtained_evidence"] = "none"
+        if "increment_match" in row:
+            entry["increment_present"] = bool(row.get("increment_match"))
+    click_result = entry.get("increment_click_result") or {}
+    if click_result.get("target"):
+        entry["increment_present"] = True
+    return entry
+
+
+def _log_target_entry_debug(entry):
+    if not isinstance(entry, dict):
+        return
+    debug(
+        "[SKILL][TARGET] "
+        f"{entry.get('target_skill')}: "
+        f"ocr_variant={entry.get('ocr_variant_used') or 'unknown'}; "
+        f"name_match={entry.get('name_match_method') or 'unknown'}; "
+        f"obtained_evidence={entry.get('obtained_evidence') or 'none'}; "
+        f"increment_present={bool(entry.get('increment_present'))}; "
+        f"final_reason={entry.get('final_reason') or entry.get('reason') or ''}"
+    )
+
+
+def _set_target_entry_reason(entry, reason, match_row=None):
+    if not isinstance(entry, dict):
+        return
+    _sync_target_entry_telemetry(entry, match_row=match_row)
+    entry["reason"] = reason
+    entry["final_reason"] = reason
+    _log_target_entry_debug(entry)
 
 
 def _build_hint_candidate(target_skill, hint):
@@ -1904,6 +2456,9 @@ def _build_hint_candidate(target_skill, hint):
             "match_score": match_score,
             "increment_pairing": increment_pairing,
             "increment_vertical_distance": increment_vertical_distance,
+            "ocr_variant": candidate.get("ocr_variant_used") or reacquire_result.get("ocr_variant_used"),
+            "name_match_method": candidate.get("name_match_method") or reacquire_result.get("name_match_method"),
+            "obtained_evidence": candidate.get("obtained_evidence") or reacquire_result.get("obtained_evidence"),
         },
     }
 
@@ -1973,6 +2528,7 @@ def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized
     for skill_name, hint, candidate in hinted_targets:
         entry = _build_scan_entry(skill_name, source="preview_hint")
         hint_candidate_row = candidate.get("row") or {}
+        _sync_target_entry_telemetry(entry, match_row=hint_candidate_row)
         entry["candidate"] = {
             "frame_index": candidate.get("frame_index"),
             "scrollbar_ratio": candidate.get("scrollbar_ratio"),
@@ -1980,6 +2536,9 @@ def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized
             "match_score": hint_candidate_row.get("match_score"),
             "increment_pairing": hint_candidate_row.get("increment_pairing"),
             "increment_vertical_distance": hint_candidate_row.get("increment_vertical_distance"),
+            "ocr_variant_used": hint_candidate_row.get("ocr_variant"),
+            "name_match_method": hint_candidate_row.get("name_match_method"),
+            "obtained_evidence": hint_candidate_row.get("obtained_evidence") or "none",
             "increment_ready": bool(_match_has_safe_increment(hint_candidate_row)),
         }
         entry["hint"] = {
@@ -1996,27 +2555,38 @@ def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized
         )
         entry["seekback_result"] = seek_result
         entry["reacquire_result"] = reacquire_result
+        _sync_target_entry_telemetry(entry, match_row=reacquire_match)
         if not reacquire_match:
-            entry["reason"] = "preview_hint_reacquire_failed"
+            _set_target_entry_reason(entry, "preview_hint_reacquire_failed")
             unresolved.append(skill_name)
             results.append(entry)
             continue
         if not reacquire_match.get("increment_match"):
-            entry["reason"] = "preview_hint_no_increment_paired"
-            unresolved.append(skill_name)
+            _set_target_entry_reason(
+                entry,
+                _classify_no_increment_row(reacquire_match, _reacquire_screenshot),
+                match_row=reacquire_match,
+            )
+            if entry["reason"] != "target_obtained_no_increment":
+                unresolved.append(skill_name)
             results.append(entry)
             continue
         if not _match_has_safe_increment(reacquire_match):
-            entry["reason"] = "preview_hint_increment_pair_unsafe"
+            _set_target_entry_reason(entry, "preview_hint_increment_pair_unsafe", match_row=reacquire_match)
             unresolved.append(skill_name)
             results.append(entry)
             continue
 
         entry["increment_click_result"] = _click_increment_for_match(reacquire_match, dry_run)
+        _sync_target_entry_telemetry(entry, match_row=reacquire_match)
         if entry["increment_click_result"].get("target"):
             flow["resolved"] += 1
         else:
-            entry["reason"] = entry["increment_click_result"].get("reason") or "preview_hint_increment_click_not_ready"
+            _set_target_entry_reason(
+                entry,
+                entry["increment_click_result"].get("reason") or "preview_hint_increment_click_not_ready",
+                match_row=reacquire_match,
+            )
             unresolved.append(skill_name)
         results.append(entry)
 
@@ -2059,14 +2629,14 @@ def _finalize_multi_increment_results(target_results, dry_run):
         reason = "dry_run_confirm_detected" if confirm.get("detected") else "dry_run_complete"
         for entry in queued_entries:
             if not entry.get("reason"):
-                entry["reason"] = reason
+                _set_target_entry_reason(entry, reason)
         summary["reason"] = reason
         return summary
 
     if not confirm.get("detected"):
         for entry in queued_entries:
             if not entry.get("reason"):
-                entry["reason"] = "increment_clicked_confirm_not_detected"
+                _set_target_entry_reason(entry, "increment_clicked_confirm_not_detected")
         summary["reason"] = "increment_clicked_confirm_not_detected"
         return summary
 
@@ -2079,17 +2649,17 @@ def _finalize_multi_increment_results(target_results, dry_run):
     if learn_close.get("learn_clicked") and learn_close.get("close_clicked"):
         for entry in queued_entries:
             if not entry.get("reason"):
-                entry["reason"] = "purchase_finalized"
+                _set_target_entry_reason(entry, "purchase_finalized")
         summary["reason"] = "purchase_finalized"
     elif learn_close.get("learn_clicked"):
         for entry in queued_entries:
             if not entry.get("reason"):
-                entry["reason"] = "purchase_learned_close_failed"
+                _set_target_entry_reason(entry, "purchase_learned_close_failed")
         summary["reason"] = "purchase_learned_close_failed"
     else:
         for entry in queued_entries:
             if not entry.get("reason"):
-                entry["reason"] = "confirm_clicked_learn_failed"
+                _set_target_entry_reason(entry, "confirm_clicked_learn_failed")
         summary["reason"] = "confirm_clicked_learn_failed"
     return summary
 
@@ -2272,6 +2842,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
 
             if candidate:
                 candidate_row = candidate.get("row") or {}
+                _sync_target_entry_telemetry(entry, match_row=candidate_row)
                 entry["candidate"] = {
                     "frame_index": candidate.get("frame_index"),
                     "scrollbar_ratio": candidate.get("scrollbar_ratio"),
@@ -2279,17 +2850,20 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                     "match_score": candidate_row.get("match_score"),
                     "increment_pairing": candidate_row.get("increment_pairing"),
                     "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
+                    "ocr_variant_used": candidate_row.get("ocr_variant"),
+                    "name_match_method": candidate_row.get("name_match_method"),
+                    "obtained_evidence": candidate_row.get("obtained_evidence") or "none",
                     "increment_ready": bool(_match_has_safe_increment(candidate_row)),
                 }
             else:
-                entry["reason"] = "target_not_found_in_any_frame"
+                _set_target_entry_reason(entry, "target_not_found_in_any_frame")
                 flow["target_results"].append(entry)
                 continue
 
             # Skip reacquire+nudge if the scan already determined this skill
             # has an "Obtained" badge (no increment button exists).
             if candidate_row.get("obtained") and not _match_has_safe_increment(candidate_row):
-                entry["reason"] = "target_obtained_no_increment"
+                _set_target_entry_reason(entry, "target_obtained_no_increment", match_row=candidate_row)
                 flow["target_results"].append(entry)
                 continue
 
@@ -2302,22 +2876,32 @@ def scan_and_increment_skills(target_skills, dry_run=False,
             )
             entry["seekback_result"] = seek_result
             entry["reacquire_result"] = reacquire_result
+            _sync_target_entry_telemetry(entry, match_row=reacquire_match)
             if not reacquire_match:
-                entry["reason"] = "target_found_in_scan_but_reacquire_failed"
+                _set_target_entry_reason(entry, "target_found_in_scan_but_reacquire_failed")
                 flow["target_results"].append(entry)
                 continue
             if not reacquire_match.get("increment_match"):
-                entry["reason"] = "target_reacquired_but_no_increment_paired"
+                _set_target_entry_reason(
+                    entry,
+                    _classify_no_increment_row(reacquire_match, _reacquire_screenshot),
+                    match_row=reacquire_match,
+                )
                 flow["target_results"].append(entry)
                 continue
             if not _match_has_safe_increment(reacquire_match):
-                entry["reason"] = "target_reacquired_but_increment_pair_unsafe"
+                _set_target_entry_reason(entry, "target_reacquired_but_increment_pair_unsafe", match_row=reacquire_match)
                 flow["target_results"].append(entry)
                 continue
 
             entry["increment_click_result"] = _click_increment_for_match(reacquire_match, dry_run)
+            _sync_target_entry_telemetry(entry, match_row=reacquire_match)
             if not entry["increment_click_result"].get("target"):
-                entry["reason"] = entry["increment_click_result"].get("reason") or "increment_click_not_ready"
+                _set_target_entry_reason(
+                    entry,
+                    entry["increment_click_result"].get("reason") or "increment_click_not_ready",
+                    match_row=reacquire_match,
+                )
             flow["target_results"].append(entry)
 
         flow["finalize_result"] = _finalize_multi_increment_results(flow["target_results"], dry_run)
