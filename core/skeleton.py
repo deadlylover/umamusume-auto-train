@@ -40,12 +40,14 @@ from core.trackblazer.planner import (
   set_turn_plan_decision_path,
   update_turn_discussion_dual_run,
 )
+from core.trackblazer.executor import PlannerExecutorHooks
 from core.trackblazer.models import (
   TurnPlan,
   build_quick_bar_payload,
   render_compact_summary,
   render_turn_discussion,
 )
+from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 from core.trackblazer.review import build_ranked_training_snapshot as _build_trackblazer_ranked_training_snapshot
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
@@ -2286,18 +2288,12 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
   }
 
 
-def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
-  """Run Trackblazer pre-action item flow with the given commit_mode.
-
-  commit_mode="full" — production execute: increments + confirm + followup.
-  commit_mode="dry_run" — non-destructive simulation: opens, scans, detects
-    controls, then closes without increment clicks or confirm.
-  """
+def _refresh_trackblazer_pre_action_inventory(state_obj, action):
   turn_plan = get_turn_plan(state_obj, action, limit=8)
   planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
-    return {"status": "skipped"}
+    return {"status": "skipped", "reason": "no_pre_action_items"}
 
   # Re-scan inventory immediately before item use so execute/dry-run flows do
   # not rely on a stale per-turn cache when choosing accompanying items.
@@ -2315,16 +2311,26 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
-    return {
-      "status": "skipped",
-      "reason": "trackblazer_pre_action_items_cleared_after_refresh",
-    }
+    return {"status": "skipped", "reason": "trackblazer_pre_action_items_cleared_after_refresh"}
+  return {
+    "status": "ready",
+    "reason": "trackblazer_pre_action_items_ready",
+    "turn_plan": turn_plan,
+    "planner_item_execution": planner_item_execution,
+    "planned_items": planned_items,
+  }
 
-  from scenarios.trackblazer import execute_training_items
 
+def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
+  """Execute already-refreshed Trackblazer pre-action items with the given commit_mode."""
+  turn_plan = get_turn_plan(state_obj, action, limit=8)
+  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   item_keys = [entry.get("key") for entry in planned_items if entry.get("key")]
   if not item_keys:
-    return {"status": "skipped"}
+    return {"status": "skipped", "reason": "no_pre_action_items"}
+
+  from scenarios.trackblazer import execute_training_items
 
   result = execute_training_items(item_keys, trigger="automatic", commit_mode=commit_mode)
   flow = result.get("trackblazer_inventory_flow") or {}
@@ -2368,6 +2374,19 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
     "result": result,
     "reason": flow.get("reason") or "trackblazer_pre_action_items_applied",
   }
+
+
+def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
+  """Run Trackblazer pre-action item flow with the given commit_mode.
+
+  commit_mode="full" — production execute: increments + confirm + followup.
+  commit_mode="dry_run" — non-destructive simulation: opens, scans, detects
+    controls, then closes without increment clicks or confirm.
+  """
+  refresh_result = _refresh_trackblazer_pre_action_inventory(state_obj, action)
+  if refresh_result.get("status") != "ready":
+    return refresh_result
+  return _execute_trackblazer_pre_action_items(state_obj, action, commit_mode=commit_mode)
 
 
 def _trackblazer_action_failure_should_block_retry(state_obj, action):
@@ -4256,6 +4275,44 @@ def maybe_review_skill_purchase(state_obj, current_action_count, race_check=Fals
   )
 
 
+def _trackblazer_planner_executor_hooks():
+  return PlannerExecutorHooks(
+    skill_purchase_plan=_skill_purchase_plan,
+    review_action_before_execution=review_action_before_execution,
+    wait_for_execute_intent=_wait_for_execute_intent,
+    run_skill_purchase_plan=lambda state_obj, action, current_action_count: _run_skill_purchase_plan(
+      state_obj,
+      action,
+      current_action_count,
+    ),
+    run_trackblazer_shop_purchases=_run_trackblazer_shop_purchases,
+    wait_for_lobby_after_shop_purchase=_wait_for_lobby_after_shop_purchase,
+    refresh_trackblazer_pre_action_inventory=_refresh_trackblazer_pre_action_inventory,
+    execute_trackblazer_pre_action_items=_execute_trackblazer_pre_action_items,
+    wait_for_lobby_after_item_use=_wait_for_lobby_after_item_use,
+    enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
+    run_planner_race_preflight=_run_planner_race_preflight,
+    resolve_post_action_resolution=_resolve_post_action_resolution,
+    update_operator_snapshot=update_operator_snapshot,
+  )
+
+
+def _trackblazer_planner_runtime_hooks():
+  return PlannerRuntimeHooks(
+    attach_skill_purchase_plan=lambda state_obj, action, current_action_count, race_check=False: _attach_skill_purchase_plan(
+      state_obj,
+      action,
+      current_action_count,
+      race_check=race_check,
+    ),
+    attach_trackblazer_pre_action_item_plan=_attach_trackblazer_pre_action_item_plan,
+    push_turn_retry_debug=_push_turn_retry_debug,
+    update_operator_snapshot=update_operator_snapshot,
+    should_retry_training_after_consecutive_warning=_should_retry_training_after_consecutive_warning,
+    prepare_training_fallback_after_consecutive_warning=_prepare_training_fallback_after_consecutive_warning,
+  )
+
+
 def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=None, sub_phase=None, ocr_debug=None, planned_clicks=None):
   while True:
     execution_intent = bot.get_execution_intent()
@@ -5386,14 +5443,6 @@ def career_lobby(dry_run_turn=False):
         update_operator_snapshot(state_obj, action, phase="recovering", message="Skipping turn, retrying.")
         info("Skipping turn, retrying...")
       else:
-        skill_result = maybe_review_skill_purchase(
-          state_obj,
-          action_count,
-          race_check=bool(action.func == "do_race"),
-          action=action,
-        )
-        if skill_result == "failed":
-          continue
         info(f"Taking action: {action.func}")
         update_pre_action_phase(
           state_obj,
@@ -5407,13 +5456,52 @@ def career_lobby(dry_run_turn=False):
           info("Dry run turn, quitting.")
           quit()
 
+        planner_runtime_result = None
+        if planner_activation.get("status") == "planner":
+          planner_runtime_result = run_trackblazer_planner_turn(
+            state_obj,
+            action,
+            action_count,
+            "Review proposed action before execution.",
+            executor_hooks=_trackblazer_planner_executor_hooks(),
+            runtime_hooks=_trackblazer_planner_runtime_hooks(),
+            sub_phase="preview_race_selection" if action.func == "do_race" else "preview_action_clicks",
+          )
+          planner_runtime_status = planner_runtime_result.get("status")
+          if planner_runtime_status == "executed":
+            record_and_finalize_turn(state_obj, action)
+            continue
+          if planner_runtime_status in {"previewed", "reassess", "blocked", "failed"}:
+            continue
+          if planner_runtime_status == "fallback_to_legacy":
+            planner_activation = {
+              "status": "fallback",
+              "reason": planner_runtime_result.get("reason") or "planner_runtime_failed",
+            }
+            update_operator_snapshot(
+              state_obj,
+              action,
+              phase="evaluating_strategy",
+              message="Planner runtime fell back to legacy execution for this turn.",
+              sub_phase="evaluate_trackblazer_race",
+              reasoning_notes=planner_activation.get("reason"),
+            )
+
         # Build a pre_run_hook that scouts the rival race list when the
         # user commits a rival-race action.  The scout opens the race list,
         # checks aptitude, and backs out.  If no suitable rival is found
         # the action reverts to the training fallback.
+        skill_result = maybe_review_skill_purchase(
+          state_obj,
+          action_count,
+          race_check=bool(action.func == "do_race"),
+          action=action,
+        )
+        if skill_result == "failed":
+          continue
         pre_run_hook = None
         if (
-          not _trackblazer_planner_mode_enabled()
+          planner_activation.get("status") != "planner"
           and action.func == "do_race"
           and action.get("prefer_rival_race")
         ):

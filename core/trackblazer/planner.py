@@ -398,6 +398,26 @@ def mark_planner_fallback(state_obj, reason):
   return payload
 
 
+def append_planner_runtime_transition(state_obj, *, step_id="", step_type="", status="", note="", details=None):
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  breadcrumbs = list(runtime_state.get("transition_breadcrumbs") or [])
+  breadcrumbs.append(
+    {
+      "turn_key": _turn_key(state_obj),
+      "step_id": str(step_id or ""),
+      "step_type": str(step_type or ""),
+      "status": str(status or ""),
+      "note": str(note or ""),
+      "details": copy.deepcopy(details or {}),
+    }
+  )
+  runtime_state["transition_breadcrumbs"] = breadcrumbs[-24:]
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  return runtime_state
+
+
 def _candidate_shop_buys(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
   detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
   held_quantities = held_quantities or {}
