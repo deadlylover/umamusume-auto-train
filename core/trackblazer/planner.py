@@ -11,6 +11,10 @@ import core.config as config
 import utils.constants as constants
 from core.actions import Action
 from core.strategies import Strategy
+from core.trackblazer.compat import (
+  capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
+  set_rival_fallback_action as _set_legacy_rival_fallback_action,
+)
 from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
 from core.trackblazer_item_use import plan_item_usage
@@ -34,7 +38,94 @@ from core.trackblazer.models import (
 PLANNER_STATE_KEY = "trackblazer_planner_state"
 PLANNER_RUNTIME_KEY = "trackblazer_planner_runtime"
 PLANNER_FORCE_FALLBACK_KEY = "_trackblazer_planner_force_fallback"
+TRACKBLAZER_RUNTIME_PATH_KEY = "trackblazer_runtime_path"
+TRACKBLAZER_RUNTIME_PATH_META_KEY = "trackblazer_runtime_path_meta"
+RUNTIME_PATH_PLANNER_RUNTIME = "planner_runtime"
+RUNTIME_PATH_PLANNER_FALLBACK_LEGACY = "planner_fallback_legacy"
+RUNTIME_PATH_LEGACY_RUNTIME = "legacy_runtime"
 PLANNER_VERSION = 3
+
+
+def _normalize_runtime_path(runtime_path: str) -> str:
+  normalized = str(runtime_path or "").strip()
+  if normalized in {"planner_runtime", "planner"}:
+    return RUNTIME_PATH_PLANNER_RUNTIME
+  if normalized in {"planner_fallback_legacy", "planner→legacy (fallback)", "planner->legacy (fallback)"}:
+    return RUNTIME_PATH_PLANNER_FALLBACK_LEGACY
+  if normalized in {"legacy_runtime", "legacy"}:
+    return RUNTIME_PATH_LEGACY_RUNTIME
+  return RUNTIME_PATH_LEGACY_RUNTIME
+
+
+def decision_path_for_runtime_path(runtime_path: str) -> str:
+  normalized = _normalize_runtime_path(runtime_path)
+  if normalized == RUNTIME_PATH_PLANNER_RUNTIME:
+    return "planner"
+  if normalized == RUNTIME_PATH_PLANNER_FALLBACK_LEGACY:
+    return "planner→legacy (fallback)"
+  return "legacy"
+
+
+def runtime_path_for_decision_path(decision_path: str) -> str:
+  return _normalize_runtime_path(decision_path)
+
+
+def get_trackblazer_runtime_path(state_obj, default=RUNTIME_PATH_LEGACY_RUNTIME) -> str:
+  if not isinstance(state_obj, dict):
+    return _normalize_runtime_path(default)
+  runtime_path = state_obj.get(TRACKBLAZER_RUNTIME_PATH_KEY)
+  if runtime_path:
+    return _normalize_runtime_path(runtime_path)
+  runtime_state = state_obj.get(PLANNER_RUNTIME_KEY) or {}
+  runtime_path = runtime_state.get("runtime_path")
+  if runtime_path:
+    return _normalize_runtime_path(runtime_path)
+  return _normalize_runtime_path(default)
+
+
+def set_trackblazer_runtime_path(state_obj, runtime_path, *, reason="", source=""):
+  if not isinstance(state_obj, dict):
+    return {}
+  previous_runtime_path = _normalize_runtime_path(
+    state_obj.get(TRACKBLAZER_RUNTIME_PATH_KEY)
+    or ((state_obj.get(PLANNER_RUNTIME_KEY) or {}).get("runtime_path"))
+    or RUNTIME_PATH_LEGACY_RUNTIME
+  )
+  previous_meta = copy.deepcopy(state_obj.get(TRACKBLAZER_RUNTIME_PATH_META_KEY) or {})
+  normalized_path = _normalize_runtime_path(runtime_path)
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  runtime_state["runtime_path"] = normalized_path
+  runtime_state["runtime_path_reason"] = str(reason or "")
+  runtime_state["runtime_path_source"] = str(source or "")
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  state_obj[TRACKBLAZER_RUNTIME_PATH_KEY] = normalized_path
+  state_obj[TRACKBLAZER_RUNTIME_PATH_META_KEY] = {
+    "runtime_path": normalized_path,
+    "reason": str(reason or ""),
+    "source": str(source or ""),
+    "turn_key": _turn_key(state_obj),
+  }
+  if (
+    previous_runtime_path != normalized_path
+    or str(previous_meta.get("reason") or "") != str(reason or "")
+    or str(previous_meta.get("source") or "") != str(source or "")
+  ):
+    bot.push_debug_history({
+      "event": "planner_boundary",
+      "asset": "runtime_path",
+      "result": normalized_path,
+      "context": "trackblazer_planner",
+      "runtime_path": normalized_path,
+      "previous_runtime_path": previous_runtime_path,
+      "source": str(source or ""),
+      "reason": str(reason or ""),
+      "note": (
+        f"{previous_runtime_path} -> {normalized_path}"
+        if previous_runtime_path != normalized_path else
+        f"{normalized_path} ({source or 'runtime_path_update'})"
+      ),
+    })
+  return state_obj[TRACKBLAZER_RUNTIME_PATH_META_KEY]
 
 
 def _normalize_for_hash(value):
@@ -175,6 +266,13 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     return PlannerRuntimeState().to_dict()
 
   existing = copy.deepcopy(state_obj.get(PLANNER_RUNTIME_KEY) or {})
+  runtime_path_meta = copy.deepcopy(state_obj.get(TRACKBLAZER_RUNTIME_PATH_META_KEY) or {})
+  runtime_path = (
+    runtime_path_meta.get("runtime_path")
+    or state_obj.get(TRACKBLAZER_RUNTIME_PATH_KEY)
+    or existing.get("runtime_path")
+    or RUNTIME_PATH_LEGACY_RUNTIME
+  )
   pending_skill_scan = BackgroundSkillScanState(**dict(existing.get("pending_skill_scan") or {}))
   runtime = PlannerRuntimeState(
     turn_key=str(existing.get("turn_key") or _turn_key(state_obj)),
@@ -183,10 +281,28 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     pending_skill_scan=pending_skill_scan,
     fallback_count=int(existing.get("fallback_count") or 0),
     last_fallback_reason=str(existing.get("last_fallback_reason") or ""),
+    runtime_path=_normalize_runtime_path(runtime_path),
+    runtime_path_reason=str(
+      runtime_path_meta.get("reason")
+      or existing.get("runtime_path_reason")
+      or ""
+    ),
+    runtime_path_source=str(
+      runtime_path_meta.get("source")
+      or existing.get("runtime_path_source")
+      or ""
+    ),
     transition_breadcrumbs=list(existing.get("transition_breadcrumbs") or []),
   )
   runtime_payload = runtime.to_dict()
   state_obj[PLANNER_RUNTIME_KEY] = runtime_payload
+  state_obj[TRACKBLAZER_RUNTIME_PATH_KEY] = runtime_payload.get("runtime_path") or RUNTIME_PATH_LEGACY_RUNTIME
+  state_obj[TRACKBLAZER_RUNTIME_PATH_META_KEY] = {
+    "runtime_path": runtime_payload.get("runtime_path") or RUNTIME_PATH_LEGACY_RUNTIME,
+    "reason": runtime_payload.get("runtime_path_reason") or "",
+    "source": runtime_payload.get("runtime_path_source") or "",
+    "turn_key": _turn_key(state_obj),
+  }
   return runtime_payload
 
 
@@ -235,62 +351,6 @@ def _capture_action_payload(action, state_obj=None) -> Dict[str, Any]:
   if isinstance(state_obj, dict):
     payload["energy_level"] = state_obj.get("energy_level")
     payload["year"] = state_obj.get("year")
-  return payload
-
-
-def _capture_fallback_action_payload(action, state_obj=None) -> Dict[str, Any]:
-  payload = _capture_action_payload(action, state_obj=state_obj)
-  fallback_func = _action_value(action, "_rival_fallback_func")
-
-  if fallback_func and fallback_func != "do_race":
-    payload["func"] = fallback_func
-    if fallback_func == "do_training":
-      payload["training_name"] = (
-        _action_value(action, "_rival_fallback_training_name")
-        or payload.get("training_name")
-      )
-      payload["training_data"] = copy.deepcopy(
-        _action_value(action, "_rival_fallback_training_data")
-        or payload.get("training_data")
-        or {}
-      )
-    payload["race_name"] = None
-    payload["race_image_path"] = None
-    payload["race_grade_target"] = None
-    payload["prefer_rival_race"] = False
-    payload["fallback_non_rival_race"] = False
-    payload["scheduled_race"] = False
-    payload["trackblazer_lobby_scheduled_race"] = False
-    payload["trackblazer_climax_race_day"] = False
-    payload["race_mission_available"] = False
-    payload["is_race_day"] = False
-    return payload
-
-  if payload.get("func") == "do_race":
-    training_name = (
-      _action_value(action, "_rival_fallback_training_name")
-      or payload.get("training_name")
-    )
-    training_data = copy.deepcopy(
-      _action_value(action, "_rival_fallback_training_data")
-      or payload.get("training_data")
-      or {}
-    )
-    if training_name and training_data:
-      payload["func"] = "do_training"
-      payload["training_name"] = training_name
-      payload["training_data"] = training_data
-      payload["race_name"] = None
-      payload["race_image_path"] = None
-      payload["race_grade_target"] = None
-      payload["prefer_rival_race"] = False
-      payload["fallback_non_rival_race"] = False
-      payload["scheduled_race"] = False
-      payload["trackblazer_lobby_scheduled_race"] = False
-      payload["trackblazer_climax_race_day"] = False
-      payload["race_mission_available"] = False
-      payload["is_race_day"] = False
-
   return payload
 
 
@@ -515,6 +575,12 @@ def mark_planner_fallback(state_obj, reason):
   runtime_state["fallback_count"] = int(runtime_state.get("fallback_count") or 0) + 1
   runtime_state["last_fallback_reason"] = str(reason or "planner_error")
   state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  set_trackblazer_runtime_path(
+    state_obj,
+    RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+    reason=reason,
+    source="mark_planner_fallback",
+  )
   payload = {
     "turn_key": _turn_key(state_obj),
     "reason": str(reason or "planner_error"),
@@ -770,7 +836,7 @@ def _planner_selected_action_payload(
 def _build_planner_race_plan(state_obj, action):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   base_action = _capture_action_payload(action, state_obj=state_obj)
-  base_fallback = _capture_fallback_action_payload(action, state_obj=state_obj)
+  base_fallback = _capture_legacy_rival_fallback_payload(action)
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
@@ -1133,10 +1199,14 @@ def _build_planner_race_plan(state_obj, action):
     "available_actions": list(base_action.get("available_actions") or []),
   }
 
-  if action_payload["func"] == "do_race":
-    action_payload["options"]["_rival_fallback_func"] = base_fallback.get("func")
-    action_payload["options"]["_rival_fallback_training_name"] = base_fallback.get("training_name")
-    action_payload["options"]["_rival_fallback_training_data"] = copy.deepcopy(base_fallback.get("training_data") or {})
+  legacy_fallback_branches = {
+    "optional_rival_race",
+    "optional_fallback_race",
+    "goal_race",
+    "mission_race",
+  }
+  if action_payload["func"] == "do_race" and branch_kind in legacy_fallback_branches:
+    action_payload["compatibility_fallback_payload"] = copy.deepcopy(base_fallback)
 
   if existing_rival_scout:
     race_scout = {
@@ -2088,10 +2158,12 @@ def sync_turn_plan_execution_contract(state_obj, action, turn_plan: TurnPlan) ->
 def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
   planner_state = plan_once(state_obj, action, limit=8)
   turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
-  turn_plan.decision_path = str(decision_path or "legacy")
+  runtime_path = runtime_path_for_decision_path(str(decision_path or "legacy"))
+  turn_plan.decision_path = decision_path_for_runtime_path(runtime_path)
   turn_plan.planner_metadata = {
     **dict(turn_plan.planner_metadata or {}),
     "decision_path": turn_plan.decision_path,
+    "runtime_path": runtime_path,
     "fallback_reason": str(reason or ""),
   }
   turn_plan = sync_turn_plan_execution_contract(state_obj, action, turn_plan)
@@ -2099,6 +2171,12 @@ def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
   planner_state["turn_plan"] = turn_plan.to_snapshot()
   if isinstance(state_obj, dict):
     state_obj[PLANNER_STATE_KEY] = planner_state
+    set_trackblazer_runtime_path(
+      state_obj,
+      runtime_path,
+      reason=reason,
+      source="set_turn_plan_decision_path",
+    )
   if turn_plan.decision_path == "planner":
     apply_turn_plan_action_payload(action, turn_plan)
     planner_state["turn_plan"] = turn_plan.to_snapshot()
@@ -2124,6 +2202,7 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
     race_plan = dict(turn_plan.race_plan or {})
     race_payload = dict(race_plan.get("action_payload") or {})
     selected_payload = dict(race_payload.get("options") or {})
+    compatibility_fallback_payload = dict(race_payload.get("compatibility_fallback_payload") or {})
     target_func = race_payload.get("func") or selected_payload.get("func") or _action_func(action)
     for key in (
       "race_name",
@@ -2166,6 +2245,13 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
       available_actions = [target_func] + [name for name in available_actions if name != target_func]
     if hasattr(action, "available_actions"):
       action.available_actions = available_actions
+    if compatibility_fallback_payload:
+      _set_legacy_rival_fallback_action(
+        action,
+        func=compatibility_fallback_payload.get("func"),
+        training_name=compatibility_fallback_payload.get("training_name"),
+        training_data=copy.deepcopy(compatibility_fallback_payload.get("training_data") or {}),
+      )
 
     turn_plan.review_context = {
       **dict(turn_plan.review_context or {}),
@@ -2318,7 +2404,16 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
   state_obj[PLANNER_RUNTIME_KEY] = runtime_state
   planner_race_plan = _build_planner_race_plan(state_obj, action)
   forced_fallback = _planner_force_fallback(state_obj)
-  decision_path = "planner→legacy (fallback)" if forced_fallback else "legacy"
+  runtime_path = get_trackblazer_runtime_path(state_obj, default=RUNTIME_PATH_LEGACY_RUNTIME)
+  if forced_fallback:
+    runtime_path = RUNTIME_PATH_PLANNER_FALLBACK_LEGACY
+    set_trackblazer_runtime_path(
+      state_obj,
+      runtime_path,
+      reason=forced_fallback.get("reason") or "",
+      source="planner_force_fallback",
+    )
+  decision_path = decision_path_for_runtime_path(runtime_path)
 
   observed = hydrate_observed_turn_state(state_obj, action=action, planner_state={
     "freshness": freshness.to_dict(),
@@ -2383,7 +2478,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "race_plan": planner_race_plan,
       "warning_plan": planner_race_plan.get("warning_plan") or {},
       "fallback_policy": planner_race_plan.get("fallback_policy") or {},
-      "use_planner_race_sections": False,
+      "use_planner_race_sections": True,
     },
   )
   ranked_trainings = build_ranked_training_snapshot(
@@ -2467,6 +2562,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     planner_metadata={
       "planner_version": PLANNER_VERSION,
       "decision_path": decision_path,
+      "runtime_path": runtime_path,
       "inventory_source": inventory_source,
       "runtime": copy.deepcopy(runtime_state),
       "fallback_reason": forced_fallback.get("reason") if forced_fallback else "",

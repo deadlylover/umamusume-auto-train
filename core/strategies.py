@@ -7,6 +7,10 @@ from core.trackblazer_race_logic import (
   get_race_lookahead_energy_advice,
   get_trackblazer_training_score,
 )
+from core.trackblazer.compat import (
+  remember_training_fallback as remember_trackblazer_training_fallback,
+  set_rival_fallback_action,
+)
 from utils.shared import check_status_effects
 from core.actions import Action
 from core.recognizer import compare_brightness
@@ -25,14 +29,7 @@ def _optional_race_blocked(state):
 
 
 def _remember_training_fallback(action):
-  if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
-    return
-  training_name = action.get("training_name")
-  training_data = action.get("training_data")
-  if training_name:
-    action["_rival_fallback_training_name"] = training_name
-  if isinstance(training_data, dict) and training_data:
-    action["_rival_fallback_training_data"] = training_data
+  remember_trackblazer_training_fallback(action)
 
 class Strategy:
 
@@ -539,9 +536,12 @@ class Strategy:
             f"(training score {training_score} <= {min_score})"
           )
           return action
-        action["_rival_fallback_func"] = "do_training"
-        action["_rival_fallback_training_name"] = action.get("training_name")
-        action["_rival_fallback_training_data"] = action.get("training_data")
+        set_rival_fallback_action(
+          action,
+          func="do_training",
+          training_name=action.get("training_name"),
+          training_data=action.get("training_data"),
+        )
         action.func = "do_race"
         action["race_name"] = "any"
         action["prefer_rival_race"] = True

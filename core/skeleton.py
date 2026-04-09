@@ -31,12 +31,18 @@ from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.planner import (
   PLANNER_RUNTIME_KEY,
   PLANNER_STATE_KEY,
+  RUNTIME_PATH_LEGACY_RUNTIME,
+  RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+  RUNTIME_PATH_PLANNER_RUNTIME,
+  decision_path_for_runtime_path,
   apply_turn_plan_action_payload,
   build_review_planned_actions,
   clear_planner_fallback,
+  get_trackblazer_runtime_path,
   get_turn_plan,
   mark_planner_fallback,
   plan_once,
+  set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
   sync_turn_plan_execution_contract,
   update_turn_discussion_dual_run,
@@ -50,6 +56,15 @@ from core.trackblazer.models import (
 )
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 from core.trackblazer.review import build_ranked_training_snapshot as _build_trackblazer_ranked_training_snapshot
+from core.trackblazer.compat import (
+  apply_rival_fallback_payload as _apply_legacy_rival_fallback_payload,
+  capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
+  clear_consecutive_warning_fields as _clear_legacy_consecutive_warning_fields,
+  clear_optional_race_action_fields as _clear_legacy_optional_race_action_fields,
+  has_training_fallback as _legacy_has_training_fallback,
+  hydrate_action_from_turn_plan as _hydrate_legacy_action_from_turn_plan,
+  set_rival_fallback_action as _set_legacy_rival_fallback_action,
+)
 from core.runtime_flow import (
   PHASE_POST_ACTION_RESOLUTION,
   SUB_PHASE_POST_ACTION_RESOLUTION,
@@ -1156,20 +1171,7 @@ def _action_option_pop(action, key):
 
 
 def _clear_optional_race_action_fields(action):
-  for key in (
-    "race_name",
-    "race_image_path",
-    "race_mission_available",
-    "prioritize_missions_over_g1",
-    "scheduled_race",
-    "trackblazer_lobby_scheduled_race",
-    "hammer_spendable",
-    "prefer_rival_race",
-    "race_grade_target",
-    "planner_race_warning_policy",
-    "trackblazer_planner_race",
-  ):
-    _action_option_pop(action, key)
+  _clear_legacy_optional_race_action_fields(action)
 
 
 def _trackblazer_planner_mode_enabled():
@@ -1181,9 +1183,19 @@ def _trackblazer_planner_mode_enabled():
 
 def _activate_trackblazer_planner_turn(state_obj, action):
   if not _trackblazer_planner_mode_enabled():
+    set_trackblazer_runtime_path(
+      state_obj,
+      RUNTIME_PATH_LEGACY_RUNTIME,
+      source="planner_mode_disabled",
+    )
     return {"status": "disabled"}
   try:
     clear_planner_fallback(state_obj)
+    set_trackblazer_runtime_path(
+      state_obj,
+      RUNTIME_PATH_PLANNER_RUNTIME,
+      source="planner_turn_activation",
+    )
     planner_state, turn_plan = set_turn_plan_decision_path(state_obj, action, "planner")
     return {
       "status": "planner",
@@ -1194,6 +1206,12 @@ def _activate_trackblazer_planner_turn(state_obj, action):
     reason = f"planner_race_cutover_failed: {exc}"
     warning(f"[TB_PLANNER] {reason}")
     mark_planner_fallback(state_obj, reason)
+    set_trackblazer_runtime_path(
+      state_obj,
+      RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+      reason=reason,
+      source="planner_turn_activation",
+    )
     try:
       set_turn_plan_decision_path(state_obj, action, "planner→legacy (fallback)", reason=reason)
     except Exception:
@@ -1227,31 +1245,10 @@ def _operator_race_gate_message(gate, context="racing"):
 
 
 def _revert_optional_race_to_fallback(action):
-  fallback_func = _action_value(action, "_rival_fallback_func")
-  if not fallback_func or fallback_func == "do_race":
+  fallback_payload = _capture_legacy_rival_fallback_payload(action)
+  if fallback_payload.get("func") in ("", None, "do_race"):
     return False
-  if isinstance(action, dict):
-    action["func"] = fallback_func
-  else:
-    action.func = fallback_func
-  if _action_value(action, "_rival_fallback_training_name"):
-    action["training_name"] = _action_value(action, "_rival_fallback_training_name")
-  if _action_value(action, "_rival_fallback_training_data"):
-    action["training_data"] = _action_value(action, "_rival_fallback_training_data")
-  _clear_optional_race_action_fields(action)
-  return True
-
-
-def _trackblazer_has_training_fallback(action):
-  training_name = (
-    _action_value(action, "_rival_fallback_training_name")
-    or _action_value(action, "training_name")
-  )
-  training_data = (
-    _action_value(action, "_rival_fallback_training_data")
-    or _action_value(action, "training_data")
-  )
-  return bool(training_name) and isinstance(training_data, dict) and bool(training_data)
+  return _apply_legacy_rival_fallback_payload(action, fallback_payload)
 
 
 def _should_retry_training_after_consecutive_warning(action):
@@ -1262,34 +1259,35 @@ def _should_retry_training_after_consecutive_warning(action):
   item_context = _trackblazer_item_use_context(action)
   if not isinstance(item_context, dict) or not item_context.get("energy_rescue"):
     return False
-  return _trackblazer_has_training_fallback(action)
+  return _legacy_has_training_fallback(action)
 
 
 def _prepare_training_fallback_after_consecutive_warning(action):
-  if not _trackblazer_has_training_fallback(action):
+  if not _legacy_has_training_fallback(action):
     return False
 
-  training_name = (
-    _action_value(action, "_rival_fallback_training_name")
-    or _action_value(action, "training_name")
-  )
-  training_data = (
-    _action_value(action, "_rival_fallback_training_data")
-    or _action_value(action, "training_data")
-  )
+  fallback_payload = _capture_legacy_rival_fallback_payload(action)
+  training_name = fallback_payload.get("training_name")
+  training_data = fallback_payload.get("training_data")
 
   if not training_name or not isinstance(training_data, dict) or not training_data:
     return False
 
-  action["_rival_fallback_func"] = "do_training"
-  action["_rival_fallback_training_name"] = training_name
-  action["_rival_fallback_training_data"] = training_data
-  action["training_name"] = training_name
-  action["training_data"] = training_data
-  if isinstance(action, dict):
-    action["func"] = "do_training"
-  else:
-    action.func = "do_training"
+  if not _apply_legacy_rival_fallback_payload(
+    action,
+    {
+      "func": "do_training",
+      "training_name": training_name,
+      "training_data": copy.deepcopy(training_data),
+    },
+  ):
+    return False
+  _set_legacy_rival_fallback_action(
+    action,
+    func="do_training",
+    training_name=training_name,
+    training_data=copy.deepcopy(training_data),
+  )
 
   race_decision = _action_value(action, "trackblazer_race_decision") or {}
   if isinstance(race_decision, dict):
@@ -1304,13 +1302,7 @@ def _prepare_training_fallback_after_consecutive_warning(action):
       "race_available": False,
     }
 
-  _clear_optional_race_action_fields(action)
-  for key in (
-    "_consecutive_warning_force_rest",
-    "_consecutive_warning_cancelled",
-    "_consecutive_warning_cancel_reason",
-  ):
-    _action_option_pop(action, key)
+  _clear_legacy_consecutive_warning_fields(action)
 
   available_actions = list(getattr(action, "available_actions", []) or [])
   if "do_training" in available_actions:
@@ -1355,35 +1347,6 @@ def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None
     planned_clicks=planned_clicks,
   )
   return "blocked"
-
-
-def _planner_race_fallback_target(action):
-  fallback_func = _action_value(action, "_rival_fallback_func")
-  if not fallback_func or fallback_func == "do_race":
-    fallback_func = "do_training" if _action_value(action, "_rival_fallback_training_name") else "do_rest"
-  payload = {
-    "func": fallback_func,
-    "training_name": _action_value(action, "_rival_fallback_training_name"),
-    "training_data": copy.deepcopy(_action_value(action, "_rival_fallback_training_data") or {}),
-  }
-  return payload
-
-
-def _apply_planner_race_fallback_action(action, fallback_payload):
-  fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
-  target_func = fallback_payload.get("func")
-  if not target_func:
-    return False
-  action.func = target_func
-  if target_func == "do_training":
-    training_name = fallback_payload.get("training_name")
-    training_data = copy.deepcopy(fallback_payload.get("training_data") or {})
-    if training_name:
-      action["training_name"] = training_name
-    if training_data:
-      action["training_data"] = training_data
-  _clear_optional_race_action_fields(action)
-  return True
 
 
 def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
@@ -1435,8 +1398,8 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     {},
   )
   if not scout_fallback:
-    scout_fallback = _planner_race_fallback_target(action)
-  if _apply_planner_race_fallback_action(action, scout_fallback):
+    scout_fallback = _capture_legacy_rival_fallback_payload(action)
+  if _apply_legacy_rival_fallback_payload(action, scout_fallback):
     update_operator_snapshot(
       state_obj,
       action,
@@ -2091,10 +2054,7 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
     return action
 
-  planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
-  turn_plan = get_turn_plan(state_obj, action, planner_state=planner_state, limit=8)
-  apply_turn_plan_action_payload(action, turn_plan)
-  return action
+  return _hydrate_legacy_action_from_turn_plan(state_obj, action, limit=8)
 
 
 def _skill_purchase_preview_key(current_action_count, context):
@@ -3614,28 +3574,49 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer")
     and bot.get_trackblazer_use_new_planner_enabled()
   )
+  runtime_path = RUNTIME_PATH_LEGACY_RUNTIME
+  runtime_path_meta = {}
   if planner_turn_plan is not None:
     forced_fallback = dict((state_obj or {}).get("_trackblazer_planner_force_fallback") or {})
-    decision_path = (
-      "planner→legacy (fallback)"
-      if planner_mode_enabled and forced_fallback.get("turn_key") == f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}" else
-      "planner"
-      if planner_mode_enabled else
-      "legacy"
+    runtime_path = get_trackblazer_runtime_path(
+      state_obj,
+      default=RUNTIME_PATH_LEGACY_RUNTIME,
     )
+    if (
+      planner_mode_enabled
+      and forced_fallback.get("turn_key") == f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}"
+    ):
+      runtime_path_meta = set_trackblazer_runtime_path(
+        state_obj,
+        RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+        reason=forced_fallback.get("reason") or "",
+        source="build_review_snapshot",
+      )
+      runtime_path = runtime_path_meta.get("runtime_path") or RUNTIME_PATH_PLANNER_FALLBACK_LEGACY
+    decision_path = decision_path_for_runtime_path(runtime_path)
     planner_turn_plan.decision_path = decision_path
     planner_turn_plan.planner_metadata = {
       **dict(planner_turn_plan.planner_metadata or {}),
       "decision_path": decision_path,
+      "runtime_path": runtime_path,
       "use_new_planner_enabled": planner_mode_enabled,
-      "fallback_reason": forced_fallback.get("reason") if decision_path == "planner→legacy (fallback)" else "",
+      "fallback_reason": (
+        forced_fallback.get("reason")
+        if decision_path == "planner→legacy (fallback)" else
+        (runtime_path_meta.get("reason") if isinstance(runtime_path_meta, dict) else "")
+      ) or "",
     }
     planner_state["decision_path"] = decision_path
+    planner_state["runtime_path"] = runtime_path
     planner_turn_plan = sync_turn_plan_execution_contract(state_obj, action, planner_turn_plan)
     planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
     if isinstance(state_obj, dict):
       state_obj[PLANNER_STATE_KEY] = planner_state
-  if planner_turn_plan is not None and hasattr(action, "__setitem__"):
+  if (
+    planner_turn_plan is not None
+    and planner_turn_plan.decision_path == "planner"
+    and hasattr(action, "__setitem__")
+  ):
     apply_turn_plan_action_payload(action, planner_turn_plan)
   planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})
   planner_review_context = dict((planner_turn_plan.review_context if planner_turn_plan else {}) or {})
@@ -3704,6 +3685,11 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       limit=10,
     )
     state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
+    state_summary["trackblazer_runtime_path"] = get_trackblazer_runtime_path(
+      state_obj,
+      default=RUNTIME_PATH_LEGACY_RUNTIME,
+    )
+    state_summary["trackblazer_runtime_path_meta"] = state_obj.get("trackblazer_runtime_path_meta") or {}
     state_summary["trackblazer_planner_runtime"] = state_obj.get(PLANNER_RUNTIME_KEY)
     state_summary["trackblazer_planner_state"] = planner_state or state_obj.get(PLANNER_STATE_KEY)
   state_summary["skill_purchase_check"] = {
@@ -3816,6 +3802,51 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     )
     turn_discussion_text = planner_dual_run_comparison.get("planner_turn_discussion") or turn_discussion_text
     state_summary["trackblazer_planner_state"] = state_obj.get(PLANNER_STATE_KEY)
+    runtime_path_for_debug = get_trackblazer_runtime_path(
+      state_obj,
+      default=RUNTIME_PATH_LEGACY_RUNTIME,
+    )
+    decision_path_for_debug = (
+      planner_turn_plan.decision_path
+      if planner_turn_plan is not None else
+      decision_path_for_runtime_path(runtime_path_for_debug)
+    )
+    action_label = selected_action.get("func") or "unknown"
+    if action_label == "do_training" and selected_action.get("training_name"):
+      action_label = f"{action_label}({selected_action.get('training_name')})"
+    elif action_label == "do_race" and selected_action.get("race_name"):
+      action_label = f"{action_label}({selected_action.get('race_name')})"
+    click_labels = [
+      str(entry.get("label") or "click")
+      for entry in (resolved_planned_clicks or [])
+      if isinstance(entry, dict) and (entry.get("label") or "").strip()
+    ]
+    planner_snapshot_note = (
+      f"action={action_label} | "
+      f"clicks={' -> '.join(click_labels[:4]) if click_labels else '-'}"
+    )
+    planner_debug_key = (
+      f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}",
+      str(sub_phase or "idle"),
+      runtime_path_for_debug,
+      decision_path_for_debug,
+      action_label,
+      tuple(click_labels[:4]),
+      bool((state_obj.get("trackblazer_runtime_path_meta") or {}).get("reason")),
+    )
+    if state_obj.get("_trackblazer_last_review_debug_key") != planner_debug_key:
+      state_obj["_trackblazer_last_review_debug_key"] = planner_debug_key
+      bot.push_debug_history({
+        "event": "planner_snapshot",
+        "asset": "review_surface",
+        "result": runtime_path_for_debug,
+        "context": "trackblazer_review",
+        "runtime_path": runtime_path_for_debug,
+        "decision_path": decision_path_for_debug,
+        "note": planner_snapshot_note,
+        "reason": ((state_obj.get("trackblazer_runtime_path_meta") or {}).get("reason") or ""),
+        "source": ((state_obj.get("trackblazer_runtime_path_meta") or {}).get("source") or ""),
+      })
   return {
     "scenario_name": constants.SCENARIO_NAME or "default",
     "turn_label": f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
@@ -3829,6 +3860,16 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "trackblazer_inventory": state_obj.get("trackblazer_inventory") if isinstance(state_obj, dict) else None,
     "trackblazer_inventory_pre_shop": state_obj.get("trackblazer_inventory_pre_shop") if isinstance(state_obj, dict) else None,
     "trackblazer_shop_items": state_obj.get("trackblazer_shop_items") if isinstance(state_obj, dict) else None,
+    "trackblazer_runtime_path": (
+      get_trackblazer_runtime_path(state_obj, default=RUNTIME_PATH_LEGACY_RUNTIME)
+      if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer") else
+      None
+    ),
+    "trackblazer_runtime_path_meta": (
+      state_obj.get("trackblazer_runtime_path_meta")
+      if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer") else
+      None
+    ),
     "trackblazer_planner_runtime": state_obj.get(PLANNER_RUNTIME_KEY) if isinstance(state_obj, dict) else None,
     "trackblazer_planner_state": state_obj.get(PLANNER_STATE_KEY) if isinstance(state_obj, dict) else None,
     "planner_dual_run_comparison": planner_dual_run_comparison,
@@ -5267,9 +5308,12 @@ def career_lobby(dry_run_turn=False):
         action["trackblazer_race_decision"] = race_decision
 
         if race_decision.get("prefer_rest_over_weak_training") and action.func != "do_rest":
-          action["_rival_fallback_func"] = action.func
-          action["_rival_fallback_training_name"] = action.get("training_name")
-          action["_rival_fallback_training_data"] = action.get("training_data")
+          _set_legacy_rival_fallback_action(
+            action,
+            func=action.func,
+            training_name=action.get("training_name"),
+            training_data=action.get("training_data"),
+          )
           action.func = "do_rest"
           action["energy_level"] = state_obj.get("energy_level", 0)
           action["disable_skip_turn_fallback"] = True
@@ -5288,9 +5332,12 @@ def career_lobby(dry_run_turn=False):
 
         elif race_decision.get("should_race") and action.func != "do_race":
           # Save fallback in case rival scout fails and we need to revert.
-          action["_rival_fallback_func"] = action.func
-          action["_rival_fallback_training_name"] = action.get("training_name")
-          action["_rival_fallback_training_data"] = action.get("training_data")
+          _set_legacy_rival_fallback_action(
+            action,
+            func=action.func,
+            training_name=action.get("training_name"),
+            training_data=action.get("training_data"),
+          )
           action.func = "do_race"
           action["race_name"] = race_decision.get("race_name") or "any"
           action["race_grade_target"] = race_decision.get("race_tier_target")
@@ -5323,15 +5370,9 @@ def career_lobby(dry_run_turn=False):
           # but the Trackblazer gate says train. Revert if fallback data is available.
           fallback_func = action.get("_rival_fallback_func")
           if fallback_func:
-            action.func = fallback_func
-            if action.get("_rival_fallback_training_name"):
-              action["training_name"] = action["_rival_fallback_training_name"]
-            if action.get("_rival_fallback_training_data"):
-              action["training_data"] = action["_rival_fallback_training_data"]
-            action.options.pop("race_name", None)
-            action.options.pop("prefer_rival_race", None)
-            action.options.pop("race_grade_target", None)
-            info(f"[TB_RACE] Race gate vetoed race, reverted to {fallback_func}: {race_decision['reason']}")
+            fallback_payload = _capture_legacy_rival_fallback_payload(action)
+            if _apply_legacy_rival_fallback_payload(action, fallback_payload):
+              info(f"[TB_RACE] Race gate vetoed race, reverted to {fallback_func}: {race_decision['reason']}")
           update_operator_snapshot(
             state_obj, action,
             phase="evaluating_strategy",
@@ -5524,16 +5565,13 @@ def career_lobby(dry_run_turn=False):
             scout_result = scout_rival_race()
             action["rival_scout"] = scout_result
             if not scout_result.get("rival_found"):
-              fallback_func = action.get("_rival_fallback_func", "do_training")
+              fallback_payload = _capture_legacy_rival_fallback_payload(action)
+              fallback_func = fallback_payload.get("func") or "do_training"
               info(f"[RIVAL] No rival race found, reverting to {fallback_func}.")
-              action.func = fallback_func
-              if action.get("_rival_fallback_training_name"):
-                action["training_name"] = action["_rival_fallback_training_name"]
-              if action.get("_rival_fallback_training_data"):
-                action["training_data"] = action["_rival_fallback_training_data"]
-              action.options.pop("race_name", None)
-              action.options.pop("prefer_rival_race", None)
-              update_operator_snapshot(state_obj, action, phase="executing_action", message="No rival race available. Reverted to training.")
+              if _apply_legacy_rival_fallback_payload(action, fallback_payload):
+                update_operator_snapshot(state_obj, action, phase="executing_action", message="No rival race available. Reverted to training.")
+              else:
+                update_operator_snapshot(state_obj, action, phase="executing_action", message="No rival race available and no fallback payload was present.")
             else:
               info(f"[RIVAL] Rival race found! Proceeding with race.")
               update_operator_snapshot(state_obj, action, phase="executing_action", message="Rival race confirmed. Proceeding.")
@@ -5589,7 +5627,7 @@ def career_lobby(dry_run_turn=False):
               "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
               "Prioritizing rest fallback."
             )
-            action["_rival_fallback_func"] = "do_rest"
+            _set_legacy_rival_fallback_action(action, func="do_rest")
             if "do_rest" in action.available_actions:
               action.available_actions = (
                 ["do_rest"] + [name for name in action.available_actions if name != "do_rest"]

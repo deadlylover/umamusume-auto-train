@@ -371,7 +371,7 @@ class OperatorConsole:
     ).pack(side=tk.LEFT, padx=(0, 8))
     tk.Label(
       tertiary_controls,
-      text="On = planner path for Turn Discussion/start-bot flow. Execution still uses legacy runner.",
+      text="On = planner path for review/runtime. Planner/legacy boundaries are logged in Debug History.",
       fg="#9aa4ad",
       bg="#101418",
     ).pack(side=tk.LEFT, padx=(0, 8))
@@ -785,6 +785,10 @@ class OperatorConsole:
       clicks_completed = entry.get("clicks_completed")
       total = entry.get("total")
       reason = entry.get("reason", "")
+      runtime_path = entry.get("runtime_path", "")
+      previous_runtime_path = entry.get("previous_runtime_path", "")
+      decision_path = entry.get("decision_path", "")
+      source = entry.get("source", "")
       reasons = entry.get("reasons") or []
       trigger = entry.get("trigger", "")
       before_phase = entry.get("before_phase", "")
@@ -801,6 +805,14 @@ class OperatorConsole:
         details.append(f"reason={reason}")
       if reasons:
         details.append(f"reasons={','.join(str(value) for value in reasons)}")
+      if runtime_path:
+        details.append(f"path={runtime_path}")
+      if previous_runtime_path and previous_runtime_path != runtime_path:
+        details.append(f"prev={previous_runtime_path}")
+      if decision_path:
+        details.append(f"decision={decision_path}")
+      if source:
+        details.append(f"source={source}")
       if trigger:
         details.append(f"trigger={trigger}")
       if before_phase:

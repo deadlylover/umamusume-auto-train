@@ -109,9 +109,11 @@ def _bare_race_action():
   return action
 
 
-def _snapshot(state_obj, action, note):
+def _snapshot(state_obj, action, note, expected_path="planner_runtime"):
   snapshot = build_review_snapshot(state_obj, action, reasoning_notes=note, ocr_debug=[])
-  assert "Path: planner" in snapshot.get("turn_discussion_text", ""), note
+  assert f"Path: {expected_path}" in snapshot.get("turn_discussion_text", ""), note
+  assert snapshot.get("trackblazer_runtime_path") == expected_path, note
+  assert (snapshot.get("state_summary") or {}).get("trackblazer_runtime_path") == expected_path, note
   return snapshot
 
 
@@ -155,13 +157,14 @@ def main():
       reasoning_notes="direct_pre_debut_snapshot",
       ocr_debug=[],
     )
+    assert "Path: legacy_runtime" in direct_pre_debut_snapshot.get("turn_discussion_text", "")
+    assert direct_pre_debut_snapshot.get("trackblazer_runtime_path") == "legacy_runtime"
     direct_pre_debut_plan = (direct_pre_debut_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
-    assert (direct_pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_training"
-    assert ((direct_pre_debut_plan.get("item_plan") or {}).get("selected_action_binding") or {}).get("func") == "do_training"
-    assert ((direct_pre_debut_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
-    assert not any(
-      label.startswith("Open race menu")
-      for label in [entry.get("label") or "" for entry in (direct_pre_debut_snapshot.get("planned_clicks") or [])]
+    assert (direct_pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_race"
+    assert ((direct_pre_debut_plan.get("item_plan") or {}).get("selected_action_binding") or {}).get("func") == "do_race"
+    assert any(
+      (entry.get("label") or "").startswith("Open race menu")
+      for entry in (direct_pre_debut_snapshot.get("planned_clicks") or [])
     )
 
     legacy_rest_pre_debut_state = _base_state()
@@ -317,7 +320,8 @@ def main():
       reasoning_notes="planner_fallback_label",
       ocr_debug=[],
     )
-    assert "Path: planner→legacy (fallback)" in fallback_label_snapshot.get("turn_discussion_text", "")
+    assert "Path: planner_fallback_legacy" in fallback_label_snapshot.get("turn_discussion_text", "")
+    assert fallback_label_snapshot.get("trackblazer_runtime_path") == "planner_fallback_legacy"
 
     print("trackblazer planner milestone 5 checks: ok")
   finally:

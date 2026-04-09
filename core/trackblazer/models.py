@@ -48,6 +48,9 @@ class PlannerRuntimeState:
   pending_skill_scan: BackgroundSkillScanState = field(default_factory=BackgroundSkillScanState)
   fallback_count: int = 0
   last_fallback_reason: str = ""
+  runtime_path: str = "legacy_runtime"
+  runtime_path_reason: str = ""
+  runtime_path_source: str = ""
   transition_breadcrumbs: List[Dict[str, Any]] = field(default_factory=list)
 
   def to_dict(self) -> Dict[str, Any]:
@@ -218,10 +221,17 @@ def _format_operator_race_gate_line(state_summary):
 
 
 def _planner_path_label(snapshot_context, state_summary):
+  runtime_path = state_summary.get("trackblazer_runtime_path")
+  if runtime_path:
+    return str(runtime_path)
   planner_state = state_summary.get("trackblazer_planner_state") or {}
   turn_plan = planner_state.get("turn_plan") or {}
   decision_path = turn_plan.get("decision_path") or planner_state.get("decision_path") or "legacy"
-  return str(decision_path or "legacy")
+  if decision_path == "planner":
+    return "planner_runtime"
+  if decision_path == "planner→legacy (fallback)":
+    return "planner_fallback_legacy"
+  return "legacy_runtime"
 
 
 def _planner_comparison_line(snapshot_context):

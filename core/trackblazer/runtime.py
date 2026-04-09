@@ -7,10 +7,14 @@ import core.config as config
 import utils.constants as constants
 from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.executor import PlannerExecutorHooks, run_planner_action_with_review
+from core.trackblazer.compat import set_rival_fallback_action
 from core.trackblazer.planner import (
+  RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+  RUNTIME_PATH_PLANNER_RUNTIME,
   append_planner_runtime_transition,
   get_turn_plan,
   mark_planner_fallback,
+  set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
 )
 from utils.log import info, warning
@@ -71,7 +75,7 @@ def _prepare_retry_order(action):
       "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
       "Prioritizing rest fallback."
     )
-    action["_rival_fallback_func"] = "do_rest"
+    set_rival_fallback_action(action, func="do_rest")
     if "do_rest" in available_actions:
       available_actions = ["do_rest"] + [name for name in available_actions if name != "do_rest"]
     else:
@@ -108,6 +112,12 @@ def _planner_runtime_fallback_to_legacy(state_obj, action, reason):
     set_turn_plan_decision_path(state_obj, action, "planner→legacy (fallback)", reason=reason)
   except Exception:
     pass
+  set_trackblazer_runtime_path(
+    state_obj,
+    RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
+    reason=reason,
+    source="planner_runtime_fallback",
+  )
   _transition(state_obj, "planner_runtime", "planner_runtime", "fallback_to_legacy", reason)
   return {"status": "fallback_to_legacy", "reason": reason}
 
@@ -128,6 +138,11 @@ def run_trackblazer_planner_turn(
 
   try:
     _transition(state_obj, "planner_runtime", "planner_runtime", "started", "planner_turn_attempt")
+    set_trackblazer_runtime_path(
+      state_obj,
+      RUNTIME_PATH_PLANNER_RUNTIME,
+      source="planner_runtime",
+    )
     skill_result = _attach_skill_plan_for_attempt(state_obj, action, action_count, runtime_hooks)
     if skill_result == "failed":
       _transition(state_obj, "planner_runtime", "planner_runtime", "failed", "skill_plan_attach_failed")
