@@ -529,10 +529,11 @@ def _attach_execution_item_plan(item_use_plan):
         continue
       deferred_entry = dict(entry)
       existing_reason = deferred_entry.get("reason") or ""
+      reassess_label = "post-whistle reassess" if has_whistle else "post-energy reassess"
       deferred_entry["reason"] = (
-        f"{existing_reason}; deferred until post-whistle reassess"
+        f"{existing_reason}; deferred until {reassess_label}"
         if existing_reason else
-        "deferred until post-whistle reassess"
+        f"deferred until {reassess_label}"
       )
       deferred_use.append(deferred_entry)
   return candidates, deferred_use, reassess_after_item_use

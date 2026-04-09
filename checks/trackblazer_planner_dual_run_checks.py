@@ -293,6 +293,34 @@ def _stat_focused_training_override_action():
   return action, training_results
 
 
+def _forced_climax_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race"]
+  training_results = _training_results(selected_score=10.0, selected_failure=0)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "any"
+  action["trackblazer_climax_race_day"] = True
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
+def _mission_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+  training_results = _training_results(selected_score=15.0, selected_failure=2)
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["speed"])
+  action["race_name"] = "any"
+  action["race_mission_available"] = True
+  action["available_trainings"] = dict(training_results)
+  return action, training_results
+
+
 def _prepare_case(case_name):
   state = _base_state()
   if case_name == "training":
@@ -324,6 +352,16 @@ def _prepare_case(case_name):
     state["rival_indicator_detected"] = False
   elif case_name == "stat_focused_training_override":
     action, training_results = _stat_focused_training_override_action()
+    state["rival_indicator_detected"] = False
+  elif case_name == "forced_climax_race":
+    action, training_results = _forced_climax_race_action()
+    state["trackblazer_climax"] = True
+    state["trackblazer_climax_locked_race"] = True
+    state["trackblazer_climax_race_day"] = True
+    state["rival_indicator_detected"] = False
+  elif case_name == "mission_race":
+    action, training_results = _mission_race_action()
+    state["race_mission_available"] = True
     state["rival_indicator_detected"] = False
   else:
     raise ValueError(case_name)
@@ -370,6 +408,8 @@ def main():
       "goal_race": {"race", "goal_race", "race_gate"},
       "weak_training_rest": {"rest", "weak_training_rest", "race_gate"},
       "stat_focused_training_override": {"training", "stat_focused_training_override", "race_gate"},
+      "forced_climax_race": {"race", "forced_climax_race", "race_gate"},
+      "mission_race": {"race", "mission_race", "race_gate"},
     }
 
     for case_name in (
@@ -382,6 +422,8 @@ def main():
       "goal_race",
       "weak_training_rest",
       "stat_focused_training_override",
+      "forced_climax_race",
+      "mission_race",
     ):
       state_obj, action = _prepare_case(case_name)
       snapshot = build_review_snapshot(

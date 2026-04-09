@@ -54,7 +54,7 @@ from core.runtime_flow import (
   SUB_PHASE_RESOLVE_SHOP_REFRESH_POPUP,
   SUB_PHASE_RETURN_TO_LOBBY,
 )
-from core.trackblazer_shop import get_dynamic_shop_limits, get_priority_preview, policy_context
+from core.trackblazer_shop import get_priority_preview, policy_context
 from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
 from core.trackblazer_race_logic import (
   evaluate_trackblazer_race,
@@ -1950,83 +1950,6 @@ def _build_trackblazer_planned_actions(state_obj, action, planner_state=None):
   if turn_plan_snapshot:
     return TurnPlan.from_snapshot(turn_plan_snapshot).to_planned_actions()
   return build_review_planned_actions(state_obj, action, planner_state=planner_state)
-
-
-def _trackblazer_shop_buy_candidates(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
-  detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
-  held_quantities = held_quantities or {}
-  shop_coins = int((shop_summary or {}).get("shop_coins") or 0)
-  if shop_coins == 0:
-    return []
-  dynamic_limits = get_dynamic_shop_limits(
-    held_quantities=held_quantities,
-    year=(shop_summary or {}).get("year"),
-    turn=(shop_summary or {}).get("turn"),
-  )
-  budget_known = shop_coins > 0
-  remaining_coins = shop_coins if budget_known else 0
-  would_buy = []
-  planned_counts = {}
-  planned_family_counts = {}
-  for item in effective_shop_items:
-    item_key = item.get("key")
-    if item_key not in detected_shop_keys:
-      continue
-    if item.get("effective_priority") == "NEVER":
-      continue
-    held_quantity = int(held_quantities.get(item_key) or 0)
-    max_quantity = int(item.get("max_quantity") or 0)
-    dynamic_limit = dynamic_limits.get(item_key) or {}
-    if dynamic_limit.get("block_purchase"):
-      continue
-    planned_for_item = int(planned_counts.get(item_key) or 0)
-    dynamic_max_total = dynamic_limit.get("max_total")
-    if dynamic_max_total is not None and held_quantity + planned_for_item >= int(dynamic_max_total):
-      continue
-    family_key = dynamic_limit.get("family_key")
-    family_max_total = dynamic_limit.get("family_max_total")
-    if family_key and family_max_total is not None:
-      family_planned = int(planned_family_counts.get(family_key) or 0)
-      family_total_held = int(dynamic_limit.get("family_total_held") or 0)
-      if family_total_held + family_planned >= int(family_max_total):
-        continue
-    remaining_capacity = max(0, max_quantity - held_quantity)
-    if max_quantity > 0 and remaining_capacity <= 0:
-      continue
-    cost = int(item.get("cost") or 0)
-    if budget_known and cost > remaining_coins:
-      continue
-    reason_parts = [f"policy={item.get('effective_priority')}"]
-    timing_rules = item.get("active_timing_rules") or []
-    if timing_rules:
-      rule = timing_rules[0]
-      reason_parts.append(rule.get("label") or "timing override")
-      if rule.get("note"):
-        reason_parts.append(rule["note"])
-    if dynamic_limit.get("reason"):
-      reason_parts.append(dynamic_limit["reason"])
-    elif item.get("policy_notes"):
-      reason_parts.append(item["policy_notes"])
-    if max_quantity > 0:
-      reason_parts.append(f"hold {held_quantity}/{max_quantity}")
-    reason_parts.append(f"cost {cost}")
-    would_buy.append(
-      {
-        "key": item_key,
-        "name": item.get("display_name") or str(item_key or "").replace("_", " ").title(),
-        "priority": item.get("effective_priority"),
-        "cost": cost,
-        "held_quantity": held_quantity,
-        "max_quantity": max_quantity,
-        "reason": "; ".join(part for part in reason_parts if part),
-      }
-    )
-    if budget_known:
-      remaining_coins -= cost
-    planned_counts[item_key] = planned_for_item + 1
-    if family_key:
-      planned_family_counts[family_key] = int(planned_family_counts.get(family_key) or 0) + 1
-  return would_buy[: max(0, int(limit))]
 
 
 def _attach_trackblazer_pre_action_item_plan(state_obj, action):
