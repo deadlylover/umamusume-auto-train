@@ -238,6 +238,111 @@ def _capture_action_payload(action, state_obj=None) -> Dict[str, Any]:
   return payload
 
 
+def _capture_fallback_action_payload(action, state_obj=None) -> Dict[str, Any]:
+  payload = _capture_action_payload(action, state_obj=state_obj)
+  fallback_func = _action_value(action, "_rival_fallback_func")
+
+  if fallback_func and fallback_func != "do_race":
+    payload["func"] = fallback_func
+    if fallback_func == "do_training":
+      payload["training_name"] = (
+        _action_value(action, "_rival_fallback_training_name")
+        or payload.get("training_name")
+      )
+      payload["training_data"] = copy.deepcopy(
+        _action_value(action, "_rival_fallback_training_data")
+        or payload.get("training_data")
+        or {}
+      )
+    payload["race_name"] = None
+    payload["race_image_path"] = None
+    payload["race_grade_target"] = None
+    payload["prefer_rival_race"] = False
+    payload["fallback_non_rival_race"] = False
+    payload["scheduled_race"] = False
+    payload["trackblazer_lobby_scheduled_race"] = False
+    payload["trackblazer_climax_race_day"] = False
+    payload["race_mission_available"] = False
+    payload["is_race_day"] = False
+    return payload
+
+  if payload.get("func") == "do_race":
+    training_name = (
+      _action_value(action, "_rival_fallback_training_name")
+      or payload.get("training_name")
+    )
+    training_data = copy.deepcopy(
+      _action_value(action, "_rival_fallback_training_data")
+      or payload.get("training_data")
+      or {}
+    )
+    if training_name and training_data:
+      payload["func"] = "do_training"
+      payload["training_name"] = training_name
+      payload["training_data"] = training_data
+      payload["race_name"] = None
+      payload["race_image_path"] = None
+      payload["race_grade_target"] = None
+      payload["prefer_rival_race"] = False
+      payload["fallback_non_rival_race"] = False
+      payload["scheduled_race"] = False
+      payload["trackblazer_lobby_scheduled_race"] = False
+      payload["trackblazer_climax_race_day"] = False
+      payload["race_mission_available"] = False
+      payload["is_race_day"] = False
+
+  return payload
+
+
+def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  available_trainings = copy.deepcopy(_action_value(action, "available_trainings") or {})
+  if not available_trainings:
+    available_trainings = copy.deepcopy(state_obj.get("training_results") or {})
+
+  best_name = None
+  best_payload = {}
+  best_score = float("-inf")
+
+  for training_name, payload in (available_trainings or {}).items():
+    if not isinstance(payload, dict):
+      continue
+    score_tuple = payload.get("score_tuple") or ()
+    score = payload.get("weighted_stat_score")
+    if score is None and score_tuple:
+      score = score_tuple[0]
+    try:
+      numeric_score = float(score)
+    except (TypeError, ValueError):
+      numeric_score = float("-inf")
+    if numeric_score > best_score:
+      best_score = numeric_score
+      best_name = str(payload.get("name") or training_name or "")
+      best_payload = copy.deepcopy(payload)
+
+  if best_name and best_payload:
+    return {
+      "func": "do_training",
+      "training_name": best_name,
+      "training_function": (
+        _action_value(action, "training_function")
+        or "stat_weight_training"
+      ),
+      "training_data": best_payload,
+    }
+
+  if bool(state_obj.get("date_event_available")):
+    return {"func": "do_recreation"}
+  return {"func": "do_rest"}
+
+
+def _resolve_pre_debut_non_race_payload(action, state_obj=None, fallback_payload=None) -> Dict[str, Any]:
+  fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
+  if fallback_payload.get("func") and fallback_payload.get("func") != "do_race":
+    return copy.deepcopy(fallback_payload)
+  return _best_training_payload_from_state(action, state_obj=state_obj)
+
+
 def _warning_policy_for_race_branch(branch_kind, fallback_action=None) -> Dict[str, Any]:
   fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
   cancel_target_label = _fallback_target_label(fallback_action) if fallback_action else ""
@@ -583,6 +688,9 @@ def _planner_selected_action_payload(
   action,
   *,
   func=None,
+  training_name=None,
+  training_function=None,
+  training_data=None,
   race_name=None,
   race_image_path=None,
   race_grade_target=None,
@@ -603,9 +711,9 @@ def _planner_selected_action_payload(
   selected_func = func or _action_func(action)
   payload = {
     "func": selected_func,
-    "training_name": _action_value(action, "training_name"),
-    "training_function": _action_value(action, "training_function"),
-    "training_data": copy.deepcopy(_action_value(action, "training_data") or {}),
+    "training_name": training_name if training_name is not None else _action_value(action, "training_name"),
+    "training_function": training_function if training_function is not None else _action_value(action, "training_function"),
+    "training_data": copy.deepcopy(training_data if training_data is not None else (_action_value(action, "training_data") or {})),
     "race_name": race_name,
     "race_image_path": race_image_path,
     "race_grade_target": race_grade_target,
@@ -642,7 +750,8 @@ def _planner_selected_action_payload(
 def _build_planner_race_plan(state_obj, action):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   base_action = _capture_action_payload(action, state_obj=state_obj)
-  base_fallback = copy.deepcopy(base_action)
+  base_fallback = _capture_fallback_action_payload(action, state_obj=state_obj)
+  pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
   forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day") or _action_value(action, "trackblazer_climax_race_day"))
@@ -827,25 +936,21 @@ def _build_planner_race_plan(state_obj, action):
         fallback_action=base_fallback,
         branch_kind=branch_kind,
       )
-    elif pre_debut and (_action_func(action) == "do_race" or scheduled_race_active or goal_race_active or mission_race_enabled):
-      branch_kind = "pre_debut_debut_race"
-      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+    elif pre_debut:
+      branch_kind = "training"
       selected_action_payload = _planner_selected_action_payload(
         action,
-        func="do_race",
-        race_name=_action_value(action, "race_name") or "any",
-        race_image_path=_action_value(action, "race_image_path") or "assets/ui/match_track.png",
-        race_grade_target=_action_value(action, "race_grade_target") or "any",
+        func=pre_debut_fallback.get("func") or "do_training",
+        training_name=pre_debut_fallback.get("training_name"),
+        training_function=pre_debut_fallback.get("training_function"),
+        training_data=copy.deepcopy(pre_debut_fallback.get("training_data") or {}),
         race_decision={
-          "should_race": True,
-          "forced_race_day": True,
+          "should_race": False,
           "branch_kind": branch_kind,
-          "reason": "Junior Year Pre-Debut race turns use the debut branch, not optional rival-scout logic.",
-          "race_name": _action_value(action, "race_name") or "any",
+          "reason": "Junior Year Pre-Debut keeps the race branch locked; stay on the normal non-race action until the debut race UI is actually available.",
+          "race_name": _action_value(action, "race_name"),
           "rival_indicator": False,
         },
-        warning_policy=warning_plan,
-        fallback_action=base_fallback,
         branch_kind=branch_kind,
       )
     elif prioritize_missions and mission_race_enabled:
@@ -2248,9 +2353,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "execution_payload": copy.deepcopy(item_execution_payload),
       "subgraph": _build_item_plan_subgraph(item_execution_payload),
       "selected_action_binding": {
-        "func": getattr(action, "func", None),
-        "training_name": action.get("training_name") if hasattr(action, "get") else None,
-        "race_name": action.get("race_name") if hasattr(action, "get") else None,
+        "func": ((planner_race_plan.get("selected_action") or {}).get("func")) if decision_path == "planner" else getattr(action, "func", None),
+        "training_name": ((planner_race_plan.get("selected_action") or {}).get("training_name")) if decision_path == "planner" else (action.get("training_name") if hasattr(action, "get") else None),
+        "race_name": ((planner_race_plan.get("selected_action") or {}).get("race_name")) if decision_path == "planner" else (action.get("race_name") if hasattr(action, "get") else None),
       },
       "reassess_boundary": {
         "required": bool(reassess_after_item_use),

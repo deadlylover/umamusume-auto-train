@@ -88,6 +88,27 @@ def _race_action():
   return action
 
 
+def _bare_race_action():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+  action["race_name"] = "any"
+  action["training_function"] = "stat_weight_training"
+  action["available_trainings"] = {
+    "speed": {
+      "name": "speed",
+      "score_tuple": (24.0, 0),
+      "weighted_stat_score": 24.0,
+      "stat_gains": {"speed": 16, "power": 4, "sp": 8},
+      "failure": 3,
+      "total_supports": 3,
+      "total_rainbow_friends": 1,
+      "total_friendship_levels": {"blue": 1, "green": 1, "yellow": 0, "max": 0},
+    },
+  }
+  return action
+
+
 def _snapshot(state_obj, action, note):
   snapshot = build_review_snapshot(state_obj, action, reasoning_notes=note, ocr_debug=[])
   assert "Path: planner" in snapshot.get("turn_discussion_text", ""), note
@@ -107,9 +128,23 @@ def main():
     assert activation.get("status") == "planner"
     pre_debut_snapshot = _snapshot(pre_debut_state, pre_debut_action, "pre_debut")
     pre_debut_plan = (pre_debut_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
-    assert (pre_debut_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "pre_debut_debut_race"
-    assert (pre_debut_snapshot.get("selected_action") or {}).get("prefer_rival_race") is False
+    assert (pre_debut_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "training"
+    assert (pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_training"
+    assert (pre_debut_snapshot.get("selected_action") or {}).get("training_name") == "speed"
     assert ((pre_debut_plan.get("race_plan") or {}).get("race_scout") or {}).get("required") is False
+    assert "race branch locked" in (((pre_debut_snapshot.get("selected_action") or {}).get("trackblazer_race_decision") or {}).get("reason") or "")
+
+    bare_pre_debut_state = _base_state()
+    bare_pre_debut_state["year"] = "Junior Year Pre-Debut"
+    bare_pre_debut_action = _bare_race_action()
+    activation = _activate_trackblazer_planner_turn(bare_pre_debut_state, bare_pre_debut_action)
+    assert activation.get("status") == "planner"
+    bare_pre_debut_snapshot = _snapshot(bare_pre_debut_state, bare_pre_debut_action, "bare_pre_debut")
+    bare_pre_debut_plan = (bare_pre_debut_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    assert (bare_pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_training"
+    assert (bare_pre_debut_snapshot.get("selected_action") or {}).get("training_name") == "speed"
+    assert ((bare_pre_debut_plan.get("item_plan") or {}).get("selected_action_binding") or {}).get("func") == "do_training"
+    assert ((bare_pre_debut_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
 
     forced_state = _base_state()
     forced_state["turn"] = "Race Day"
