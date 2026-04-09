@@ -38,6 +38,7 @@ from core.trackblazer.planner import (
   mark_planner_fallback,
   plan_once,
   set_turn_plan_decision_path,
+  sync_turn_plan_execution_contract,
   update_turn_discussion_dual_run,
 )
 from core.trackblazer.executor import PlannerExecutorHooks
@@ -3630,6 +3631,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       "fallback_reason": forced_fallback.get("reason") if decision_path == "planner→legacy (fallback)" else "",
     }
     planner_state["decision_path"] = decision_path
+    planner_turn_plan = sync_turn_plan_execution_contract(state_obj, action, planner_turn_plan)
     planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
     if isinstance(state_obj, dict):
       state_obj[PLANNER_STATE_KEY] = planner_state
@@ -4293,6 +4295,7 @@ def _trackblazer_planner_executor_hooks():
     enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
     run_planner_race_preflight=_run_planner_race_preflight,
     resolve_post_action_resolution=_resolve_post_action_resolution,
+    trackblazer_action_failure_should_block_retry=_trackblazer_action_failure_should_block_retry,
     update_operator_snapshot=update_operator_snapshot,
   )
 
@@ -5474,18 +5477,28 @@ def career_lobby(dry_run_turn=False):
           if planner_runtime_status in {"previewed", "reassess", "blocked", "failed"}:
             continue
           if planner_runtime_status == "fallback_to_legacy":
-            planner_activation = {
-              "status": "fallback",
-              "reason": planner_runtime_result.get("reason") or "planner_runtime_failed",
-            }
+            planner_reason = planner_runtime_result.get("reason") or "planner_runtime_failed"
             update_operator_snapshot(
               state_obj,
               action,
-              phase="evaluating_strategy",
-              message="Planner runtime fell back to legacy execution for this turn.",
+              phase="recovering",
+              status="error",
+              message="Planner runtime failed after activation; recollecting the turn before retrying.",
               sub_phase="evaluate_trackblazer_race",
-              reasoning_notes=planner_activation.get("reason"),
+              reasoning_notes=planner_reason,
             )
+            _push_turn_retry_debug(
+              state_obj,
+              reason="Planner runtime fell back before execution; recollecting the turn instead of reusing planner-mutated state.",
+              reasons=[planner_reason],
+              before_phase="evaluating_strategy",
+              context="planner_runtime_fallback",
+              event="turn_retry",
+              result="planner_runtime_recollect",
+              sub_phase="evaluate_trackblazer_race",
+              phase="evaluating_strategy",
+            )
+            continue
 
         # Build a pre_run_hook that scouts the rival race list when the
         # user commits a rival-race action.  The scout opens the race list,

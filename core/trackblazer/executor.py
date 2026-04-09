@@ -29,6 +29,7 @@ class PlannerExecutorHooks:
   enforce_operator_race_gate_before_execute: Callable[..., Optional[str]]
   run_planner_race_preflight: Callable[..., Optional[str]]
   resolve_post_action_resolution: Callable[[Dict[str, Any], Any], bool]
+  trackblazer_action_failure_should_block_retry: Callable[[Dict[str, Any], Any], bool]
   update_operator_snapshot: Callable[..., Any]
 
 
@@ -130,6 +131,32 @@ def run_planner_action_with_review(
     if skill_purchase_result.get("status") == "failed":
       skill_result = skill_purchase_result.get("result") or {}
       skill_flow = skill_result.get("skill_purchase_flow") or {}
+      if skill_flow.get("opened") and not skill_flow.get("closed"):
+        from core.skill_scanner import _close_skills_page
+
+        warning("[SKILL] Skill purchase left page open, attempting emergency close.")
+        emergency_close = _close_skills_page()
+        if emergency_close.get("closed"):
+          skill_flow["closed"] = True
+          skill_flow["emergency_close"] = True
+        else:
+          hooks.update_operator_snapshot(
+            state_obj,
+            action,
+            phase="recovering",
+            status="error",
+            error_text=f"Skill purchase left skills page open: {skill_purchase_result.get('reason')}",
+            sub_phase=sub_phase,
+            ocr_debug=ocr_debug,
+            planned_clicks=planned_clicks,
+          )
+          _transition(state_obj, "execute_skill_purchases", "execute_skill_purchases", "blocked", skill_purchase_result.get("reason") or "skill_purchase_left_page_open")
+          return {
+            "status": "blocked",
+            "step_id": "execute_skill_purchases",
+            "reason": skill_purchase_result.get("reason") or "skill_purchase_left_page_open",
+            "committed": committed,
+          }
       if skill_flow.get("opened") and not skill_flow.get("closed"):
         hooks.update_operator_snapshot(
           state_obj,
@@ -301,6 +328,14 @@ def run_planner_action_with_review(
         ocr_debug=ocr_debug,
         planned_clicks=planned_clicks,
       )
+      if hooks.trackblazer_action_failure_should_block_retry(state_obj, action):
+        _transition(state_obj, "execute_pre_action_items", "execute_pre_action_items", "blocked", failure_reason)
+        return {
+          "status": "blocked",
+          "step_id": "execute_pre_action_items",
+          "reason": failure_reason,
+          "committed": committed,
+        }
       _transition(state_obj, "execute_pre_action_items", "execute_pre_action_items", "failed", failure_reason)
       return {
         "status": "failed",

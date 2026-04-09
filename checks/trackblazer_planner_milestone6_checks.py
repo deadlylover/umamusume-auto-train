@@ -146,6 +146,7 @@ def _executor_hooks(recorder, *, execute_intent="execute", item_result=None):
     enforce_operator_race_gate_before_execute=lambda *args, **kwargs: recorder.append(("race_gate", None)) or None,
     run_planner_race_preflight=lambda *args, **kwargs: recorder.append(("race_preflight", None)) or None,
     resolve_post_action_resolution=lambda *args, **kwargs: recorder.append(("resolve_post", None)) or True,
+    trackblazer_action_failure_should_block_retry=lambda state_obj, action: recorder.append(("block_retry", action.func)) or False,
     update_operator_snapshot=lambda *args, **kwargs: recorder.append(("snapshot", kwargs.get("phase"))),
   )
   return hooks
@@ -214,6 +215,69 @@ def _test_executor_reassess_transition():
   assert ("wait_items", None) in recorder
 
 
+def _test_executor_skill_emergency_close_matches_legacy():
+  state_obj = _base_state()
+  action = _training_action()
+  action.run = lambda: True
+  recorder = []
+  turn_plan = _turn_plan("await_operator_review", "execute_skill_purchases")
+
+  hooks = _executor_hooks(recorder)
+  hooks.run_skill_purchase_plan = lambda state_obj, action, current_action_count: {
+    "status": "failed",
+    "reason": "synthetic_skill_failure",
+    "result": {
+      "skill_purchase_flow": {
+        "opened": True,
+        "closed": False,
+      },
+    },
+  }
+
+  with patch("core.skill_scanner._close_skills_page", return_value={"closed": True}):
+    result = run_planner_action_with_review(
+      state_obj,
+      action,
+      turn_plan,
+      0,
+      "review",
+      hooks,
+    )
+
+  assert result.get("status") == "executed", result
+  assert ("resolve_post", None) in recorder
+
+
+def _test_executor_item_failure_can_block_retry():
+  state_obj = _base_state()
+  action = _training_action()
+  recorder = []
+  turn_plan = _turn_plan(
+    "await_operator_review",
+    "refresh_inventory_for_items",
+    "execute_pre_action_items",
+  )
+  action["trackblazer_pre_action_items"] = [{"key": "vita_20"}]
+  state_obj["trackblazer_inventory_flow"] = {"reason": "inventory_did_not_close_after_confirm"}
+
+  hooks = _executor_hooks(
+    recorder,
+    item_result={"status": "failed", "reason": "inventory_did_not_close_after_confirm"},
+  )
+  hooks.trackblazer_action_failure_should_block_retry = lambda state_obj, action: True
+
+  result = run_planner_action_with_review(
+    state_obj,
+    action,
+    turn_plan,
+    0,
+    "review",
+    hooks,
+  )
+
+  assert result.get("status") == "blocked", result
+
+
 def _test_runtime_retry_owned_by_planner_runtime():
   state_obj = _base_state()
   action = _race_action()
@@ -266,6 +330,7 @@ def _test_runtime_safe_legacy_fallback():
 def _test_skeleton_delegates_planner_runtime():
   source = inspect.getsource(skeleton.career_lobby)
   assert "run_trackblazer_planner_turn(" in source
+  assert 'result="planner_runtime_recollect"' in source
 
 
 def main():
@@ -273,6 +338,8 @@ def main():
   constants.SCENARIO_NAME = "trackblazer"
   _test_executor_check_only_preview()
   _test_executor_reassess_transition()
+  _test_executor_skill_emergency_close_matches_legacy()
+  _test_executor_item_failure_can_block_retry()
   _test_runtime_retry_owned_by_planner_runtime()
   _test_runtime_safe_legacy_fallback()
   _test_skeleton_delegates_planner_runtime()

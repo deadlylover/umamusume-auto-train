@@ -296,40 +296,45 @@ def _capture_fallback_action_payload(action, state_obj=None) -> Dict[str, Any]:
 
 def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
   state_obj = state_obj if isinstance(state_obj, dict) else {}
-  available_trainings = copy.deepcopy(_action_value(action, "available_trainings") or {})
-  if not available_trainings:
-    available_trainings = copy.deepcopy(state_obj.get("training_results") or {})
+  def _best_from_trainings(trainings):
+    best_name = None
+    best_payload = {}
+    best_score = float("-inf")
 
-  best_name = None
-  best_payload = {}
-  best_score = float("-inf")
+    for training_name, payload in (trainings or {}).items():
+      if not isinstance(payload, dict):
+        continue
+      score_tuple = payload.get("score_tuple") or ()
+      score = payload.get("weighted_stat_score")
+      if score is None and score_tuple:
+        score = score_tuple[0]
+      try:
+        numeric_score = float(score)
+      except (TypeError, ValueError):
+        numeric_score = float("-inf")
+      if numeric_score > best_score:
+        best_score = numeric_score
+        best_name = str(payload.get("name") or training_name or "")
+        best_payload = copy.deepcopy(payload)
 
-  for training_name, payload in (available_trainings or {}).items():
-    if not isinstance(payload, dict):
-      continue
-    score_tuple = payload.get("score_tuple") or ()
-    score = payload.get("weighted_stat_score")
-    if score is None and score_tuple:
-      score = score_tuple[0]
-    try:
-      numeric_score = float(score)
-    except (TypeError, ValueError):
-      numeric_score = float("-inf")
-    if numeric_score > best_score:
-      best_score = numeric_score
-      best_name = str(payload.get("name") or training_name or "")
-      best_payload = copy.deepcopy(payload)
+    if best_name and best_payload:
+      return {
+        "func": "do_training",
+        "training_name": best_name,
+        "training_function": (
+          _action_value(action, "training_function")
+          or "stat_weight_training"
+        ),
+        "training_data": best_payload,
+      }
+    return {}
 
-  if best_name and best_payload:
-    return {
-      "func": "do_training",
-      "training_name": best_name,
-      "training_function": (
-        _action_value(action, "training_function")
-        or "stat_weight_training"
-      ),
-      "training_data": best_payload,
-    }
+  best_training = _best_from_trainings(copy.deepcopy(_action_value(action, "available_trainings") or {}))
+  if not best_training:
+    best_training = _best_from_trainings(copy.deepcopy(state_obj.get("training_results") or {}))
+
+  if best_training:
+    return best_training
 
   if bool(state_obj.get("date_event_available")):
     return {"func": "do_recreation"}
@@ -338,9 +343,24 @@ def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
 
 def _resolve_pre_debut_non_race_payload(action, state_obj=None, fallback_payload=None) -> Dict[str, Any]:
   fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
-  if fallback_payload.get("func") and fallback_payload.get("func") != "do_race":
+  best_payload = _best_training_payload_from_state(action, state_obj=state_obj)
+
+  # Pre-debut turns should still use the strongest scanned training when one is
+  # available, even if the legacy action arrived as a provisional rest fallback.
+  if best_payload.get("func") == "do_training":
+    return best_payload
+
+  fallback_func = fallback_payload.get("func")
+  if fallback_func and fallback_func != "do_race" and fallback_func != "do_rest":
     return copy.deepcopy(fallback_payload)
-  return _best_training_payload_from_state(action, state_obj=state_obj)
+
+  if best_payload.get("func"):
+    return best_payload
+
+  if fallback_func and fallback_func != "do_race":
+    return copy.deepcopy(fallback_payload)
+
+  return {"func": "do_rest"}
 
 
 def _warning_policy_for_race_branch(branch_kind, fallback_action=None) -> Dict[str, Any]:
@@ -1426,6 +1446,18 @@ def _item_binding_label(action) -> str:
   return action_func
 
 
+def _item_binding_label_from_payload(payload) -> str:
+  payload = payload if isinstance(payload, dict) else {}
+  action_func = str(payload.get("func") or "unknown")
+  training_name = payload.get("training_name")
+  race_name = payload.get("race_name")
+  if action_func == "do_training" and training_name:
+    return f"{action_func}:{training_name}"
+  if action_func == "do_race" and race_name:
+    return f"{action_func}:{race_name}"
+  return action_func
+
+
 def _item_reassess_reason(execution_items):
   trigger_items = [entry.get("key") for entry in list(execution_items or []) if isinstance(entry, dict) and entry.get("key")]
   if "reset_whistle" in trigger_items:
@@ -2009,6 +2041,50 @@ def get_turn_plan(state_obj, action, planner_state=None, limit=8) -> TurnPlan:
   return TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
 
 
+def sync_turn_plan_execution_contract(state_obj, action, turn_plan: TurnPlan) -> TurnPlan:
+  if not turn_plan:
+    return turn_plan
+
+  item_plan = dict(turn_plan.item_plan or {})
+  race_plan = dict(turn_plan.race_plan or {})
+  selected_action = dict(race_plan.get("selected_action") or {})
+
+  if turn_plan.decision_path == "planner" and selected_action:
+    binding_payload = {
+      "func": selected_action.get("func"),
+      "training_name": selected_action.get("training_name"),
+      "race_name": selected_action.get("race_name"),
+    }
+  else:
+    binding_payload = {
+      "func": _action_func(action),
+      "training_name": _action_value(action, "training_name"),
+      "race_name": _action_value(action, "race_name"),
+    }
+
+  item_plan["selected_action_binding"] = copy.deepcopy(binding_payload)
+
+  execution_payload = dict(item_plan.get("execution_payload") or {})
+  if execution_payload:
+    execution_payload["binding_label"] = _item_binding_label_from_payload(binding_payload)
+    item_plan["execution_payload"] = execution_payload
+
+  subgraph = dict(item_plan.get("subgraph") or {})
+  if subgraph:
+    subgraph["binding_label"] = _item_binding_label_from_payload(binding_payload)
+    item_plan["subgraph"] = subgraph
+
+  turn_plan.item_plan = item_plan
+  turn_plan.step_sequence = _build_step_sequence(
+    state_obj,
+    action,
+    list((turn_plan.shop_plan or {}).get("would_buy") or []),
+    dict((turn_plan.item_plan or {}).get("execution_payload") or {}),
+    race_plan if turn_plan.decision_path == "planner" else {},
+  )
+  return turn_plan
+
+
 def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
   planner_state = plan_once(state_obj, action, limit=8)
   turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
@@ -2018,13 +2094,7 @@ def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
     "decision_path": turn_plan.decision_path,
     "fallback_reason": str(reason or ""),
   }
-  turn_plan.step_sequence = _build_step_sequence(
-    state_obj,
-    action,
-    list((turn_plan.shop_plan or {}).get("would_buy") or []),
-    dict((turn_plan.item_plan or {}).get("execution_payload") or {}),
-    dict(turn_plan.race_plan or {}) if turn_plan.decision_path == "planner" else {},
-  )
+  turn_plan = sync_turn_plan_execution_contract(state_obj, action, turn_plan)
   planner_state["decision_path"] = turn_plan.decision_path
   planner_state["turn_plan"] = turn_plan.to_snapshot()
   if isinstance(state_obj, dict):

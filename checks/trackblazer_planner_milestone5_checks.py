@@ -146,6 +146,69 @@ def main():
     assert ((bare_pre_debut_plan.get("item_plan") or {}).get("selected_action_binding") or {}).get("func") == "do_training"
     assert ((bare_pre_debut_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
 
+    direct_pre_debut_state = _base_state()
+    direct_pre_debut_state["year"] = "Junior Year Pre-Debut"
+    direct_pre_debut_action = _race_action()
+    direct_pre_debut_snapshot = build_review_snapshot(
+      direct_pre_debut_state,
+      direct_pre_debut_action,
+      reasoning_notes="direct_pre_debut_snapshot",
+      ocr_debug=[],
+    )
+    direct_pre_debut_plan = (direct_pre_debut_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    assert (direct_pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_training"
+    assert ((direct_pre_debut_plan.get("item_plan") or {}).get("selected_action_binding") or {}).get("func") == "do_training"
+    assert ((direct_pre_debut_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
+    assert not any(
+      label.startswith("Open race menu")
+      for label in [entry.get("label") or "" for entry in (direct_pre_debut_snapshot.get("planned_clicks") or [])]
+    )
+
+    legacy_rest_pre_debut_state = _base_state()
+    legacy_rest_pre_debut_state["year"] = "Junior Year Pre-Debut"
+    legacy_rest_pre_debut_state["energy_level"] = 100
+    legacy_rest_pre_debut_state["max_energy"] = 100
+    legacy_rest_pre_debut_action = _rest_action()
+    legacy_rest_pre_debut_action["training_data"] = copy.deepcopy(
+      legacy_rest_pre_debut_state["training_results"]["speed"]
+    )
+    legacy_rest_pre_debut_action["available_trainings"] = copy.deepcopy(
+      legacy_rest_pre_debut_state["training_results"]
+    )
+    activation = _activate_trackblazer_planner_turn(
+      legacy_rest_pre_debut_state,
+      legacy_rest_pre_debut_action,
+    )
+    assert activation.get("status") == "planner"
+    legacy_rest_pre_debut_snapshot = _snapshot(
+      legacy_rest_pre_debut_state,
+      legacy_rest_pre_debut_action,
+      "legacy_rest_pre_debut",
+    )
+    assert (legacy_rest_pre_debut_snapshot.get("selected_action") or {}).get("func") == "do_training"
+    assert (legacy_rest_pre_debut_snapshot.get("selected_action") or {}).get("training_name") == "speed"
+    assert ((legacy_rest_pre_debut_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
+
+    stale_training_payload_state = _base_state()
+    stale_training_payload_state["year"] = "Junior Year Pre-Debut"
+    stale_training_payload_action = _rest_action()
+    stale_training_payload_action["available_trainings"] = {
+      "speed": {"name": "speed"},
+    }
+    activation = _activate_trackblazer_planner_turn(
+      stale_training_payload_state,
+      stale_training_payload_action,
+    )
+    assert activation.get("status") == "planner"
+    stale_training_payload_snapshot = _snapshot(
+      stale_training_payload_state,
+      stale_training_payload_action,
+      "stale_training_payload_pre_debut",
+    )
+    assert (stale_training_payload_snapshot.get("selected_action") or {}).get("func") == "do_training"
+    assert (stale_training_payload_snapshot.get("selected_action") or {}).get("training_name") == "speed"
+    assert ((stale_training_payload_snapshot.get("planned_clicks") or [])[0] or {}).get("label") == "Open training menu"
+
     forced_state = _base_state()
     forced_state["turn"] = "Race Day"
     forced_action = _training_action()
