@@ -9,11 +9,17 @@ from typing import Any, Dict, List, Tuple
 import core.bot as bot
 import core.config as config
 import utils.constants as constants
+from core.actions import Action
+from core.strategies import Strategy
 from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
 from core.trackblazer_item_use import plan_item_usage
 from core.trackblazer.observe import hydrate_observed_turn_state
 from core.trackblazer.review import build_ranked_training_snapshot
+from core.trackblazer_race_logic import (
+  evaluate_trackblazer_race,
+  get_race_lookahead_energy_advice,
+)
 from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_items
 from core.trackblazer.models import (
   BackgroundSkillScanState,
@@ -27,7 +33,8 @@ from core.trackblazer.models import (
 
 PLANNER_STATE_KEY = "trackblazer_planner_state"
 PLANNER_RUNTIME_KEY = "trackblazer_planner_runtime"
-PLANNER_VERSION = 2
+PLANNER_FORCE_FALLBACK_KEY = "_trackblazer_planner_force_fallback"
+PLANNER_VERSION = 3
 
 
 def _normalize_for_hash(value):
@@ -141,6 +148,11 @@ def _build_selected_action_review_context(action, pre_action_items=None, reasses
     "race_name": action.get("race_name"),
     "race_image_path": action.get("race_image_path"),
     "race_grade_target": action.get("race_grade_target"),
+    "scheduled_race": bool(action.get("scheduled_race")),
+    "trackblazer_lobby_scheduled_race": bool(action.get("trackblazer_lobby_scheduled_race")),
+    "race_mission_available": bool(action.get("race_mission_available")),
+    "is_race_day": bool(action.get("is_race_day")),
+    "trackblazer_climax_race_day": bool(action.get("trackblazer_climax_race_day")),
     "score_tuple": copy.deepcopy(training_data.get("score_tuple")),
     "stat_gains": copy.deepcopy(training_data.get("stat_gains")),
     "failure": training_data.get("failure"),
@@ -176,6 +188,214 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
   runtime_payload = runtime.to_dict()
   state_obj[PLANNER_RUNTIME_KEY] = runtime_payload
   return runtime_payload
+
+
+def _clone_action(action):
+  cloned = Action(**copy.deepcopy(getattr(action, "options", {}) or {}))
+  cloned.func = _action_func(action)
+  cloned.available_actions = list(getattr(action, "available_actions", []) or [])
+  return cloned
+
+
+def _fallback_target_label(payload):
+  if not isinstance(payload, dict):
+    return "unknown"
+  target_func = payload.get("func") or "unknown"
+  if target_func == "do_training":
+    training_name = payload.get("training_name") or "unknown"
+    return f"train {training_name}"
+  if target_func == "do_race":
+    race_name = payload.get("race_name") or "any"
+    return f"race {race_name}"
+  if target_func == "do_rest":
+    return "rest"
+  if target_func == "do_recreation":
+    return "recreation"
+  return str(target_func)
+
+
+def _capture_action_payload(action, state_obj=None) -> Dict[str, Any]:
+  payload = {
+    "func": _action_func(action),
+    "training_name": _action_value(action, "training_name"),
+    "training_data": copy.deepcopy(_action_value(action, "training_data") or {}),
+    "training_function": _action_value(action, "training_function"),
+    "race_name": _action_value(action, "race_name"),
+    "race_image_path": _action_value(action, "race_image_path"),
+    "race_grade_target": _action_value(action, "race_grade_target"),
+    "prefer_rival_race": bool(_action_value(action, "prefer_rival_race")),
+    "fallback_non_rival_race": bool(_action_value(action, "fallback_non_rival_race")),
+    "scheduled_race": bool(_action_value(action, "scheduled_race")),
+    "trackblazer_lobby_scheduled_race": bool(_action_value(action, "trackblazer_lobby_scheduled_race")),
+    "trackblazer_climax_race_day": bool(_action_value(action, "trackblazer_climax_race_day")),
+    "race_mission_available": bool(_action_value(action, "race_mission_available")),
+    "is_race_day": bool(_action_value(action, "is_race_day")),
+    "available_actions": list(getattr(action, "available_actions", []) or []),
+  }
+  if isinstance(state_obj, dict):
+    payload["energy_level"] = state_obj.get("energy_level")
+    payload["year"] = state_obj.get("year")
+  return payload
+
+
+def _warning_policy_for_race_branch(branch_kind, fallback_action=None) -> Dict[str, Any]:
+  fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
+  cancel_target_label = _fallback_target_label(fallback_action) if fallback_action else ""
+  cancel_target = fallback_action.get("func") if isinstance(fallback_action, dict) else None
+
+  if branch_kind in {"forced_race_day", "forced_climax_race", "pre_debut_debut_race"}:
+    return {
+      "planner_owned": True,
+      "warning_expected": False,
+      "accept_warning": True,
+      "accept_reason": "Forced race branch bypasses the optional consecutive-race policy.",
+      "cancel_target": cancel_target,
+      "cancel_target_label": cancel_target_label,
+      "force_rest_on_cancel": False,
+    }
+
+  if branch_kind in {"scheduled_race", "lobby_scheduled_race"}:
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": True,
+      "accept_reason": "Scheduled race branch forces continue through the consecutive-race warning.",
+      "cancel_target": cancel_target,
+      "cancel_target_label": cancel_target_label,
+      "force_rest_on_cancel": False,
+      "force_accept_warning": True,
+    }
+
+  if branch_kind == "optional_fallback_race":
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": False,
+      "cancel_reason": "Weak-training fallback race is not worth a third consecutive race.",
+      "cancel_target": "do_rest",
+      "cancel_target_label": "rest",
+      "force_rest_on_cancel": True,
+      "cancel_reason_key": "optional_fallback_non_rival_race",
+    }
+
+  if branch_kind == "optional_rival_race":
+    if fallback_action.get("func") == "do_rest":
+      return {
+        "planner_owned": True,
+        "warning_expected": True,
+        "accept_warning": False,
+        "cancel_reason": "Optional rival race promoted from rest should preserve the rest fallback when blocked.",
+        "cancel_target": "do_rest",
+        "cancel_target_label": "rest",
+        "force_rest_on_cancel": True,
+        "cancel_reason_key": "optional_rival_promoted_from_rest",
+      }
+    accept_warning = not bool(getattr(config, "CANCEL_CONSECUTIVE_RACE", False))
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": accept_warning,
+      "accept_reason": "Config allows optional rival races through the consecutive-race warning." if accept_warning else "",
+      "cancel_reason": "" if accept_warning else "Config cancels optional rival races at the consecutive-race warning.",
+      "cancel_target": "do_rest" if not accept_warning else cancel_target,
+      "cancel_target_label": "rest" if not accept_warning else cancel_target_label,
+      "force_rest_on_cancel": not accept_warning,
+      "cancel_reason_key": "cancel_consecutive_race_setting" if not accept_warning else "",
+    }
+
+  return {
+    "planner_owned": True,
+    "warning_expected": True,
+    "accept_warning": not bool(getattr(config, "CANCEL_CONSECUTIVE_RACE", False)),
+    "accept_reason": "Race branch keeps the current legacy consecutive-race policy.",
+    "cancel_target": cancel_target,
+    "cancel_target_label": cancel_target_label,
+    "force_rest_on_cancel": False,
+  }
+
+
+def _fallback_chain(branch_kind, fallback_action=None, warning_policy=None) -> Dict[str, Any]:
+  fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
+  warning_policy = warning_policy if isinstance(warning_policy, dict) else {}
+  chain = []
+  if branch_kind == "optional_rival_race" and fallback_action:
+    chain.append(
+      {
+        "trigger": "rival_scout_failed",
+        "target_func": fallback_action.get("func"),
+        "target_payload": copy.deepcopy(fallback_action),
+        "target_label": _fallback_target_label(fallback_action),
+      }
+    )
+  if fallback_action and branch_kind in {"optional_rival_race", "goal_race", "mission_race"}:
+    chain.append(
+      {
+        "trigger": "race_gate_blocked",
+        "target_func": fallback_action.get("func"),
+        "target_payload": copy.deepcopy(fallback_action),
+        "target_label": _fallback_target_label(fallback_action),
+      }
+    )
+  cancel_target = warning_policy.get("cancel_target")
+  cancel_label = warning_policy.get("cancel_target_label")
+  if cancel_target or cancel_label:
+    chain.append(
+      {
+        "trigger": "consecutive_warning_cancel",
+        "target_func": cancel_target or fallback_action.get("func"),
+        "target_payload": copy.deepcopy(fallback_action),
+        "target_label": cancel_label or _fallback_target_label(fallback_action),
+      }
+    )
+  return {
+    "planner_owned": True,
+    "chain": chain,
+  }
+
+
+def _scheduled_race_probe(state_obj, action):
+  probe = _clone_action(action)
+  try:
+    return Strategy().check_scheduled_races(state_obj, probe)
+  except Exception:
+    return probe
+
+
+def _goal_race_probe(state_obj, action):
+  probe = _clone_action(action)
+  try:
+    return Strategy().decide_race_for_goal(state_obj, probe)
+  except Exception:
+    return probe
+
+
+def _planner_force_fallback(state_obj) -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  fallback = dict(state_obj.get(PLANNER_FORCE_FALLBACK_KEY) or {})
+  if fallback.get("turn_key") != _turn_key(state_obj):
+    return {}
+  return fallback
+
+
+def clear_planner_fallback(state_obj):
+  if isinstance(state_obj, dict):
+    state_obj.pop(PLANNER_FORCE_FALLBACK_KEY, None)
+
+
+def mark_planner_fallback(state_obj, reason):
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  runtime_state["fallback_count"] = int(runtime_state.get("fallback_count") or 0) + 1
+  runtime_state["last_fallback_reason"] = str(reason or "planner_error")
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  payload = {
+    "turn_key": _turn_key(state_obj),
+    "reason": str(reason or "planner_error"),
+  }
+  state_obj[PLANNER_FORCE_FALLBACK_KEY] = payload
+  return payload
 
 
 def _candidate_shop_buys(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
@@ -339,9 +559,481 @@ def _resolve_inventory_source(state_obj) -> Tuple[Dict[str, Any], Dict[str, Any]
   return current_inventory, current_summary, current_flow, "current"
 
 
-def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payload) -> List[ExecutionStep]:
-  action_func = _action_func(action)
-  prefer_rival_race = bool(_action_value(action, "prefer_rival_race"))
+def _planner_selected_action_payload(
+  action,
+  *,
+  func=None,
+  race_name=None,
+  race_image_path=None,
+  race_grade_target=None,
+  prefer_rival_race=False,
+  fallback_non_rival_race=False,
+  scheduled_race=False,
+  lobby_scheduled_race=False,
+  race_mission_available=False,
+  is_race_day=False,
+  trackblazer_climax_race_day=False,
+  race_decision=None,
+  race_lookahead=None,
+  warning_policy=None,
+  fallback_action=None,
+  branch_kind="",
+):
+  fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
+  selected_func = func or _action_func(action)
+  payload = {
+    "func": selected_func,
+    "training_name": _action_value(action, "training_name"),
+    "training_function": _action_value(action, "training_function"),
+    "training_data": copy.deepcopy(_action_value(action, "training_data") or {}),
+    "race_name": race_name,
+    "race_image_path": race_image_path,
+    "race_grade_target": race_grade_target,
+    "prefer_rival_race": bool(prefer_rival_race),
+    "fallback_non_rival_race": bool(fallback_non_rival_race),
+    "scheduled_race": bool(scheduled_race),
+    "trackblazer_lobby_scheduled_race": bool(lobby_scheduled_race),
+    "race_mission_available": bool(race_mission_available),
+    "is_race_day": bool(is_race_day),
+    "trackblazer_climax_race_day": bool(trackblazer_climax_race_day),
+    "trackblazer_race_decision": copy.deepcopy(race_decision or {}),
+    "trackblazer_race_lookahead": copy.deepcopy(race_lookahead or {}),
+    "planner_race_warning_policy": copy.deepcopy(warning_policy or {}),
+    "trackblazer_planner_race": {
+      "branch_kind": branch_kind,
+      "warning_plan": copy.deepcopy(warning_policy or {}),
+      "fallback_action": copy.deepcopy(fallback_action),
+    },
+  }
+  if selected_func != "do_race":
+    payload["race_name"] = None
+    payload["race_image_path"] = None
+    payload["race_grade_target"] = None
+    payload["prefer_rival_race"] = False
+    payload["fallback_non_rival_race"] = False
+    payload["scheduled_race"] = False
+    payload["trackblazer_lobby_scheduled_race"] = False
+    payload["race_mission_available"] = False
+    payload["is_race_day"] = False
+    payload["trackblazer_climax_race_day"] = False
+  return payload
+
+
+def _build_planner_race_plan(state_obj, action):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  base_action = _capture_action_payload(action, state_obj=state_obj)
+  base_fallback = copy.deepcopy(base_action)
+  pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
+  lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
+  forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day") or _action_value(action, "trackblazer_climax_race_day"))
+  forced_race_day = bool(state_obj.get("turn") == "Race Day" or _action_value(action, "is_race_day"))
+  mission_race_enabled = bool(getattr(config, "DO_MISSION_RACES_IF_POSSIBLE", False) and state_obj.get("race_mission_available"))
+  prioritize_missions = bool(getattr(config, "PRIORITIZE_MISSIONS_OVER_G1", False))
+  race_lookahead = get_race_lookahead_energy_advice(
+    state_obj,
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  ) or {}
+
+  scheduled_probe = _scheduled_race_probe(state_obj, action)
+  goal_probe = _goal_race_probe(state_obj, action)
+  scheduled_race_name = _action_value(scheduled_probe, "race_name")
+  scheduled_race_active = bool(_action_value(scheduled_probe, "scheduled_race")) or lobby_scheduled_race
+  goal_race_active = bool(_action_func(goal_probe) == "do_race" and _action_value(goal_probe, "race_name"))
+
+  existing_rival_scout = copy.deepcopy(_action_value(action, "rival_scout", {}) or {})
+  warning_cancelled = bool(_action_value(action, "_consecutive_warning_cancelled"))
+  warning_cancel_reason = str(_action_value(action, "_consecutive_warning_cancel_reason") or "")
+  existing_planner_race = copy.deepcopy(_action_value(action, "trackblazer_planner_race", {}) or {})
+  existing_planner_branch = str(existing_planner_race.get("branch_kind") or "")
+
+  race_decision = {}
+  if not pre_debut:
+    try:
+      race_decision = evaluate_trackblazer_race(state_obj, action) or {}
+    except Exception as exc:
+      race_decision = {
+        "should_race": False,
+        "reason": f"planner_race_logic_error: {exc}",
+        "planner_error": True,
+      }
+
+  branch_kind = "non_race"
+  selected_action_payload = copy.deepcopy(base_action)
+  race_check = {
+    "planner_owned": True,
+    "branch_kind": branch_kind,
+    "rival_indicator_detected": bool(state_obj.get("rival_indicator_detected")),
+    "scheduled_race": scheduled_race_active,
+    "scheduled_race_source": "lobby_button" if lobby_scheduled_race else ("config_schedule" if scheduled_race_name else ""),
+    "forced_climax_race_day": forced_climax_race_day,
+    "forced_race_day": forced_race_day,
+    "pre_debut": pre_debut,
+  }
+  race_entry_gate = {}
+  race_scout = {
+    "planner_owned": True,
+    "required": False,
+    "executed": bool(existing_rival_scout),
+  }
+  warning_plan = {}
+
+  if (
+    existing_planner_branch
+    and not warning_cancelled
+    and existing_rival_scout.get("rival_found") is not False
+  ):
+    branch_kind = existing_planner_branch
+    warning_plan = copy.deepcopy(
+      _action_value(action, "planner_race_warning_policy") or
+      existing_planner_race.get("warning_plan") or {}
+    )
+    selected_action_payload = _planner_selected_action_payload(
+      action,
+      func=_action_func(action),
+      race_name=_action_value(action, "race_name"),
+      race_image_path=_action_value(action, "race_image_path"),
+      race_grade_target=_action_value(action, "race_grade_target"),
+      prefer_rival_race=bool(_action_value(action, "prefer_rival_race")),
+      fallback_non_rival_race=bool(_action_value(action, "fallback_non_rival_race")),
+      scheduled_race=bool(_action_value(action, "scheduled_race")),
+      lobby_scheduled_race=bool(_action_value(action, "trackblazer_lobby_scheduled_race")),
+      race_mission_available=bool(_action_value(action, "race_mission_available")),
+      is_race_day=bool(_action_value(action, "is_race_day")),
+      trackblazer_climax_race_day=bool(_action_value(action, "trackblazer_climax_race_day")),
+      race_decision=copy.deepcopy(_action_value(action, "trackblazer_race_decision") or {}),
+      race_lookahead=copy.deepcopy(_action_value(action, "trackblazer_race_lookahead") or {}),
+      warning_policy=warning_plan,
+      fallback_action=base_fallback,
+      branch_kind=branch_kind,
+    )
+    race_scout = {
+      "planner_owned": True,
+      "required": bool(branch_kind == "optional_rival_race"),
+      "executed": bool(existing_rival_scout),
+      "rival_found": existing_rival_scout.get("rival_found"),
+      "selected_race_name": existing_rival_scout.get("race_name"),
+      "selected_match_count": existing_rival_scout.get("match_count"),
+      "selected_grade": existing_rival_scout.get("grade"),
+    }
+  elif warning_cancelled and _action_func(action) != "do_race":
+    branch_kind = "warning_cancel_fallback"
+    warning_plan = _warning_policy_for_race_branch("optional_rival_race", base_fallback)
+    warning_plan["outcome"] = "cancelled"
+    warning_plan["cancel_reason_key"] = warning_cancel_reason
+    selected_action_payload = _planner_selected_action_payload(
+      action,
+      func=_action_func(action),
+      race_decision={
+        "should_race": False,
+        "branch_kind": branch_kind,
+        "reason": warning_cancel_reason or "Consecutive-race warning cancelled the race branch.",
+      },
+      warning_policy=warning_plan,
+      fallback_action=base_fallback,
+      branch_kind=branch_kind,
+    )
+    race_scout.update({
+      "executed": bool(existing_rival_scout),
+      "rival_found": existing_rival_scout.get("rival_found"),
+      "status": "warning_cancelled",
+    })
+  elif existing_rival_scout.get("rival_found") is False and _action_func(action) != "do_race":
+    branch_kind = "rival_scout_fallback"
+    warning_plan = _warning_policy_for_race_branch("optional_rival_race", base_fallback)
+    selected_action_payload = _planner_selected_action_payload(
+      action,
+      func=_action_func(action),
+      race_decision={
+        "should_race": False,
+        "branch_kind": branch_kind,
+        "reason": "Planner rival scout failed; reverting to the stored fallback action.",
+      },
+      warning_policy=warning_plan,
+      fallback_action=base_fallback,
+      branch_kind=branch_kind,
+    )
+    race_scout.update({
+      "required": True,
+      "executed": True,
+      "rival_found": False,
+      "status": "fallback_applied",
+      "selected_match_count": existing_rival_scout.get("match_count"),
+      "selected_race_name": existing_rival_scout.get("race_name"),
+      "selected_grade": existing_rival_scout.get("grade"),
+    })
+  else:
+    if forced_climax_race_day:
+      branch_kind = "forced_climax_race"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name=_action_value(action, "race_name") or "any",
+        race_grade_target=_action_value(action, "race_grade_target") or "any",
+        is_race_day=True,
+        trackblazer_climax_race_day=True,
+        race_decision={
+          "should_race": True,
+          "forced_race_day": True,
+          "g1_forced": True,
+          "branch_kind": branch_kind,
+          "reason": "Forced Climax race-day UI replaces the normal lobby buttons.",
+          "race_name": _action_value(action, "race_name") or "any",
+          "rival_indicator": False,
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif forced_race_day:
+      branch_kind = "forced_race_day"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name=_action_value(action, "race_name") or "any",
+        race_grade_target=_action_value(action, "race_grade_target") or "any",
+        is_race_day=True,
+        race_decision={
+          "should_race": True,
+          "forced_race_day": True,
+          "g1_forced": True,
+          "branch_kind": branch_kind,
+          "reason": "Forced race-day turn bypasses optional race scouting and fallback logic.",
+          "race_name": _action_value(action, "race_name") or "any",
+          "rival_indicator": bool(state_obj.get("rival_indicator_detected")),
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif pre_debut and (_action_func(action) == "do_race" or scheduled_race_active or goal_race_active or mission_race_enabled):
+      branch_kind = "pre_debut_debut_race"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name=_action_value(action, "race_name") or "any",
+        race_image_path=_action_value(action, "race_image_path") or "assets/ui/match_track.png",
+        race_grade_target=_action_value(action, "race_grade_target") or "any",
+        race_decision={
+          "should_race": True,
+          "forced_race_day": True,
+          "branch_kind": branch_kind,
+          "reason": "Junior Year Pre-Debut race turns use the debut branch, not optional rival-scout logic.",
+          "race_name": _action_value(action, "race_name") or "any",
+          "rival_indicator": False,
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif prioritize_missions and mission_race_enabled:
+      branch_kind = "mission_race"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name="any",
+        race_image_path="assets/ui/match_track.png",
+        race_mission_available=True,
+        race_decision={
+          "should_race": True,
+          "branch_kind": branch_kind,
+          "reason": "Mission race branch is active and prioritized ahead of the normal Trackblazer race gate.",
+          "race_name": "any",
+          "rival_indicator": False,
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif scheduled_race_active:
+      branch_kind = "lobby_scheduled_race" if lobby_scheduled_race and not scheduled_race_name else "scheduled_race"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name=scheduled_race_name or _action_value(action, "race_name") or "any",
+        race_image_path=(f"assets/races/{scheduled_race_name}.png" if scheduled_race_name else _action_value(action, "race_image_path") or "assets/ui/match_track.png"),
+        scheduled_race=bool(scheduled_race_name),
+        lobby_scheduled_race=lobby_scheduled_race,
+        race_decision={
+          "should_race": True,
+          "branch_kind": branch_kind,
+          "scheduled_race": True,
+          "reason": "Scheduled race branch is planner-owned and bypasses optional rival-scout logic.",
+          "race_name": scheduled_race_name or "any",
+          "rival_indicator": bool(state_obj.get("rival_indicator_detected")),
+        },
+        race_lookahead=race_lookahead,
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif (not prioritize_missions) and mission_race_enabled:
+      branch_kind = "mission_race"
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name="any",
+        race_image_path="assets/ui/match_track.png",
+        race_mission_available=True,
+        race_decision={
+          "should_race": True,
+          "branch_kind": branch_kind,
+          "reason": "Mission race branch remains available after scheduled-race checks.",
+          "race_name": "any",
+          "rival_indicator": False,
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif goal_race_active:
+      branch_kind = "goal_race"
+      goal_race_name = _action_value(goal_probe, "race_name")
+      warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name=goal_race_name,
+        race_image_path=f"assets/races/{goal_race_name}.png" if goal_race_name else _action_value(goal_probe, "race_image_path"),
+        race_decision={
+          "should_race": True,
+          "branch_kind": branch_kind,
+          "reason": "Goal race branch selected from the configured turn criteria.",
+          "race_name": goal_race_name,
+          "rival_indicator": False,
+        },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    else:
+      if race_decision.get("prefer_rest_over_weak_training"):
+        branch_kind = "weak_training_rest"
+        selected_action_payload = _planner_selected_action_payload(
+          action,
+          func="do_rest",
+          race_decision={**dict(race_decision), "branch_kind": branch_kind},
+          race_lookahead=race_lookahead,
+          branch_kind=branch_kind,
+        )
+      elif race_decision.get("should_race"):
+        branch_kind = "optional_fallback_race" if race_decision.get("fallback_non_rival_race") else "optional_rival_race"
+        warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
+        race_scout = {
+          "planner_owned": True,
+          "required": bool(branch_kind == "optional_rival_race"),
+          "executed": False,
+          "status": "pending",
+          "failure_transition": _fallback_target_label(base_fallback),
+        }
+        selected_action_payload = _planner_selected_action_payload(
+          action,
+          func="do_race",
+          race_name=race_decision.get("race_name") or "any",
+          race_image_path=_action_value(action, "race_image_path") or "assets/ui/match_track.png",
+          race_grade_target=race_decision.get("race_tier_target"),
+          prefer_rival_race=bool(race_decision.get("prefer_rival_race")),
+          fallback_non_rival_race=bool(race_decision.get("fallback_non_rival_race")),
+          race_decision={**dict(race_decision), "branch_kind": branch_kind},
+          race_lookahead=race_lookahead,
+          warning_policy=warning_plan,
+          fallback_action=base_fallback,
+          branch_kind=branch_kind,
+        )
+      else:
+        branch_kind = "training"
+        selected_action_payload = _planner_selected_action_payload(
+          action,
+          func=_action_func(action),
+          race_decision={**dict(race_decision), "branch_kind": branch_kind},
+          race_lookahead=race_lookahead,
+          branch_kind=branch_kind,
+        )
+
+  race_check["branch_kind"] = branch_kind
+  race_check["scheduled_race"] = bool(selected_action_payload.get("scheduled_race") or selected_action_payload.get("trackblazer_lobby_scheduled_race"))
+  race_check["scheduled_race_source"] = (
+    "lobby_button"
+    if selected_action_payload.get("trackblazer_lobby_scheduled_race") else
+    ("config_schedule" if selected_action_payload.get("scheduled_race") else "")
+  )
+  race_check["scout_required"] = bool(race_scout.get("required"))
+
+  if selected_action_payload.get("func") == "do_race" and branch_kind not in {"forced_race_day", "forced_climax_race", "pre_debut_debut_race"}:
+    race_entry_gate = {
+      "planner_owned": True,
+      "opens_from_lobby": True,
+      "expected_branch": "continue_to_race_list" if warning_plan.get("accept_warning") else "return_to_lobby",
+      "warning_meaning": "This race would become the third consecutive race" if warning_plan.get("warning_expected") else "",
+      "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+      "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+      "ok_action": "continue_to_race_list",
+      "cancel_action": "return_to_lobby",
+      "force_accept_warning": bool(warning_plan.get("force_accept_warning")),
+    }
+
+  fallback_policy = _fallback_chain(branch_kind, base_fallback, warning_plan)
+
+  action_payload = {
+    "planner_owned": True,
+    "branch_kind": branch_kind,
+    "func": selected_action_payload.get("func"),
+    "options": copy.deepcopy(selected_action_payload),
+    "fallback_action": copy.deepcopy(base_fallback),
+    "available_actions": list(base_action.get("available_actions") or []),
+  }
+
+  if action_payload["func"] == "do_race":
+    action_payload["options"]["_rival_fallback_func"] = base_fallback.get("func")
+    action_payload["options"]["_rival_fallback_training_name"] = base_fallback.get("training_name")
+    action_payload["options"]["_rival_fallback_training_data"] = copy.deepcopy(base_fallback.get("training_data") or {})
+
+  if existing_rival_scout:
+    race_scout = {
+      **dict(race_scout or {}),
+      "executed": True,
+      "rival_found": existing_rival_scout.get("rival_found"),
+      "selected_race_name": existing_rival_scout.get("race_name"),
+      "selected_match_count": existing_rival_scout.get("match_count"),
+      "selected_grade": existing_rival_scout.get("grade"),
+    }
+
+  return {
+    "planner_owned": True,
+    "branch_kind": branch_kind,
+    "selection_rationale": (selected_action_payload.get("trackblazer_race_decision") or {}).get("reason") or "",
+    "selected_action": copy.deepcopy(selected_action_payload),
+    "action_payload": action_payload,
+    "race_check": race_check,
+    "race_decision": copy.deepcopy(selected_action_payload.get("trackblazer_race_decision") or {}),
+    "race_entry_gate": race_entry_gate,
+    "race_scout": race_scout,
+    "warning_plan": warning_plan,
+    "fallback_policy": fallback_policy,
+  }
+
+
+def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payload, race_plan=None) -> List[ExecutionStep]:
+  race_plan = race_plan if isinstance(race_plan, dict) else {}
+  selected_race_action = dict(race_plan.get("selected_action") or {})
+  warning_plan = dict(race_plan.get("warning_plan") or {})
+  race_scout_plan = dict(race_plan.get("race_scout") or {})
+  branch_kind = str(race_plan.get("branch_kind") or "")
+  planned_action = action
+  if selected_race_action:
+    planned_action = _clone_action(action)
+    planned_action.func = selected_race_action.get("func") or _action_func(action)
+    for key, value in selected_race_action.items():
+      if key == "func":
+        continue
+      planned_action[key] = copy.deepcopy(value)
+  action_func = _action_func(planned_action)
+  prefer_rival_race = bool(selected_race_action.get("prefer_rival_race"))
   skill_purchase_plan = dict((state_obj or {}).get("skill_purchase_plan") or {})
   execution_items = list((item_execution_payload or {}).get("execution_items") or [])
   reassess_transition = dict((item_execution_payload or {}).get("reassess_transition") or {})
@@ -460,17 +1152,18 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payloa
     )
 
   if action_func == "do_race":
-    step_sequence.append(
-      ExecutionStep(
-        step_id="enforce_race_gate",
-        step_type="enforce_race_gate",
-        intent="apply_operator_race_gate",
-        screen_preconditions=["race_action_selected"],
-        success_transition="race_gate_cleared",
-        failure_transition="race_gate_blocked",
+    if branch_kind not in {"forced_race_day", "forced_climax_race", "pre_debut_debut_race"}:
+      step_sequence.append(
+        ExecutionStep(
+          step_id="enforce_race_gate",
+          step_type="enforce_race_gate",
+          intent="apply_operator_race_gate",
+          screen_preconditions=["race_action_selected"],
+          success_transition="race_gate_cleared",
+          failure_transition="race_gate_blocked",
+        )
       )
-    )
-    if prefer_rival_race:
+    if race_scout_plan.get("required") or prefer_rival_race:
       step_sequence.append(
         ExecutionStep(
           step_id="execute_rival_scout",
@@ -478,7 +1171,20 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payloa
           intent="verify_rival_race_before_commit",
           screen_preconditions=["race_list_accessible"],
           success_transition="rival_race_confirmed",
-          failure_transition="revert_to_fallback_action",
+          failure_transition=(race_scout_plan.get("failure_transition") or "revert_to_fallback_action"),
+          notes=race_scout_plan.get("reason") or "",
+        )
+      )
+    if warning_plan.get("warning_expected"):
+      step_sequence.append(
+        ExecutionStep(
+          step_id="resolve_consecutive_race_warning",
+          step_type="resolve_consecutive_race_warning",
+          intent="follow_planner_warning_policy",
+          screen_preconditions=["consecutive_warning_dialog_possible"],
+          success_transition="warning_policy_resolved",
+          failure_transition="warning_policy_failed",
+          notes=warning_plan.get("cancel_reason") or warning_plan.get("accept_reason") or "",
         )
       )
 
@@ -491,7 +1197,7 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payloa
         screen_preconditions=["main_action_ready"],
         success_transition="action_click_complete",
         failure_transition="action_click_failed",
-        planned_clicks=_build_main_action_step_planned_clicks(action),
+        planned_clicks=_build_main_action_step_planned_clicks(planned_action),
       )
     )
     step_sequence.append(
@@ -1011,6 +1717,23 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
   would_buy = list(planner_state.get("shop_buy_plan") or legacy_shared_plan.get("would_buy") or [])
   would_use = list(planner_state.get("pre_action_items") or legacy_shared_plan.get("would_use") or [])
   deferred_use = list(planner_state.get("deferred_use") or legacy_shared_plan.get("deferred_use") or [])
+  planner_race_plan = dict(planner_state.get("race_plan") or {})
+
+  if planner_state.get("use_planner_race_sections") and planner_race_plan.get("planner_owned"):
+    return {
+      "race_check": copy.deepcopy(planner_race_plan.get("race_check") or {}),
+      "race_decision": copy.deepcopy(planner_race_plan.get("race_decision") or {}),
+      "race_entry_gate": copy.deepcopy(planner_race_plan.get("race_entry_gate") or {}),
+      "race_scout": copy.deepcopy(planner_race_plan.get("race_scout") or {}),
+      "race_warning_policy": copy.deepcopy(planner_state.get("warning_plan") or {}),
+      "race_fallback_policy": copy.deepcopy(planner_state.get("fallback_policy") or {}),
+      "inventory_scan": inventory_plan,
+      "would_use": would_use,
+      "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
+      "deferred_use": deferred_use,
+      "shop_scan": shop_plan,
+      "would_buy": would_buy,
+    }
 
   race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
   rival_scout = _action_value(action, "rival_scout", {}) or {}
@@ -1161,6 +1884,34 @@ def get_turn_plan(state_obj, action, planner_state=None, limit=8) -> TurnPlan:
   return TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
 
 
+def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
+  planner_state = plan_once(state_obj, action, limit=8)
+  turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
+  turn_plan.decision_path = str(decision_path or "legacy")
+  turn_plan.planner_metadata = {
+    **dict(turn_plan.planner_metadata or {}),
+    "decision_path": turn_plan.decision_path,
+    "fallback_reason": str(reason or ""),
+  }
+  turn_plan.step_sequence = _build_step_sequence(
+    state_obj,
+    action,
+    list((turn_plan.shop_plan or {}).get("would_buy") or []),
+    dict((turn_plan.item_plan or {}).get("execution_payload") or {}),
+    dict(turn_plan.race_plan or {}) if turn_plan.decision_path == "planner" else {},
+  )
+  planner_state["decision_path"] = turn_plan.decision_path
+  planner_state["turn_plan"] = turn_plan.to_snapshot()
+  if isinstance(state_obj, dict):
+    state_obj[PLANNER_STATE_KEY] = planner_state
+  if turn_plan.decision_path == "planner":
+    apply_turn_plan_action_payload(action, turn_plan)
+    planner_state["turn_plan"] = turn_plan.to_snapshot()
+    if isinstance(state_obj, dict):
+      state_obj[PLANNER_STATE_KEY] = planner_state
+  return planner_state, turn_plan
+
+
 def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
   if not hasattr(action, "__setitem__"):
     return action
@@ -1173,6 +1924,62 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
     action[key] = copy.deepcopy(value)
   if "trackblazer_shop_buy_plan" not in action_mutations:
     action["trackblazer_shop_buy_plan"] = copy.deepcopy(list(shop_plan.get("would_buy") or []))
+
+  if turn_plan and turn_plan.decision_path == "planner":
+    race_plan = dict(turn_plan.race_plan or {})
+    race_payload = dict(race_plan.get("action_payload") or {})
+    selected_payload = dict(race_payload.get("options") or {})
+    target_func = race_payload.get("func") or selected_payload.get("func") or _action_func(action)
+    for key in (
+      "race_name",
+      "race_image_path",
+      "race_grade_target",
+      "prefer_rival_race",
+      "fallback_non_rival_race",
+      "scheduled_race",
+      "trackblazer_lobby_scheduled_race",
+      "race_mission_available",
+      "is_race_day",
+      "trackblazer_climax_race_day",
+      "planner_race_warning_policy",
+      "trackblazer_planner_race",
+      "_rival_fallback_func",
+      "_rival_fallback_training_name",
+      "_rival_fallback_training_data",
+      "_consecutive_warning_force_rest",
+      "_consecutive_warning_cancelled",
+      "_consecutive_warning_cancel_reason",
+    ):
+      action.options.pop(key, None)
+
+    action.func = target_func
+    for key, value in selected_payload.items():
+      if key == "func":
+        continue
+      if value in (None, "", [], {}) and key not in {
+        "trackblazer_race_decision",
+        "trackblazer_race_lookahead",
+        "planner_race_warning_policy",
+        "trackblazer_planner_race",
+      }:
+        continue
+      action[key] = copy.deepcopy(value)
+    available_actions = list(race_payload.get("available_actions") or [])
+    if target_func and target_func not in available_actions:
+      available_actions = [target_func] + [name for name in available_actions if name != target_func]
+    elif target_func:
+      available_actions = [target_func] + [name for name in available_actions if name != target_func]
+    if hasattr(action, "available_actions"):
+      action.available_actions = available_actions
+
+    turn_plan.review_context = {
+      **dict(turn_plan.review_context or {}),
+      "selected_action": _build_selected_action_review_context(
+        action,
+        pre_action_items=list(item_plan.get("pre_action_items") or []),
+        reassess_after_item_use=item_plan.get("reassess_after_item_use"),
+      ),
+    }
   return action
 
 
@@ -1314,6 +2121,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
   runtime_state["latest_observation_id"] = observation_id
   runtime_state["pending_skill_scan"] = pending_skill_scan.to_dict()
   state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  planner_race_plan = _build_planner_race_plan(state_obj, action)
+  forced_fallback = _planner_force_fallback(state_obj)
+  decision_path = "planner→legacy (fallback)" if forced_fallback else "legacy"
 
   observed = hydrate_observed_turn_state(state_obj, action=action, planner_state={
     "freshness": freshness.to_dict(),
@@ -1323,15 +2133,23 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "deferred_use": deferred_use,
     "reassess_after_item_use": bool(reassess_after_item_use),
     "runtime": runtime_state,
+    "planner_race_plan": planner_race_plan,
   })
   derived = derive_turn_state(observed, planner_state={
     "inventory_source": inventory_source,
     "shop_buy_plan": shop_buy_plan,
     "pre_action_items": execution_items,
     "reassess_after_item_use": bool(reassess_after_item_use),
+    "planner_race_plan": planner_race_plan,
     "turn_plan": {"planner_metadata": {"runtime": runtime_state}},
   }, state_obj=state_obj, action=action)
-  candidates = enumerate_candidate_actions(observed, derived, state_obj=state_obj, action=action)
+  candidates = enumerate_candidate_actions(
+    observed,
+    derived,
+    state_obj=state_obj,
+    action=action,
+    planner_state={"planner_race_plan": planner_race_plan},
+  )
 
   legacy_base_plan = {
     "race_check": {},
@@ -1367,6 +2185,10 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     planner_state={
       "legacy_shared_plan": legacy_base_plan,
       "item_use_context": item_context,
+      "race_plan": planner_race_plan,
+      "warning_plan": planner_race_plan.get("warning_plan") or {},
+      "fallback_policy": planner_race_plan.get("fallback_policy") or {},
+      "use_planner_race_sections": False,
     },
   )
   ranked_trainings = build_ranked_training_snapshot(
@@ -1377,9 +2199,10 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
 
   turn_plan = TurnPlan(
     version=PLANNER_VERSION,
-    decision_path="legacy",
+    decision_path=decision_path,
     freshness=freshness,
     selected_candidate=candidates[0].to_dict() if candidates else {},
+    selection_rationale=str(planner_race_plan.get("selection_rationale") or ""),
     candidate_ranking=[candidate.to_dict() for candidate in candidates],
     shop_plan={
       "would_buy": shop_buy_plan,
@@ -1416,6 +2239,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
         "transition_kind": (item_execution_payload.get("reassess_transition") or {}).get("transition_kind"),
       },
     },
+    race_plan=copy.deepcopy(planner_race_plan),
+    warning_plan=copy.deepcopy(planner_race_plan.get("warning_plan") or {}),
+    fallback_policy=copy.deepcopy(planner_race_plan.get("fallback_policy") or {}),
     reobserve_boundaries=copy.deepcopy(reobserve_boundaries),
     inventory_snapshot={
       "source": inventory_source,
@@ -1441,12 +2267,14 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "execution_item_count": len(execution_items),
       "ranked_training_count": len(ranked_trainings),
       "inventory_source": inventory_source,
+      "race_branch_kind": planner_race_plan.get("branch_kind"),
     },
     planner_metadata={
       "planner_version": PLANNER_VERSION,
-      "decision_path": "legacy",
+      "decision_path": decision_path,
       "inventory_source": inventory_source,
       "runtime": copy.deepcopy(runtime_state),
+      "fallback_reason": forced_fallback.get("reason") if forced_fallback else "",
     },
     review_context={
       "selected_action": _build_selected_action_review_context(
@@ -1462,6 +2290,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       action,
       shop_buy_plan,
       item_execution_payload,
+      dict(planner_race_plan or {}) if decision_path == "planner" else {},
     ),
   )
   turn_plan.review_context = {

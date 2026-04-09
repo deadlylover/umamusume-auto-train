@@ -249,6 +249,10 @@ def go_to_racebox_top():
 
 def _should_accept_consecutive_race_warning(options=None):
   options = options or {}
+  planner_policy = options.get("planner_race_warning_policy") or {}
+  if isinstance(planner_policy, dict) and planner_policy:
+    if planner_policy.get("accept_warning") is not None:
+      return bool(planner_policy.get("accept_warning"))
   # Optional rival races promoted from an original rest decision should back
   # out on consecutive-race warning and let rest proceed.
   if (
@@ -270,6 +274,11 @@ def _should_accept_consecutive_race_warning(options=None):
 def _mark_consecutive_warning_outcome(options=None, *, force_rest=False, reason=None):
   if not isinstance(options, dict):
     return
+  options["planner_warning_outcome"] = {
+    "cancelled": True,
+    "force_rest": bool(force_rest),
+    "reason": str(reason or ""),
+  }
   options["_consecutive_warning_cancelled"] = True
   if force_rest:
     options["_consecutive_warning_force_rest"] = True
@@ -280,6 +289,10 @@ def _mark_consecutive_warning_outcome(options=None, *, force_rest=False, reason=
 def _should_force_rest_after_optional_warning(options=None):
   if not isinstance(options, dict):
     return False
+  planner_policy = options.get("planner_race_warning_policy") or {}
+  if isinstance(planner_policy, dict) and planner_policy:
+    if planner_policy.get("force_rest_on_cancel") is not None:
+      return bool(planner_policy.get("force_rest_on_cancel"))
   if options.get("scheduled_race") or options.get("trackblazer_lobby_scheduled_race") or options.get("is_race_day"):
     return False
   race_decision = options.get("trackblazer_race_decision") or {}
@@ -302,6 +315,7 @@ def enter_race(race_name="any", race_image_path="", options=None):
   sleep(1)
   consecutive_cancel_btn = device_action.locate("assets/buttons/cancel_btn.png", min_search_time=get_secs(1))
   accept_warning = _should_accept_consecutive_race_warning(options)
+  planner_warning_policy = (options or {}).get("planner_race_warning_policy") or {}
   is_fallback_race = bool(options and options.get("fallback_non_rival_race"))
   is_rest_promoted_optional_race = bool(
     options
@@ -312,18 +326,20 @@ def enter_race(race_name="any", race_image_path="", options=None):
     and not options.get("is_race_day")
   )
   if consecutive_cancel_btn and is_fallback_race:
+    cancel_reason = ((options or {}).get("planner_race_warning_policy") or {}).get("cancel_reason_key") or "optional_fallback_non_rival_race"
     _mark_consecutive_warning_outcome(
       options,
       force_rest=True,
-      reason="optional_fallback_non_rival_race",
+      reason=cancel_reason,
     )
     device_action.locate_and_click("assets/buttons/cancel_btn.png", min_search_time=get_secs(1), text="[INFO] Consecutive-race warning on fallback non-rival race. Cancelling — not worth a 3rd consecutive race for a weak-training fallback.")
     return False
   if consecutive_cancel_btn and is_rest_promoted_optional_race:
+    cancel_reason = ((options or {}).get("planner_race_warning_policy") or {}).get("cancel_reason_key") or "optional_rival_promoted_from_rest"
     _mark_consecutive_warning_outcome(
       options,
       force_rest=True,
-      reason="optional_rival_promoted_from_rest",
+      reason=cancel_reason,
     )
     device_action.locate_and_click(
       "assets/buttons/cancel_btn.png",
@@ -331,12 +347,14 @@ def enter_race(race_name="any", race_image_path="", options=None):
       text="[INFO] Consecutive-race warning on optional rival race promoted from rest. Cancelling and preserving rest fallback.",
     )
     return False
-  if config.CANCEL_CONSECUTIVE_RACE and consecutive_cancel_btn and not accept_warning:
+  cancel_warning = bool(consecutive_cancel_btn and not accept_warning and (config.CANCEL_CONSECUTIVE_RACE or planner_warning_policy))
+  if cancel_warning:
     force_rest = _should_force_rest_after_optional_warning(options)
+    cancel_reason = ((options or {}).get("planner_race_warning_policy") or {}).get("cancel_reason_key") or "cancel_consecutive_race_setting"
     _mark_consecutive_warning_outcome(
       options,
       force_rest=force_rest,
-      reason="cancel_consecutive_race_setting",
+      reason=cancel_reason,
     )
     device_action.locate_and_click(
       "assets/buttons/cancel_btn.png",

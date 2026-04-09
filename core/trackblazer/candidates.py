@@ -78,9 +78,11 @@ def _build_race_gate_candidate(race_decision, derived_data):
   )
 
 
-def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, state_obj=None, action=None) -> List[CandidateAction]:
+def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, state_obj=None, action=None, planner_state=None) -> List[CandidateAction]:
   observed_data = observed.to_dict()
   derived_data = derived.to_dict()
+  planner_state = planner_state if isinstance(planner_state, dict) else {}
+  planner_race_plan = dict(planner_state.get("planner_race_plan") or {})
   selected_action = observed_data.get("selected_action") or {}
   race_decision = copy.deepcopy(selected_action.get("trackblazer_race_decision") or {})
   candidates = []
@@ -251,5 +253,25 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
   race_candidate = _build_race_gate_candidate(race_decision, derived_data)
   if race_candidate is not None:
     candidates.append(race_candidate)
+
+  branch_kind = str(planner_race_plan.get("branch_kind") or "")
+  if planner_race_plan.get("planner_owned") and branch_kind and branch_kind not in {"non_race", "training"}:
+    candidates.append(
+      CandidateAction(
+        kind=branch_kind,
+        priority_score=_priority_score(
+          (planner_race_plan.get("race_decision") or {}).get("training_score"),
+          ((derived_data.get("usage_context_summary") or {}).get("training_score")),
+        ),
+        rationale=str(planner_race_plan.get("selection_rationale") or "planner-owned race branch"),
+        requirements=[],
+        expected_warnings=(["consecutive_race_warning"] if (planner_race_plan.get("warning_plan") or {}).get("warning_expected") else []),
+        expected_followup_state={
+          "branch_kind": branch_kind,
+          "selected_func": ((planner_race_plan.get("selected_action") or {}).get("func")),
+        },
+        source_facts=copy.deepcopy(planner_race_plan.get("race_decision") or {}),
+      )
+    )
 
   return candidates

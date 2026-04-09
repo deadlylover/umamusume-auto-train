@@ -33,8 +33,11 @@ from core.trackblazer.planner import (
   PLANNER_STATE_KEY,
   apply_turn_plan_action_payload,
   build_review_planned_actions,
+  clear_planner_fallback,
   get_turn_plan,
+  mark_planner_fallback,
   plan_once,
+  set_turn_plan_decision_path,
   update_turn_discussion_dual_run,
 )
 from core.trackblazer.models import (
@@ -1160,8 +1163,42 @@ def _clear_optional_race_action_fields(action):
     "hammer_spendable",
     "prefer_rival_race",
     "race_grade_target",
+    "planner_race_warning_policy",
+    "trackblazer_planner_race",
   ):
     _action_option_pop(action, key)
+
+
+def _trackblazer_planner_mode_enabled():
+  return (
+    (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer")
+    and bot.get_trackblazer_use_new_planner_enabled()
+  )
+
+
+def _activate_trackblazer_planner_turn(state_obj, action):
+  if not _trackblazer_planner_mode_enabled():
+    return {"status": "disabled"}
+  try:
+    clear_planner_fallback(state_obj)
+    planner_state, turn_plan = set_turn_plan_decision_path(state_obj, action, "planner")
+    return {
+      "status": "planner",
+      "planner_state": planner_state,
+      "turn_plan": turn_plan,
+    }
+  except Exception as exc:
+    reason = f"planner_race_cutover_failed: {exc}"
+    warning(f"[TB_PLANNER] {reason}")
+    mark_planner_fallback(state_obj, reason)
+    try:
+      set_turn_plan_decision_path(state_obj, action, "planner→legacy (fallback)", reason=reason)
+    except Exception:
+      pass
+    return {
+      "status": "fallback",
+      "reason": reason,
+    }
 
 
 def _operator_race_gate_for_state(state_obj):
@@ -1315,6 +1352,99 @@ def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None
     planned_clicks=planned_clicks,
   )
   return "blocked"
+
+
+def _planner_race_fallback_target(action):
+  fallback_func = _action_value(action, "_rival_fallback_func")
+  if not fallback_func or fallback_func == "do_race":
+    fallback_func = "do_training" if _action_value(action, "_rival_fallback_training_name") else "do_rest"
+  payload = {
+    "func": fallback_func,
+    "training_name": _action_value(action, "_rival_fallback_training_name"),
+    "training_data": copy.deepcopy(_action_value(action, "_rival_fallback_training_data") or {}),
+  }
+  return payload
+
+
+def _apply_planner_race_fallback_action(action, fallback_payload):
+  fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
+  target_func = fallback_payload.get("func")
+  if not target_func:
+    return False
+  action.func = target_func
+  if target_func == "do_training":
+    training_name = fallback_payload.get("training_name")
+    training_data = copy.deepcopy(fallback_payload.get("training_data") or {})
+    if training_name:
+      action["training_name"] = training_name
+    if training_data:
+      action["training_data"] = training_data
+  _clear_optional_race_action_fields(action)
+  return True
+
+
+def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  if not _trackblazer_planner_mode_enabled() or _action_func(action) != "do_race":
+    return None
+  planner_state = state_obj.get(PLANNER_STATE_KEY) or {}
+  turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
+  if turn_plan.decision_path != "planner":
+    return None
+
+  race_plan = dict(turn_plan.race_plan or {})
+  race_scout = dict(race_plan.get("race_scout") or {})
+  if not race_scout.get("required"):
+    return None
+
+  from scenarios.trackblazer import scout_rival_race
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="scouting_rival_race",
+    message="Planner race preflight: scouting race list for a rival race.",
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  scout_result = scout_rival_race()
+  action["rival_scout"] = scout_result
+  if scout_result.get("rival_found"):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message="Planner rival scout confirmed the race branch.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return None
+
+  fallback_policy = dict(turn_plan.fallback_policy or {})
+  fallback_chain = list(fallback_policy.get("chain") or [])
+  scout_fallback = next(
+    (
+      dict(entry.get("target_payload") or {})
+      for entry in fallback_chain
+      if isinstance(entry, dict) and entry.get("trigger") == "rival_scout_failed"
+    ),
+    {},
+  )
+  if not scout_fallback:
+    scout_fallback = _planner_race_fallback_target(action)
+  if _apply_planner_race_fallback_action(action, scout_fallback):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message="Planner rival scout found no suitable race. Falling back to the stored alternative.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return None
+  return "failed"
 
 
 def _strategy_decision_note(state_obj, action):
@@ -3465,12 +3595,20 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     and bot.get_trackblazer_use_new_planner_enabled()
   )
   if planner_turn_plan is not None:
-    decision_path = "planner (legacy execution)" if planner_mode_enabled else "legacy"
+    forced_fallback = dict((state_obj or {}).get("_trackblazer_planner_force_fallback") or {})
+    decision_path = (
+      "planner→legacy (fallback)"
+      if planner_mode_enabled and forced_fallback.get("turn_key") == f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}" else
+      "planner"
+      if planner_mode_enabled else
+      "legacy"
+    )
     planner_turn_plan.decision_path = decision_path
     planner_turn_plan.planner_metadata = {
       **dict(planner_turn_plan.planner_metadata or {}),
       "decision_path": decision_path,
       "use_new_planner_enabled": planner_mode_enabled,
+      "fallback_reason": forced_fallback.get("reason") if decision_path == "planner→legacy (fallback)" else "",
     }
     planner_state["decision_path"] = decision_path
     planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
@@ -3607,7 +3745,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     if planned_clicks is not None else
     (
       planner_turn_plan.to_planned_clicks()
-      if planner_turn_plan is not None else
+      if planner_turn_plan is not None and planner_turn_plan.decision_path == "planner" else
       _planned_clicks_for_action(action)
     )
   )
@@ -4044,6 +4182,15 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   )
   if gate_result == "blocked":
     return "blocked"
+  planner_preflight_result = _run_planner_race_preflight(
+    state_obj,
+    action,
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  if planner_preflight_result in {"failed", "blocked", "reassess", "previewed", "executed"}:
+    return planner_preflight_result
   if gate_result != "reverted" and pre_run_hook is not None:
     hook_result = pre_run_hook()
     if isinstance(hook_result, str) and hook_result in {"failed", "blocked", "reassess", "previewed", "executed"}:
@@ -4753,7 +4900,12 @@ def career_lobby(dry_run_turn=False):
 
       optional_race_blocked, race_gate = _operator_race_gate_blocks_optional_races(state_obj)
 
-      if config.PRIORITIZE_MISSIONS_OVER_G1 and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
+      if (
+        not _trackblazer_planner_mode_enabled()
+        and config.PRIORITIZE_MISSIONS_OVER_G1
+        and config.DO_MISSION_RACES_IF_POSSIBLE
+        and state_obj["race_mission_available"]
+      ):
         if optional_race_blocked:
           info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='mission racing')}")
         else:
@@ -4786,8 +4938,9 @@ def career_lobby(dry_run_turn=False):
             _clear_optional_race_action_fields(action)
 
       # check and do scheduled races. Dirty version, should be cleaned up.
-      action = strategy.check_scheduled_races(state_obj, action)
-      if "race_name" in action.options:
+      if not _trackblazer_planner_mode_enabled():
+        action = strategy.check_scheduled_races(state_obj, action)
+      if not _trackblazer_planner_mode_enabled() and "race_name" in action.options:
         action.func = "do_race"
         action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
         info(f"Taking action: {action.func}")
@@ -4816,9 +4969,11 @@ def career_lobby(dry_run_turn=False):
 
       # Trackblazer lobby "Scheduled Race" button — visual indicator on the race button area.
       if (
+        not _trackblazer_planner_mode_enabled()
+        and (
         action.func != "do_race"
         and state_obj.get("trackblazer_lobby_scheduled_race")
-      ):
+      )):
         if optional_race_blocked:
           info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='scheduled racing')}")
         else:
@@ -4869,7 +5024,12 @@ def career_lobby(dry_run_turn=False):
             action.func = None
             _clear_optional_race_action_fields(action)
 
-      if (not config.PRIORITIZE_MISSIONS_OVER_G1) and config.DO_MISSION_RACES_IF_POSSIBLE and state_obj["race_mission_available"]:
+      if (
+        not _trackblazer_planner_mode_enabled()
+        and (not config.PRIORITIZE_MISSIONS_OVER_G1)
+        and config.DO_MISSION_RACES_IF_POSSIBLE
+        and state_obj["race_mission_available"]
+      ):
         if optional_race_blocked:
           info(f"[RACE_GATE] {_operator_race_gate_message(race_gate, context='mission racing')}")
         else:
@@ -4903,7 +5063,7 @@ def career_lobby(dry_run_turn=False):
             _clear_optional_race_action_fields(action)
 
       # check and do goal races. Dirty version, should be cleaned up.
-      if not "Achieved" in state_obj["criteria"]:
+      if not _trackblazer_planner_mode_enabled() and not "Achieved" in state_obj["criteria"]:
         action = strategy.decide_race_for_goal(state_obj, action)
         if action.func == "do_race":
           info(f"Taking action: {action.func}")
@@ -5021,11 +5181,28 @@ def career_lobby(dry_run_turn=False):
             reasoning_notes=f"training_score={strong_training_score:.1f} | threshold={strong_training_score_threshold}",
           )
 
+      planner_activation = {"status": "disabled"}
+      if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+        planner_activation = _activate_trackblazer_planner_turn(state_obj, action)
+        if planner_activation.get("status") == "fallback":
+          update_operator_snapshot(
+            state_obj,
+            action,
+            phase="evaluating_strategy",
+            message="Planner mode fell back to legacy race logic for this turn.",
+            sub_phase="evaluate_trackblazer_race",
+            reasoning_notes=planner_activation.get("reason"),
+          )
+
       # Trackblazer race-vs-training gate: evaluate race-vs-training using the
       # rival indicator collected earlier (no game interaction here).  The
       # expensive rival scout is deferred to execution time (pre_run_hook).
       # Skip during Junior Pre-Debut — race list is not available yet.
-      if constants.SCENARIO_NAME in ("mant", "trackblazer") and not trackblazer_pre_debut:
+      if (
+        constants.SCENARIO_NAME in ("mant", "trackblazer")
+        and not trackblazer_pre_debut
+        and planner_activation.get("status") != "planner"
+      ):
         race_decision = evaluate_trackblazer_race(state_obj, action)
         action["trackblazer_race_decision"] = race_decision
 
@@ -5135,7 +5312,10 @@ def career_lobby(dry_run_turn=False):
             reasoning_notes="operator_race_gate_veto",
           )
 
-      if state_obj["turn"] == "Race Day" or state_obj.get("trackblazer_climax_race_day"):
+      if (
+        (state_obj["turn"] == "Race Day" or state_obj.get("trackblazer_climax_race_day"))
+        and planner_activation.get("status") != "planner"
+      ):
         forced_reason = (
           "Forced Climax race-day indicator detected on lobby screen"
           if state_obj.get("trackblazer_climax_race_day") else
@@ -5164,7 +5344,7 @@ def career_lobby(dry_run_turn=False):
           reasoning_notes="Forced race day bypasses normal training/rest options at the end of the decision tree.",
         )
 
-      if not trackblazer_pre_debut:
+      if not trackblazer_pre_debut and planner_activation.get("status") != "planner":
         action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
 
       if isinstance(action, dict):
@@ -5232,7 +5412,11 @@ def career_lobby(dry_run_turn=False):
         # checks aptitude, and backs out.  If no suitable rival is found
         # the action reverts to the training fallback.
         pre_run_hook = None
-        if action.func == "do_race" and action.get("prefer_rival_race"):
+        if (
+          not _trackblazer_planner_mode_enabled()
+          and action.func == "do_race"
+          and action.get("prefer_rival_race")
+        ):
           def _rival_scout_hook():
             from scenarios.trackblazer import scout_rival_race
             update_operator_snapshot(state_obj, action, phase="scouting_rival_race", message="Scouting race list for rival race...")

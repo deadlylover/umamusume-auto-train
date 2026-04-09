@@ -298,6 +298,9 @@ def _format_race_check_line(planned):
 
   parts = []
   if race_check:
+    branch_kind = race_check.get("branch_kind")
+    if branch_kind:
+      parts.append(f"branch {branch_kind}")
     indicator = race_check.get("rival_indicator_detected")
     if indicator is True:
       parts.append("indicator yes")
@@ -465,28 +468,60 @@ def _format_trackblazer_race_lines(selected_action):
 
 def _format_trackblazer_race_entry_lines(planned):
   entry_gate = planned.get("race_entry_gate") or {}
+  warning_policy = planned.get("race_warning_policy") or {}
+  fallback_policy = planned.get("race_fallback_policy") or {}
+  if not isinstance(warning_policy, dict):
+    warning_policy = {}
+  if not isinstance(fallback_policy, dict):
+    fallback_policy = {}
   if not isinstance(entry_gate, dict) or not entry_gate:
-    return []
+    lines = []
+  else:
+    parts = ["Race Entry Gate: lobby -> race list"]
+    expected_branch = entry_gate.get("expected_branch")
+    if expected_branch:
+      parts.append(f"expected {expected_branch}")
+    lines = [" | ".join(parts)]
 
-  parts = ["Race Entry Gate: lobby -> race list"]
-  expected_branch = entry_gate.get("expected_branch")
-  if expected_branch:
-    parts.append(f"expected {expected_branch}")
-  lines = [" | ".join(parts)]
+    meaning = entry_gate.get("warning_meaning")
+    if meaning:
+      lines.append(f"Race Warning: {meaning}")
+    warning_ok_template = entry_gate.get("consecutive_warning_ok_template")
+    if warning_ok_template:
+      lines.append(f"Race Warning OK Template: {warning_ok_template}")
+    if entry_gate.get("force_accept_warning"):
+      lines.append("Race Warning Policy: scheduled race override forces OK")
 
-  meaning = entry_gate.get("warning_meaning")
-  if meaning:
-    lines.append(f"Race Warning: {meaning}")
-  warning_ok_template = entry_gate.get("consecutive_warning_ok_template")
-  if warning_ok_template:
-    lines.append(f"Race Warning OK Template: {warning_ok_template}")
-  if entry_gate.get("force_accept_warning"):
-    lines.append("Race Warning Policy: scheduled race override forces OK")
+    ok_action = entry_gate.get("ok_action")
+    cancel_action = entry_gate.get("cancel_action")
+    if ok_action or cancel_action:
+      lines.append(f"Race Warning Buttons: ok={ok_action or '-'} | cancel={cancel_action or '-'}")
 
-  ok_action = entry_gate.get("ok_action")
-  cancel_action = entry_gate.get("cancel_action")
-  if ok_action or cancel_action:
-    lines.append(f"Race Warning Buttons: ok={ok_action or '-'} | cancel={cancel_action or '-'}")
+  if warning_policy:
+    accept_warning = warning_policy.get("accept_warning")
+    if accept_warning is not None:
+      lines.append(f"Race Warning Policy: {'continue' if accept_warning else 'cancel'}")
+    cancel_target = warning_policy.get("cancel_target_label") or warning_policy.get("cancel_target")
+    if cancel_target:
+      lines.append(f"Race Warning Cancel Target: {cancel_target}")
+    accept_reason = warning_policy.get("accept_reason")
+    if accept_reason:
+      lines.append(f"Race Warning Accept Reason: {accept_reason}")
+    cancel_reason = warning_policy.get("cancel_reason")
+    if cancel_reason:
+      lines.append(f"Race Warning Cancel Reason: {cancel_reason}")
+
+  fallback_chain = list(fallback_policy.get("chain") or [])
+  if fallback_chain:
+    rendered_chain = []
+    for entry in fallback_chain:
+      if not isinstance(entry, dict):
+        continue
+      trigger = entry.get("trigger") or "fallback"
+      target = entry.get("target_label") or entry.get("target_func") or "unknown"
+      rendered_chain.append(f"{trigger}->{target}")
+    if rendered_chain:
+      lines.append(f"Race Fallbacks: {' | '.join(rendered_chain)}")
   return lines
 
 
@@ -797,6 +832,8 @@ def _format_planned_action_sections(planned, state_summary):
     ("Race Check", planned.get("race_check") or {}),
     ("Race Decision", planned.get("race_decision") or {}),
     ("Race Entry Gate", planned.get("race_entry_gate") or {}),
+    ("Race Warning Policy", planned.get("race_warning_policy") or {}),
+    ("Race Fallback Policy", planned.get("race_fallback_policy") or {}),
     ("Skill Check", state_summary.get("skill_purchase_check") or {}),
     ("Race Scout", planned.get("race_scout") or {}),
     ("Inventory Scan", planned.get("inventory_scan") or {}),
@@ -1014,9 +1051,13 @@ class TurnPlan:
   decision_path: str = "legacy"
   freshness: PlannerFreshness = field(default_factory=PlannerFreshness)
   selected_candidate: Dict[str, Any] = field(default_factory=dict)
+  selection_rationale: str = ""
   candidate_ranking: List[Dict[str, Any]] = field(default_factory=list)
   shop_plan: Dict[str, Any] = field(default_factory=dict)
   item_plan: Dict[str, Any] = field(default_factory=dict)
+  race_plan: Dict[str, Any] = field(default_factory=dict)
+  warning_plan: Dict[str, Any] = field(default_factory=dict)
+  fallback_policy: Dict[str, Any] = field(default_factory=dict)
   reobserve_boundaries: List[Dict[str, Any]] = field(default_factory=list)
   inventory_snapshot: Dict[str, Any] = field(default_factory=dict)
   timing: Dict[str, Any] = field(default_factory=dict)
@@ -1028,6 +1069,7 @@ class TurnPlan:
 
   def to_planned_actions(self) -> Dict[str, Any]:
     planned = dict(self.legacy_shared_plan)
+    planner_race_owned = self.decision_path == "planner"
 
     inventory_scan = dict(planned.get("inventory_scan") or {})
     inventory_scan.update(dict((self.inventory_snapshot or {}).get("scan") or {}))
@@ -1063,6 +1105,27 @@ class TurnPlan:
     if reassess_boundary:
       planned["reassess_boundary"] = reassess_boundary
 
+    if planner_race_owned:
+      race_plan = dict(self.race_plan or {})
+      race_check = dict(race_plan.get("race_check") or {})
+      race_decision = dict(race_plan.get("race_decision") or {})
+      race_entry_gate = dict(race_plan.get("race_entry_gate") or {})
+      race_scout = dict(race_plan.get("race_scout") or {})
+      if race_check:
+        planned["race_check"] = race_check
+      if race_decision:
+        planned["race_decision"] = race_decision
+      if race_entry_gate:
+        planned["race_entry_gate"] = race_entry_gate
+      if race_scout:
+        planned["race_scout"] = race_scout
+      warning_plan = dict(self.warning_plan or {})
+      if warning_plan:
+        planned["race_warning_policy"] = warning_plan
+      fallback_policy = dict(self.fallback_policy or {})
+      if fallback_policy:
+        planned["race_fallback_policy"] = fallback_policy
+
     if self.reobserve_boundaries:
       planned["reobserve_boundaries"] = copy.deepcopy(self.reobserve_boundaries)
 
@@ -1082,9 +1145,13 @@ class TurnPlan:
       decision_path=str(snapshot.get("decision_path") or "legacy"),
       freshness=freshness,
       selected_candidate=dict(snapshot.get("selected_candidate") or {}),
+      selection_rationale=str(snapshot.get("selection_rationale") or ""),
       candidate_ranking=list(snapshot.get("candidate_ranking") or []),
       shop_plan=dict(snapshot.get("shop_plan") or {}),
       item_plan=dict(snapshot.get("item_plan") or {}),
+      race_plan=dict(snapshot.get("race_plan") or {}),
+      warning_plan=dict(snapshot.get("warning_plan") or {}),
+      fallback_policy=dict(snapshot.get("fallback_policy") or {}),
       reobserve_boundaries=list(snapshot.get("reobserve_boundaries") or []),
       inventory_snapshot=dict(snapshot.get("inventory_snapshot") or {}),
       timing=dict(snapshot.get("timing") or {}),
@@ -1145,9 +1212,13 @@ class TurnPlan:
       "decision_path": self.decision_path,
       "freshness": self.freshness.to_dict(),
       "selected_candidate": dict(self.selected_candidate),
+      "selection_rationale": self.selection_rationale,
       "candidate_ranking": list(self.candidate_ranking),
       "shop_plan": dict(self.shop_plan),
       "item_plan": dict(self.item_plan),
+      "race_plan": dict(self.race_plan),
+      "warning_plan": dict(self.warning_plan),
+      "fallback_policy": dict(self.fallback_policy),
       "reobserve_boundaries": copy.deepcopy(self.reobserve_boundaries),
       "inventory_snapshot": dict(self.inventory_snapshot),
       "timing": dict(self.timing),
