@@ -98,6 +98,7 @@ class OperatorConsole:
     self._error_value = None
     self._execution_intent_var = None
     self._trackblazer_use_items_var = None
+    self._trackblazer_use_new_planner_var = None
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._trackblazer_scoring_mode_var = None
@@ -304,6 +305,7 @@ class OperatorConsole:
       ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
     self._trackblazer_use_items_var = tk.BooleanVar(value=bot.get_trackblazer_use_items_enabled())
+    self._trackblazer_use_new_planner_var = tk.BooleanVar(value=bot.get_trackblazer_use_new_planner_enabled())
     self._skill_auto_buy_var = tk.BooleanVar(value=bot.get_skill_auto_buy_enabled())
     self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
     self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
@@ -355,6 +357,23 @@ class OperatorConsole:
       tertiary_controls,
       text="Test Use Items",
       command=lambda: self._run_phase_check("check_inventory_selection"),
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Checkbutton(
+      tertiary_controls,
+      text="New planner",
+      variable=self._trackblazer_use_new_planner_var,
+      command=self._toggle_trackblazer_use_new_planner,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Label(
+      tertiary_controls,
+      text="On = planner path for Turn Discussion/start-bot flow. Execution still uses legacy runner.",
+      fg="#9aa4ad",
+      bg="#101418",
     ).pack(side=tk.LEFT, padx=(0, 8))
     tk.Checkbutton(
       tertiary_controls,
@@ -886,6 +905,8 @@ class OperatorConsole:
       self._execution_intent_var.set(runtime_state.get("execution_intent") or "execute")
     if self._trackblazer_use_items_var is not None:
       self._trackblazer_use_items_var.set(bool(runtime_state.get("trackblazer_use_items_enabled")))
+    if self._trackblazer_use_new_planner_var is not None:
+      self._trackblazer_use_new_planner_var.set(bool(runtime_state.get("trackblazer_use_new_planner_enabled")))
     if self._trackblazer_scoring_mode_var is not None:
       self._trackblazer_scoring_mode_var.set(runtime_state.get("trackblazer_scoring_mode") or "stat_focused")
     if self._skill_auto_buy_var is not None:
@@ -2090,6 +2111,25 @@ class OperatorConsole:
       "Trackblazer item use scaffold enabled."
       if enabled else
       "Trackblazer item use dry-run enabled."
+    )
+    self.publish()
+
+  def _toggle_trackblazer_use_new_planner(self):
+    if self._trackblazer_use_new_planner_var is None:
+      return
+    enabled = bool(self._trackblazer_use_new_planner_var.get())
+    bot.set_trackblazer_use_new_planner_enabled(enabled)
+    if self._persist_config_value("planner.use_new_planner", enabled):
+      try:
+        config.reload_config(print_config=False)
+      except Exception as exc:
+        self._message_value.set(f"Planner toggle saved, but reload failed: {exc}")
+        self.publish()
+        return
+    self._message_value.set(
+      "Trackblazer planner path enabled."
+      if enabled else
+      "Trackblazer planner path disabled."
     )
     self.publish()
 

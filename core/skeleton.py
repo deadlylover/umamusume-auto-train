@@ -3459,6 +3459,23 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     planner_state = plan_once(state_obj, action, limit=8)
   turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
   planner_turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot) if turn_plan_snapshot else None
+  planner_mode_enabled = bool(
+    isinstance(state_obj, dict)
+    and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer")
+    and bot.get_trackblazer_use_new_planner_enabled()
+  )
+  if planner_turn_plan is not None:
+    decision_path = "planner (legacy execution)" if planner_mode_enabled else "legacy"
+    planner_turn_plan.decision_path = decision_path
+    planner_turn_plan.planner_metadata = {
+      **dict(planner_turn_plan.planner_metadata or {}),
+      "decision_path": decision_path,
+      "use_new_planner_enabled": planner_mode_enabled,
+    }
+    planner_state["decision_path"] = decision_path
+    planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
+    if isinstance(state_obj, dict):
+      state_obj[PLANNER_STATE_KEY] = planner_state
   if planner_turn_plan is not None and hasattr(action, "__setitem__"):
     apply_turn_plan_action_payload(action, planner_turn_plan)
   planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})

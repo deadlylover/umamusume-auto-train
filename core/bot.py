@@ -68,6 +68,7 @@ execution_intent = "execute"
 control_callbacks = {}
 manual_control_active = False
 trackblazer_use_items_enabled = False
+trackblazer_use_new_planner_enabled = False
 trackblazer_scoring_mode = "stat_focused"  # "legacy" = use timeline template, "stat_focused" = stat_weight_training
 trackblazer_bond_boost_enabled = True  # +10 score per blue/green friend on training (+15 on wit)
 trackblazer_bond_boost_cutoff = "Classic Year Early Jun"  # bond boost inactive after this turn
@@ -449,6 +450,7 @@ def get_runtime_state():
       "pending_trackblazer_shop_check": pending_trackblazer_shop_check,
       "pending_trackblazer_shop_check_reason": pending_trackblazer_shop_check_reason,
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
+      "trackblazer_use_new_planner_enabled": trackblazer_use_new_planner_enabled,
       "trackblazer_scoring_mode": trackblazer_scoring_mode,
       "skill_dry_run_enabled": not get_skill_auto_buy_enabled(),
       "skill_auto_buy_skill_enabled": get_skill_auto_buy_enabled(),
@@ -656,6 +658,18 @@ def set_trackblazer_use_items_enabled(enabled):
 def get_trackblazer_use_items_enabled():
   with runtime_lock:
     return trackblazer_use_items_enabled
+
+
+def set_trackblazer_use_new_planner_enabled(enabled):
+  global trackblazer_use_new_planner_enabled, runtime_updated_at
+  with runtime_lock:
+    trackblazer_use_new_planner_enabled = bool(enabled)
+    runtime_updated_at = time.time()
+
+
+def get_trackblazer_use_new_planner_enabled():
+  with runtime_lock:
+    return trackblazer_use_new_planner_enabled
 
 
 def set_trackblazer_scoring_mode(mode):

@@ -127,6 +127,9 @@ def reload_config(print_config=True):
     load_var('TRACKBLAZER_SHOP_POLICY', normalize_shop_policy(trackblazer_config.get("shop_policy")))
     load_var('TRACKBLAZER_ITEM_USE_POLICY', normalize_item_use_policy(trackblazer_config.get("item_use_policy")))
     load_var('TRACKBLAZER_STAT_WEIGHTS', trackblazer_config.get("stat_weights"))
+    planner_config = config.get("planner", {})
+    load_var('PLANNER_CONFIG', planner_config)
+    load_var('PLANNER_USE_NEW_PLANNER', bool(planner_config.get("use_new_planner", False)))
       
   except KeyError as e:
     raise RuntimeError(f"Missing config key: {e.args[0]}, please copy it to config.json from config.template.json and try again")

@@ -111,6 +111,7 @@ def main():
   print("Uma Auto!")
   try:
     config.reload_config()
+    bot.set_trackblazer_use_new_planner_enabled(bool(getattr(config, "PLANNER_USE_NEW_PLANNER", False)))
     bot.stop_event.clear()
     resolve_control_backend()
     bot.set_phase("focusing_window", message="Focusing emulator window.")
@@ -573,6 +574,7 @@ def start_server_in_background():
 if __name__ == "__main__":
   update_config()
   config.reload_config(print_config=False)
+  bot.set_trackblazer_use_new_planner_enabled(bool(getattr(config, "PLANNER_USE_NEW_PLANNER", False)))
   bot.register_control_callback("toggle_bot", toggle_bot)
   bot.register_control_callback("start_bot", start_bot)
   bot.register_control_callback("stop_bot", stop_bot)
