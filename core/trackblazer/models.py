@@ -1074,7 +1074,6 @@ class TurnPlan:
   debug_summary: Dict[str, Any] = field(default_factory=dict)
   planner_metadata: Dict[str, Any] = field(default_factory=dict)
   review_context: Dict[str, Any] = field(default_factory=dict)
-  legacy_shared_plan: Dict[str, Any] = field(default_factory=dict)
   step_sequence: List[ExecutionStep] = field(default_factory=list)
 
   def to_planned_actions(self) -> Dict[str, Any]:
@@ -1156,7 +1155,6 @@ class TurnPlan:
       debug_summary=dict(snapshot.get("debug_summary") or {}),
       planner_metadata=dict(snapshot.get("planner_metadata") or {}),
       review_context=dict(snapshot.get("review_context") or {}),
-      legacy_shared_plan=dict(snapshot.get("legacy_shared_plan") or {}),
       step_sequence=step_sequence,
     )
 
@@ -1223,6 +1221,5 @@ class TurnPlan:
       "debug_summary": dict(self.debug_summary),
       "planner_metadata": dict(self.planner_metadata),
       "review_context": dict(self.review_context),
-      "legacy_shared_plan": copy.deepcopy(dict(self.legacy_shared_plan or {})),
       "step_sequence": [step.to_dict() for step in self.step_sequence],
     }

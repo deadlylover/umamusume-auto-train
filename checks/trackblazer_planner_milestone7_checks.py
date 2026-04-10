@@ -1,4 +1,5 @@
 import copy
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import core.bot as bot
@@ -9,6 +10,7 @@ from core.skeleton import (
   _activate_trackblazer_planner_turn,
   _attach_trackblazer_pre_action_item_plan,
   build_review_snapshot,
+  career_lobby,
 )
 from core.trackblazer.executor import PlannerExecutorHooks
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
@@ -74,6 +76,13 @@ def _rest_action():
   }
   action["available_trainings"] = {"speed": copy.deepcopy(action["training_data"])}
   return action
+
+
+def _legacy_runtime_state():
+  state_obj = _base_state()
+  state_obj["year"] = "Senior Year"
+  state_obj["turn"] = "Early Oct"
+  return state_obj
 
 
 def _runtime_executor_hooks():
@@ -247,6 +256,92 @@ def _test_legacy_hydration_failure_keeps_action_unchanged():
   assert (snapshot.get("selected_action") or {}).get("func") == "do_rest", snapshot.get("selected_action")
 
 
+def _test_career_lobby_legacy_hydration_failure_still_completes_turn():
+  bot.set_trackblazer_use_new_planner_enabled(False)
+  original_running = bot.is_bot_running
+  bot.is_bot_running = True
+  state_template = _legacy_runtime_state()
+  recorded = {}
+
+  class _FakeStrategy:
+    def validate_state_details(self, state_obj):
+      return {"valid": True}
+
+    def get_training_template(self, state_obj):
+      return {"training_function": "stat_weight_training"}
+
+    def check_scheduled_races(self, state_obj, action):
+      return action
+
+    def decide_race_for_goal(self, state_obj, action):
+      return action
+
+    def decide(self, state_obj, action):
+      return _rest_action()
+
+  def _record_and_finalize_turn(state_obj, action):
+    recorded["state"] = copy.deepcopy(state_obj)
+    recorded["action"] = {
+      "func": action.func,
+      "options": copy.deepcopy(action.options),
+      "available_actions": list(action.available_actions),
+    }
+    bot.is_bot_running = False
+
+  try:
+    with ExitStack() as stack:
+      stack.enter_context(patch("core.skeleton.sleep", lambda *_args, **_kwargs: None))
+      stack.enter_context(patch("core.skeleton.init_skill_py", lambda: None))
+      stack.enter_context(patch("core.skeleton.clear_aptitudes_cache", lambda: None))
+      stack.enter_context(patch("core.skeleton.update_startup_scan_snapshot", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton.update_operator_snapshot", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton.update_pre_action_phase", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton.log_encoded", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton.ensure_operator_console", lambda: None))
+      stack.enter_context(patch("core.skeleton.detect_scenario", lambda: "trackblazer"))
+      stack.enter_context(patch("core.skeleton.Strategy", _FakeStrategy))
+      stack.enter_context(patch("core.skeleton.collect_main_state", lambda: copy.deepcopy(state_template)))
+      stack.enter_context(patch("core.skeleton.collect_training_state", lambda state_obj, *_args, **_kwargs: state_obj))
+      stack.enter_context(patch("core.skeleton.collect_trackblazer_inventory", lambda state_obj, **_kwargs: state_obj))
+      stack.enter_context(patch("core.skeleton.maybe_review_skill_purchase", lambda *args, **kwargs: "attached"))
+      stack.enter_context(patch("core.skeleton.run_action_with_review", lambda *args, **kwargs: "executed"))
+      stack.enter_context(patch("core.skeleton.record_and_finalize_turn", _record_and_finalize_turn))
+      stack.enter_context(patch("core.skeleton._restore_turn_from_last_state", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton._restore_cached_trackblazer_inventory", lambda *args, **kwargs: True))
+      stack.enter_context(patch("core.skeleton._detect_trackblazer_complete_career_banner", lambda **kwargs: {"detected": False}))
+      stack.enter_context(patch("core.skeleton._detect_stable_career_screen_anchors", lambda *_args, **_kwargs: {"training_button": 1, "rest_button": 1}))
+      stack.enter_context(patch("core.skeleton._has_stable_career_screen", lambda *_args, **_kwargs: True))
+      stack.enter_context(patch("core.skeleton._hydrate_legacy_action_from_turn_plan", side_effect=RuntimeError("synthetic hydration failure")))
+      stack.enter_context(patch("scenarios.trackblazer.check_trackblazer_shop_inventory", lambda **kwargs: {
+        "trackblazer_shop_items": [],
+        "trackblazer_shop_summary": {"shop_coins": 0, "items_detected": [], "purchasable_items": []},
+        "trackblazer_shop_flow": {"entered": False, "closed": False, "reason": "synthetic_no_shop_scan"},
+      }))
+      stack.enter_context(patch("scenarios.trackblazer.inspect_climax_race_day_detection", lambda log_result=True: {"detected": False, "banner": {}, "button": {}}))
+      stack.enter_context(patch("scenarios.trackblazer.check_rival_race_indicator", lambda state_obj: False))
+      stack.enter_context(patch.object(bot, "get_execution_intent", lambda: "execute"))
+      stack.enter_context(patch.object(bot, "has_pending_trackblazer_shop_check", lambda: False))
+      stack.enter_context(patch.object(bot, "clear_trackblazer_shop_check_request", lambda: None))
+      stack.enter_context(patch.object(bot, "get_trackblazer_scoring_mode", lambda: "balanced"))
+      stack.enter_context(patch.object(bot, "get_trackblazer_allow_buff_override", lambda: False))
+      stack.enter_context(patch.object(bot, "push_debug_history", lambda *args, **kwargs: None))
+      stack.enter_context(patch("core.skeleton.device_action.flush_screenshot_cache", lambda: None))
+      stack.enter_context(patch("core.skeleton.device_action.screenshot", lambda *args, **kwargs: object()))
+      stack.enter_context(patch("core.skeleton.device_action.match_cached_templates", lambda *args, **kwargs: {}))
+      stack.enter_context(patch("core.skeleton.device_action.match_template", lambda *args, **kwargs: False))
+      stack.enter_context(patch("core.skeleton.device_action.locate", lambda *args, **kwargs: False))
+      stack.enter_context(patch("core.skeleton.device_action.locate_and_click", lambda *args, **kwargs: False))
+      career_lobby(dry_run_turn=False)
+  finally:
+    bot.is_bot_running = original_running
+
+  assert recorded.get("action", {}).get("func") == "do_rest", recorded
+  assert recorded.get("state", {}).get("_trackblazer_planner_hydration_failure"), recorded
+  assert "planner_hydration_failed" in (
+    (recorded.get("state", {}).get("_trackblazer_planner_hydration_failure") or {}).get("reason") or ""
+  ), recorded
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -257,6 +352,7 @@ def main():
     _test_forced_runtime_fallback_sets_explicit_path()
     _test_activation_failure_restores_action_payload()
     _test_legacy_hydration_failure_keeps_action_unchanged()
+    _test_career_lobby_legacy_hydration_failure_still_completes_turn()
     print("trackblazer planner milestone 7 checks: ok")
   finally:
     bot.set_trackblazer_use_new_planner_enabled(False)

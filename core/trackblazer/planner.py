@@ -181,6 +181,9 @@ def _action_signature(action) -> Dict[str, Any]:
   if not hasattr(action, "get"):
     return {}
   training_data = action.get("training_data") or {}
+  planner_race = _planner_race_payload(action)
+  warning_outcome = _warning_outcome_payload(action)
+  fallback_payload = _capture_effective_rival_fallback_payload(action)
   return {
     "func": getattr(action, "func", None),
     "available_trainings": action.get("available_trainings"),
@@ -198,12 +201,12 @@ def _action_signature(action) -> Dict[str, Any]:
     "_trackblazer_rest_promoted_to_training": action.get("_trackblazer_rest_promoted_to_training"),
     "trackblazer_race_decision": action.get("trackblazer_race_decision"),
     "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead"),
+    "planner_race_warning_policy": action.get("planner_race_warning_policy"),
+    "trackblazer_planner_race": planner_race,
+    "planner_warning_outcome": warning_outcome,
+    "rival_fallback": fallback_payload,
     "rival_scout": action.get("rival_scout"),
     "is_race_day": action.get("is_race_day"),
-    "_rival_fallback_func": action.get("_rival_fallback_func"),
-    "_consecutive_warning_force_rest": action.get("_consecutive_warning_force_rest"),
-    "_consecutive_warning_cancelled": action.get("_consecutive_warning_cancelled"),
-    "_consecutive_warning_cancel_reason": action.get("_consecutive_warning_cancel_reason"),
     "date_event_available": action.get("date_event_available"),
     "training_data": {
       "score_tuple": training_data.get("score_tuple"),
@@ -225,6 +228,50 @@ def _skill_context_signature(state_obj) -> Dict[str, Any]:
     "current_sp": context.get("current_sp"),
     "threshold": context.get("threshold"),
   }
+
+
+def _planner_race_payload(action) -> Dict[str, Any]:
+  payload = _action_value(action, "trackblazer_planner_race") or {}
+  return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def _planner_runtime_owns_race_payload(action) -> bool:
+  return bool(
+    _planner_race_payload(action)
+    or _action_value(action, "planner_race_warning_policy")
+    or _action_value(action, "planner_warning_outcome")
+  )
+
+
+def _capture_effective_rival_fallback_payload(action) -> Dict[str, Any]:
+  planner_race = _planner_race_payload(action)
+  if planner_race:
+    fallback_action = planner_race.get("fallback_action") or {}
+    return dict(fallback_action or {}) if isinstance(fallback_action, dict) else {}
+  return _capture_legacy_rival_fallback_payload(action)
+
+
+def _effective_rival_fallback_func(action) -> str:
+  return str((_capture_effective_rival_fallback_payload(action) or {}).get("func") or "")
+
+
+def _warning_outcome_payload(action) -> Dict[str, Any]:
+  planner_outcome = _action_value(action, "planner_warning_outcome") or {}
+  if isinstance(planner_outcome, dict) and planner_outcome.get("cancelled"):
+    return {
+      "cancelled": True,
+      "force_rest": bool(planner_outcome.get("force_rest")),
+      "reason": str(planner_outcome.get("reason") or ""),
+    }
+  if _planner_runtime_owns_race_payload(action):
+    return {}
+  if bool(_action_value(action, "_consecutive_warning_cancelled")):
+    return {
+      "cancelled": True,
+      "force_rest": bool(_action_value(action, "_consecutive_warning_force_rest")),
+      "reason": str(_action_value(action, "_consecutive_warning_cancel_reason") or ""),
+    }
+  return {}
 
 
 def _build_selected_action_review_context(action, pre_action_items=None, reassess_after_item_use=None) -> Dict[str, Any]:
@@ -839,7 +886,7 @@ def _planner_selected_action_payload(
 def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_check=False):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   base_action = _capture_action_payload(action, state_obj=state_obj)
-  base_fallback = _capture_legacy_rival_fallback_payload(action)
+  base_fallback = _capture_effective_rival_fallback_payload(action)
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
@@ -859,13 +906,10 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   goal_race_active = bool(_action_func(goal_probe) == "do_race" and _action_value(goal_probe, "race_name"))
 
   existing_rival_scout = copy.deepcopy(_action_value(action, "rival_scout", {}) or {})
-  warning_outcome = dict(_action_value(action, "planner_warning_outcome") or {})
+  warning_outcome = _warning_outcome_payload(action)
   warning_cancelled = bool(warning_outcome.get("cancelled"))
   warning_cancel_reason = str(warning_outcome.get("reason") or "")
-  if not warning_cancelled:
-    warning_cancelled = bool(_action_value(action, "_consecutive_warning_cancelled"))
-    warning_cancel_reason = str(_action_value(action, "_consecutive_warning_cancel_reason") or "")
-  existing_planner_race = copy.deepcopy(_action_value(action, "trackblazer_planner_race", {}) or {})
+  existing_planner_race = copy.deepcopy(_planner_race_payload(action))
   existing_planner_branch = str(existing_planner_race.get("branch_kind") or "")
 
   race_decision = {}
@@ -1970,13 +2014,15 @@ def _build_main_action_step_planned_clicks(action):
 
 def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[str, Any]:
   planner_state = planner_state if isinstance(planner_state, dict) else {}
-  legacy_shared_plan = planner_state.get("legacy_shared_plan") or {}
-  inventory_plan = legacy_shared_plan.get("inventory_scan") or {}
-  shop_plan = legacy_shared_plan.get("shop_scan") or {}
-  would_buy = list(planner_state.get("shop_buy_plan") or legacy_shared_plan.get("would_buy") or [])
-  would_use = list(planner_state.get("pre_action_items") or legacy_shared_plan.get("would_use") or [])
-  deferred_use = list(planner_state.get("deferred_use") or legacy_shared_plan.get("deferred_use") or [])
-  planner_race_plan = dict(planner_state.get("race_plan") or {})
+  turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
+  turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot) if turn_plan_snapshot else TurnPlan()
+  inventory_plan = copy.deepcopy(dict((turn_plan.inventory_snapshot or {}).get("scan") or {}))
+  shop_plan = copy.deepcopy(dict((turn_plan.shop_plan or {}).get("scan") or {}))
+  would_buy = list(planner_state.get("shop_buy_plan") or (turn_plan.shop_plan or {}).get("would_buy") or [])
+  would_use = list(planner_state.get("pre_action_items") or (turn_plan.item_plan or {}).get("pre_action_items") or [])
+  deferred_use = list(planner_state.get("deferred_use") or (turn_plan.item_plan or {}).get("deferred_use") or [])
+  planner_race_plan = dict(planner_state.get("race_plan") or turn_plan.race_plan or {})
+  item_use_context = planner_state.get("item_use_context") or dict((turn_plan.item_plan or {}).get("context") or {})
 
   if planner_state.get("use_planner_race_sections") and planner_race_plan.get("planner_owned"):
     return {
@@ -1988,7 +2034,7 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
       "race_fallback_policy": copy.deepcopy(planner_state.get("fallback_policy") or {}),
       "inventory_scan": inventory_plan,
       "would_use": would_use,
-      "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
+      "would_use_context": item_use_context,
       "deferred_use": deferred_use,
       "shop_scan": shop_plan,
       "would_buy": would_buy,
@@ -2070,7 +2116,7 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
   elif isinstance(race_decision, dict) and race_decision and (_action_func(action) == "do_race" or race_decision.get("should_race")):
     rest_promoted_optional_race = bool(
       race_decision.get("prefer_rival_race")
-      and _action_value(action, "_rival_fallback_func") == "do_rest"
+      and _effective_rival_fallback_func(action) == "do_rest"
       and not _action_value(action, "scheduled_race")
       and not _action_value(action, "trackblazer_lobby_scheduled_race")
       and not _action_value(action, "is_race_day")
@@ -2115,7 +2161,7 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
     "race_scout": race_scout_planned,
     "inventory_scan": inventory_plan,
     "would_use": would_use,
-    "would_use_context": planner_state.get("item_use_context") or legacy_shared_plan.get("would_use_context") or {},
+    "would_use_context": item_use_context,
     "deferred_use": deferred_use,
     "shop_scan": shop_plan,
     "would_buy": would_buy,
@@ -2247,6 +2293,7 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
       "is_race_day",
       "trackblazer_climax_race_day",
       "planner_race_warning_policy",
+      "planner_warning_outcome",
       "trackblazer_planner_race",
       "_rival_fallback_func",
       "_rival_fallback_training_name",
@@ -2288,7 +2335,7 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
   return action
 
 
-def update_turn_discussion_dual_run(state_obj, snapshot_context, legacy_planned_actions=None) -> Dict[str, Any]:
+def update_turn_discussion_dual_run(state_obj, action, snapshot_context, legacy_planned_actions=None) -> Dict[str, Any]:
   if not isinstance(state_obj, dict):
     return {}
   planner_state = state_obj.get(PLANNER_STATE_KEY) or {}
@@ -2298,7 +2345,11 @@ def update_turn_discussion_dual_run(state_obj, snapshot_context, legacy_planned_
   dual_run = copy.deepcopy(planner_state.get("dual_run") or {})
   turn_plan_snapshot = planner_state.get("turn_plan") or {}
   turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot)
-  legacy_planned_actions = legacy_planned_actions if isinstance(legacy_planned_actions, dict) else dict(planner_state.get("legacy_shared_plan") or {})
+  legacy_planned_actions = (
+    legacy_planned_actions
+    if isinstance(legacy_planned_actions, dict) else
+    build_review_planned_actions(state_obj, action, planner_state=planner_state)
+  )
 
   legacy_text = render_turn_discussion(snapshot_context or {}, legacy_planned_actions)
   planner_text = turn_plan.to_turn_discussion(snapshot_context or {})
@@ -2468,48 +2519,6 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     action=action,
     planner_state={"planner_race_plan": planner_race_plan},
   )
-
-  legacy_base_plan = {
-    "race_check": {},
-    "race_decision": {},
-    "race_entry_gate": {},
-    "race_scout": {},
-    "inventory_scan": {
-      "status": _inventory_scan_status(inventory_flow),
-      "reason": (inventory_flow or {}).get("reason") or "",
-      "button_visible": (inventory_flow or {}).get("use_training_items_button_visible"),
-      "items_detected": items_detected,
-      "held_quantities": held_quantities,
-      "actionable_items": list((inventory_summary or {}).get("actionable_items") or []),
-    },
-    "would_use": execution_items,
-    "would_use_context": item_context,
-    "deferred_use": deferred_use,
-    "shop_scan": {
-      "status": _shop_scan_status(shop_flow),
-      "reason": (shop_flow or {}).get("reason") or "",
-      "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
-      "items_detected": (state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items,
-      "not_purchasable": sorted(
-        set((state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items or [])
-        - set((state_obj.get("trackblazer_shop_summary") or {}).get("purchasable_items") or shop_items or [])
-      ),
-    },
-    "would_buy": shop_buy_plan,
-  }
-  # Legacy reconstruction is retained only for dual-run comparison scaffolding.
-  review_planned_actions = build_review_planned_actions(
-    state_obj,
-    action,
-    planner_state={
-      "legacy_shared_plan": legacy_base_plan,
-      "item_use_context": item_context,
-      "race_plan": planner_race_plan,
-      "warning_plan": planner_race_plan.get("warning_plan") or {},
-      "fallback_policy": planner_race_plan.get("fallback_policy") or {},
-      "use_planner_race_sections": True,
-    },
-  )
   ranked_trainings = build_ranked_training_snapshot(
     state_obj=state_obj,
     available_trainings=copy.deepcopy(action.get("available_trainings") or {}) if hasattr(action, "get") else {},
@@ -2604,7 +2613,6 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       ),
       "ranked_trainings": copy.deepcopy(ranked_trainings),
     },
-    legacy_shared_plan={},
     step_sequence=_build_step_sequence(
       state_obj,
       action,
@@ -2631,7 +2639,6 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "inventory_source": inventory_source,
     "inventory_source_summary": copy.deepcopy(inventory_summary),
     "projected_inventory_summary": projected_summary,
-    "legacy_shared_plan": review_planned_actions,
     "dual_run": {
       "observed": observed.to_dict(),
       "derived": derived.to_dict(),

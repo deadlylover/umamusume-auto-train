@@ -60,7 +60,6 @@ from core.trackblazer.compat import (
   capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
   clear_consecutive_warning_fields as _clear_legacy_consecutive_warning_fields,
   clear_optional_race_action_fields as _clear_legacy_optional_race_action_fields,
-  has_training_fallback as _legacy_has_training_fallback,
   hydrate_action_from_turn_plan as _hydrate_legacy_action_from_turn_plan,
   set_rival_fallback_action as _set_legacy_rival_fallback_action,
 )
@@ -1213,7 +1212,7 @@ def _planner_fallback_payload(action):
 
 def _effective_rival_fallback_payload(action):
   planner_fallback = _planner_fallback_payload(action)
-  if planner_fallback.get("func"):
+  if _action_value(action, "trackblazer_planner_race"):
     return planner_fallback
   return _capture_legacy_rival_fallback_payload(action)
 
@@ -1241,6 +1240,8 @@ def _consecutive_warning_outcome(action):
       "force_rest": bool(planner_outcome.get("force_rest")),
       "reason": str(planner_outcome.get("reason") or ""),
     }
+  if _action_value(action, "trackblazer_planner_race") or _action_value(action, "planner_race_warning_policy"):
+    return {}
   if bool(_action_value(action, "_consecutive_warning_cancelled")):
     return {
       "cancelled": True,
@@ -1371,13 +1372,15 @@ def _should_retry_training_after_consecutive_warning(action):
   item_context = _trackblazer_item_use_context(action)
   if not isinstance(item_context, dict) or not item_context.get("energy_rescue"):
     return False
-  return _legacy_has_training_fallback(action)
+  fallback_payload = _effective_rival_fallback_payload(action)
+  return bool(
+    fallback_payload.get("training_name")
+    and isinstance(fallback_payload.get("training_data"), dict)
+    and fallback_payload.get("training_data")
+  )
 
 
 def _prepare_training_fallback_after_consecutive_warning(action):
-  if not _legacy_has_training_fallback(action):
-    return False
-
   fallback_payload = _effective_rival_fallback_payload(action)
   training_name = fallback_payload.get("training_name")
   training_data = fallback_payload.get("training_data")
@@ -1394,12 +1397,22 @@ def _prepare_training_fallback_after_consecutive_warning(action):
     },
   ):
     return False
-  _set_legacy_rival_fallback_action(
-    action,
-    func="do_training",
-    training_name=training_name,
-    training_data=copy.deepcopy(training_data),
-  )
+  planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
+  if isinstance(planner_race_payload, dict) and planner_race_payload:
+    planner_race_payload["fallback_action"] = {
+      "func": "do_training",
+      "training_name": training_name,
+      "training_data": copy.deepcopy(training_data),
+    }
+    action["trackblazer_planner_race"] = planner_race_payload
+    action.options.pop("planner_warning_outcome", None)
+  else:
+    _set_legacy_rival_fallback_action(
+      action,
+      func="do_training",
+      training_name=training_name,
+      training_data=copy.deepcopy(training_data),
+    )
 
   race_decision = _action_value(action, "trackblazer_race_decision") or {}
   if isinstance(race_decision, dict):
@@ -1414,7 +1427,10 @@ def _prepare_training_fallback_after_consecutive_warning(action):
       "race_available": False,
     }
 
-  _clear_legacy_consecutive_warning_fields(action)
+  if isinstance(planner_race_payload, dict) and planner_race_payload:
+    action.options.pop("planner_warning_outcome", None)
+  else:
+    _clear_legacy_consecutive_warning_fields(action)
 
   available_actions = list(getattr(action, "available_actions", []) or [])
   if "do_training" in available_actions:
@@ -1551,6 +1567,7 @@ def _resolve_consecutive_race_warning_for_executor(
     "resolved": False,
     "policy_source": "executor_step",
   }
+  _clear_legacy_consecutive_warning_fields(action)
   update_operator_snapshot(
     state_obj,
     action,
@@ -3927,6 +3944,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
   if isinstance(state_obj, dict) and (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     planner_dual_run_comparison = update_turn_discussion_dual_run(
       state_obj,
+      action,
       turn_discussion_context,
       legacy_planned_actions=planned_actions,
     )

@@ -457,13 +457,7 @@ def main():
       assert TurnPlan.from_snapshot(turn_plan).to_planned_clicks() == snapshot.get("planned_clicks"), f"{case_name}: planner-owned planned clicks should come from TurnPlan step payloads"
 
       planner_only_turn_plan = copy.deepcopy(turn_plan)
-      planner_only_legacy_plan = planner_only_turn_plan.get("legacy_shared_plan") or {}
-      planner_only_legacy_plan["inventory_scan"] = {}
-      planner_only_legacy_plan["would_use"] = []
-      planner_only_legacy_plan["deferred_use"] = []
-      planner_only_legacy_plan["shop_scan"] = {}
-      planner_only_legacy_plan["would_buy"] = []
-      planner_only_turn_plan["legacy_shared_plan"] = planner_only_legacy_plan
+      planner_only_turn_plan.pop("legacy_shared_plan", None)
       planner_only_planned_actions = TurnPlan.from_snapshot(planner_only_turn_plan).to_planned_actions()
       original_planned_actions = snapshot.get("planned_actions") or {}
       assert planner_only_planned_actions.get("inventory_scan") == original_planned_actions.get("inventory_scan"), f"{case_name}: inventory scan should be planner-native"

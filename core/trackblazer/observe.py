@@ -57,6 +57,30 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
       "reason": "" if "rival_indicator_detected" in state_obj else "legacy_flow_has_not_populated_rival_indicator",
     },
   }
+  planner_race_payload = (selected_action or {}).get("trackblazer_planner_race") or {}
+  planner_race_payload = planner_race_payload if isinstance(planner_race_payload, dict) else {}
+  planner_warning_outcome = (selected_action or {}).get("planner_warning_outcome") or {}
+  planner_warning_outcome = planner_warning_outcome if isinstance(planner_warning_outcome, dict) else {}
+  planner_warning_owned = bool(planner_race_payload or ((selected_action or {}).get("planner_race_warning_policy") or {}))
+  if planner_warning_outcome.get("cancelled"):
+    consecutive_warning_cancelled = True
+    consecutive_warning_force_rest = bool(planner_warning_outcome.get("force_rest"))
+    consecutive_warning_cancel_reason = planner_warning_outcome.get("reason")
+  elif planner_warning_owned:
+    consecutive_warning_cancelled = False
+    consecutive_warning_force_rest = False
+    consecutive_warning_cancel_reason = None
+  else:
+    consecutive_warning_cancelled = bool((selected_action or {}).get("_consecutive_warning_cancelled"))
+    consecutive_warning_force_rest = bool((selected_action or {}).get("_consecutive_warning_force_rest"))
+    consecutive_warning_cancel_reason = (selected_action or {}).get("_consecutive_warning_cancel_reason")
+  rival_fallback_action = planner_race_payload.get("fallback_action") or {}
+  rival_fallback_action = rival_fallback_action if isinstance(rival_fallback_action, dict) else {}
+  rival_fallback_func = (
+    rival_fallback_action.get("func")
+    if planner_race_payload else
+    (selected_action or {}).get("_rival_fallback_func")
+  )
   data: Dict[str, Any] = {
     "year": state_obj.get("year"),
     "turn": state_obj.get("turn"),
@@ -112,10 +136,10 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
       "trackblazer_climax_race_day": bool(selected_action.get("trackblazer_climax_race_day")) if selected_action else False,
       "race_mission_available": bool(selected_action.get("race_mission_available")) if selected_action else False,
       "rest_promoted_to_training": bool(selected_action.get("_trackblazer_rest_promoted_to_training")) if selected_action else False,
-      "consecutive_warning_cancelled": bool(selected_action.get("_consecutive_warning_cancelled")) if selected_action else False,
-      "consecutive_warning_force_rest": bool(selected_action.get("_consecutive_warning_force_rest")) if selected_action else False,
-      "consecutive_warning_cancel_reason": selected_action.get("_consecutive_warning_cancel_reason") if selected_action else None,
-      "rival_fallback_func": selected_action.get("_rival_fallback_func") if selected_action else None,
+      "consecutive_warning_cancelled": consecutive_warning_cancelled,
+      "consecutive_warning_force_rest": consecutive_warning_force_rest,
+      "consecutive_warning_cancel_reason": consecutive_warning_cancel_reason,
+      "rival_fallback_func": rival_fallback_func,
       "training_data": copy.deepcopy(selected_action.get("training_data") or {}) if selected_action else {},
       "trackblazer_pre_action_items": (
         copy.deepcopy(selected_action.get("trackblazer_pre_action_items") or [])

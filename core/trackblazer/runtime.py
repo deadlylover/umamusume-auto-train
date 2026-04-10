@@ -72,7 +72,11 @@ def _planner_fallback_action(action):
 
 
 def _fallback_func(action):
+  planner_race = action.get("trackblazer_planner_race") or {}
+  planner_race = planner_race if isinstance(planner_race, dict) else {}
   planner_fallback_func = (_planner_fallback_action(action) or {}).get("func")
+  if planner_race:
+    return planner_fallback_func
   if planner_fallback_func:
     return planner_fallback_func
   return action.get("_rival_fallback_func")
@@ -86,6 +90,8 @@ def _warning_outcome(action):
       "force_rest": bool(outcome.get("force_rest")),
       "reason": str(outcome.get("reason") or ""),
     }
+  if (action.get("trackblazer_planner_race") or {}) or (action.get("planner_race_warning_policy") or {}):
+    return {}
   legacy_cancelled = bool(action.get("_consecutive_warning_cancelled"))
   if not legacy_cancelled:
     return {}

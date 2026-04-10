@@ -259,7 +259,11 @@ def _planner_fallback_action(options=None):
 
 def _fallback_func(options=None):
   options = options if isinstance(options, dict) else {}
+  planner_payload = options.get("trackblazer_planner_race") or {}
+  planner_payload = planner_payload if isinstance(planner_payload, dict) else {}
   planner_fallback_func = (_planner_fallback_action(options) or {}).get("func")
+  if planner_payload:
+    return planner_fallback_func
   if planner_fallback_func:
     return planner_fallback_func
   return options.get("_rival_fallback_func")
