@@ -15,6 +15,22 @@ def _status_entry(value, *, missing_reason="missing_from_state_obj"):
   }
 
 
+def _key_status(source, *keys, missing_reason="missing_from_state_obj", require_all=False):
+  present = all(key in source for key in keys) if require_all else any(key in source for key in keys)
+  return {
+    "present": present,
+    "stale": not present,
+    "reason": "" if present else missing_reason,
+  }
+
+
+def _derive_missing_inputs(observation_status):
+  return sorted(
+    key for key, value in (observation_status or {}).items()
+    if isinstance(value, dict) and value.get("stale")
+  )
+
+
 def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> ObservedTurnState:
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   planner_state = planner_state if isinstance(planner_state, dict) else {}
@@ -33,7 +49,7 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
   skill_purchase_scan = copy.deepcopy(state_obj.get("skill_purchase_scan") or {})
   skill_purchase_plan = copy.deepcopy(state_obj.get("skill_purchase_plan") or {})
   training_results = copy.deepcopy(state_obj.get("training_results") or {})
-  available_trainings = copy.deepcopy(selected_action.get("available_trainings") or {}) if selected_action else {}
+  available_trainings = copy.deepcopy(training_results)
   planner_pre_action_items = copy.deepcopy(planner_state.get("pre_action_items") or [])
   planner_reassess_after_item_use = bool(planner_state.get("reassess_after_item_use"))
   inventory_snapshot = {
@@ -44,19 +60,40 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
     "projected_post_buy_summary": copy.deepcopy(planner_state.get("projected_inventory_summary") or {}),
   }
   observation_status = {
-    "inventory_current": _status_entry(inventory_current or inventory_current_summary),
-    "inventory_pre_shop": _status_entry(inventory_pre_shop or inventory_pre_shop_summary),
-    "inventory_scan": _status_entry(inventory_flow),
-    "inventory_pre_shop_scan": _status_entry(inventory_pre_shop_flow),
-    "shop_scan": _status_entry(shop_summary or shop_items or shop_flow),
-    "skill_scan": _status_entry(skill_purchase_flow or skill_purchase_scan or skill_purchase_plan),
-    "training_scan": _status_entry(training_results or available_trainings),
-    "race_indicator": {
-      "present": "rival_indicator_detected" in state_obj,
-      "stale": "rival_indicator_detected" not in state_obj,
-      "reason": "" if "rival_indicator_detected" in state_obj else "legacy_flow_has_not_populated_rival_indicator",
-    },
+    "energy": _key_status(state_obj, "energy_level", "max_energy", require_all=True),
+    "mood": _key_status(state_obj, "current_mood"),
+    "status": _key_status(state_obj, "status_effect_names"),
+    "training": _status_entry(training_results),
+    "items": _key_status(
+      state_obj,
+      "trackblazer_inventory",
+      "trackblazer_inventory_summary",
+      "trackblazer_inventory_flow",
+    ),
+    "shop": _key_status(
+      state_obj,
+      "trackblazer_shop_items",
+      "trackblazer_shop_summary",
+      "trackblazer_shop_flow",
+    ),
+    "skills": _key_status(
+      state_obj,
+      "skill_purchase_check",
+      "skill_purchase_flow",
+      "skill_purchase_scan",
+      "skill_purchase_plan",
+    ),
+    "race_opportunity": _key_status(
+      state_obj,
+      "rival_indicator_detected",
+      "race_mission_available",
+      "trackblazer_lobby_scheduled_race",
+      "trackblazer_climax_locked_race",
+      "trackblazer_climax_race_day",
+    ),
+    "lookahead": _key_status(state_obj, "year", "turn", require_all=True),
   }
+  missing_inputs = _derive_missing_inputs(observation_status)
   planner_race_payload = (selected_action or {}).get("trackblazer_planner_race") or {}
   planner_race_payload = planner_race_payload if isinstance(planner_race_payload, dict) else {}
   planner_warning_outcome = (selected_action or {}).get("planner_warning_outcome") or {}
@@ -103,10 +140,7 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
     "trackblazer_trainings_remaining_upper_bound": state_obj.get("trackblazer_trainings_remaining_upper_bound"),
     "trackblazer_buff_active": bool(state_obj.get("trackblazer_buff_active")),
     "trackblazer_allow_buff_override": bool(state_obj.get("trackblazer_allow_buff_override")),
-    "trackblazer_lobby_scheduled_race": bool(
-      state_obj.get("trackblazer_lobby_scheduled_race")
-      or (selected_action.get("trackblazer_lobby_scheduled_race") if selected_action else False)
-    ),
+    "trackblazer_lobby_scheduled_race": bool(state_obj.get("trackblazer_lobby_scheduled_race")),
     "shop_items": shop_items,
     "shop_summary": shop_summary,
     "shop_flow": shop_flow,
@@ -121,7 +155,8 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
     "training_results": training_results,
     "available_trainings": available_trainings,
     "observation_status": observation_status,
-    "selected_action": {
+    "missing_inputs": missing_inputs,
+    "legacy_seed_metadata": {
       "func": getattr(action, "func", None),
       "training_name": selected_action.get("training_name") if selected_action else None,
       "training_function": selected_action.get("training_function") if selected_action else None,

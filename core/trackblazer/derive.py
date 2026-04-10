@@ -4,7 +4,9 @@ import copy
 from typing import Any, Dict
 
 import core.config as config
-from core.trackblazer_item_use import _usage_context
+import utils.constants as constants
+from core.actions import Action
+from core.trackblazer_item_use import _hammer_usage_state, _usage_context
 from core.trackblazer.models import DerivedTurnState, ObservedTurnState
 from core.trackblazer_race_logic import (
   get_optional_race_low_energy_override,
@@ -14,6 +16,9 @@ from utils.log import warning
 
 
 _SUMMER_TOKENS = ("early jul", "late jul", "early aug", "late aug")
+_MEGAPHONE_KEYS = ("motivating_megaphone", "empowering_megaphone", "coaching_megaphone")
+_STAT_ITEM_PRIORITY = ("manual", "scroll", "notepad")
+_LOOKAHEAD_CACHE = {}
 
 
 def _safe_ratio(numerator, denominator):
@@ -26,43 +31,283 @@ def _safe_ratio(numerator, denominator):
     return None
 
 
+def _safe_float(value, default=None):
+  try:
+    return float(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def _training_value_class(score, cutoffs):
+  score = _safe_float(score, 0.0) or 0.0
+  if score >= _safe_float(cutoffs.get("very_strong"), 60.0):
+    return "very_strong"
+  if score >= _safe_float(cutoffs.get("strong"), 50.0):
+    return "strong"
+  if score >= _safe_float(cutoffs.get("adequate"), 40.0):
+    return "adequate"
+  return "weak"
+
+
+def _energy_class(energy_ratio, cutoffs):
+  if energy_ratio is None:
+    return "ok"
+  if energy_ratio < _safe_float(cutoffs.get("critical"), 0.05):
+    return "critical"
+  if energy_ratio < _safe_float(cutoffs.get("low"), 0.30):
+    return "low"
+  if energy_ratio < _safe_float(cutoffs.get("ok"), 0.70):
+    return "ok"
+  return "high"
+
+
+def _make_training_action(training_name, training_data):
+  action = Action()
+  action.func = "do_training"
+  action["training_name"] = training_name
+  action["training_data"] = copy.deepcopy(training_data or {})
+  return action
+
+
+def _timeline_index(turn_label):
+  if turn_label in constants.TIMELINE:
+    return constants.TIMELINE.index(turn_label)
+  return None
+
+
+def _distance_to_labels(current_index, predicate):
+  if current_index is None:
+    return None
+  for index in range(current_index, len(constants.TIMELINE)):
+    if predicate(constants.TIMELINE[index]):
+      return max(0, index - current_index)
+  return None
+
+
+def _selector_entry_map(selector):
+  selector = selector if isinstance(selector, dict) else {}
+  return {
+    f"{entry.get('year')} {entry.get('date')}".strip(): entry
+    for entry in (selector.get("dates") or [])
+    if isinstance(entry, dict)
+  }
+
+
+def _lookahead_summary(state_obj, observed_data, policy):
+  turn_key = f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}"
+  selector_hash = str(hash(repr(getattr(config, "OPERATOR_RACE_SELECTOR", None))))
+  cache_key = (turn_key, selector_hash)
+  if cache_key in _LOOKAHEAD_CACHE:
+    return copy.deepcopy(_LOOKAHEAD_CACHE[cache_key])
+
+  lookahead = get_race_lookahead_energy_advice(
+    state_obj,
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  ) or {}
+  selector = getattr(config, "OPERATOR_RACE_SELECTOR", None) or {}
+  horizon = max(1, int(policy.get("lookahead_horizon_turns", 3)))
+  current_label = str(observed_data.get("year") or "").strip()
+  current_index = _timeline_index(current_label)
+  entry_map = _selector_entry_map(selector)
+  next_n_races = []
+  if current_index is not None:
+    for offset in range(1, horizon + 1):
+      index = current_index + offset
+      if index >= len(constants.TIMELINE):
+        break
+      entry = entry_map.get(constants.TIMELINE[index]) or {}
+      if entry.get("enabled") is False:
+        continue
+      if entry.get("race_allowed") and entry.get("selected_race"):
+        next_n_races.append(
+          {
+            "distance": offset,
+            "turn_label": constants.TIMELINE[index],
+            "race_name": entry.get("name") or entry.get("selected_race"),
+          }
+        )
+
+  g1_distance = None
+  races_today = list(constants.RACES.get(observed_data.get("year"), []) or [])
+  if any((race or {}).get("grade") == "G1" for race in races_today):
+    g1_distance = 0
+  elif current_index is not None:
+    for offset in range(1, len(constants.TIMELINE) - current_index):
+      label = constants.TIMELINE[current_index + offset]
+      races = list(constants.RACES.get(label, []) or [])
+      if any((race or {}).get("grade") == "G1" for race in races):
+        g1_distance = offset
+        break
+
+  next_race_day_distance = next_n_races[0]["distance"] if next_n_races else None
+  summary = {
+    "source": copy.deepcopy(lookahead),
+    "next_turn_races_count": 1 if next_n_races and next_n_races[0]["distance"] == 1 else 0,
+    "next_n_turns_races_count": len(next_n_races),
+    "projected_energy_deficit": bool(lookahead.get("conserve") and not lookahead.get("can_train_and_race")),
+    "next_g1_distance": g1_distance,
+    "next_race_day_distance": next_race_day_distance,
+  }
+  _LOOKAHEAD_CACHE[cache_key] = copy.deepcopy(summary)
+  return summary
+
+
+def _race_opportunity(observed_data, lookahead_summary):
+  races_today = list(constants.RACES.get(observed_data.get("year"), []) or [])
+  g1_today = any((race or {}).get("grade") == "G1" for race in races_today)
+  mandatory_today = bool(
+    str(observed_data.get("turn") or "") == "Race Day"
+    or g1_today
+    or observed_data.get("trackblazer_climax_locked_race")
+    or observed_data.get("trackblazer_climax_race_day")
+  )
+  return {
+    "rival_visible": bool(observed_data.get("rival_indicator_detected")),
+    "lobby_scheduled": bool(observed_data.get("trackblazer_lobby_scheduled_race")),
+    "climax_locked": bool(observed_data.get("trackblazer_climax_locked_race") or observed_data.get("trackblazer_climax_race_day")),
+    "mandatory_today": mandatory_today,
+    "optional_safe_under_lookahead": not bool(lookahead_summary.get("projected_energy_deficit")),
+  }
+
+
+def _item_availability(state_obj):
+  summary = copy.deepcopy((state_obj or {}).get("trackblazer_inventory_summary") or {})
+  held_quantities = dict(summary.get("held_quantities") or {})
+  shop_items = set((state_obj or {}).get("trackblazer_shop_items") or [])
+  _, hammer_spendable = _hammer_usage_state(held_quantities)
+  return {
+    "held_vita_total": sum(int(held_quantities.get(key, 0) or 0) for key in ("vita_65", "vita_40", "vita_20", "royal_kale_juice")),
+    "held_reset_whistles": int(held_quantities.get("reset_whistle", 0) or 0),
+    "held_megaphones": {
+      key: int(held_quantities.get(key, 0) or 0)
+      for key in _MEGAPHONE_KEYS
+    },
+    "held_hammers": {
+      "artisan": int(held_quantities.get("artisan_cleat_hammer", 0) or 0),
+      "master": int(held_quantities.get("master_cleat_hammer", 0) or 0),
+      "spendable": copy.deepcopy(hammer_spendable),
+    },
+    "held_matching_stat_books": {
+      key: int(value or 0)
+      for key, value in held_quantities.items()
+      if any(token in str(key) for token in _STAT_ITEM_PRIORITY)
+    },
+    "affordable_shop_equivalents": {
+      "vita": [key for key in ("vita_65", "vita_40", "vita_20", "royal_kale_juice") if key in shop_items],
+      "megaphones": [key for key in _MEGAPHONE_KEYS if key in shop_items],
+      "matching_stat_books": [key for key in shop_items if any(token in str(key) for token in _STAT_ITEM_PRIORITY)],
+    },
+  }
+
+
+def _timeline_window(observed_data, policy):
+  turn_label = str(observed_data.get("year") or "").strip()
+  current_index = _timeline_index(turn_label)
+  is_summer = any(token in str(observed_data.get("turn") or "").lower() for token in _SUMMER_TOKENS) or any(token in turn_label.lower() for token in _SUMMER_TOKENS)
+  is_climax = bool(observed_data.get("trackblazer_climax"))
+  cutoff_turn = policy.get("bond_training_cutoff_turn")
+  cutoff_index = _timeline_index(cutoff_turn) if cutoff_turn else None
+  next_summer_distance = _distance_to_labels(current_index, lambda label: any(token in label.lower() for token in _SUMMER_TOKENS))
+  return {
+    "is_summer": is_summer,
+    "is_climax": is_climax,
+    "tsc_active": is_climax,
+    "past_bond_training_cutoff": bool(cutoff_index is not None and current_index is not None and current_index > cutoff_index),
+    "past_final_summer": bool(current_index is not None and "Senior Year Late Aug" in constants.TIMELINE and current_index > constants.TIMELINE.index("Senior Year Late Aug")),
+    "summer_window": is_summer,
+    "climax_window": is_climax,
+    "summer_distance": 0 if is_summer else next_summer_distance,
+    "climax_distance": 0 if is_climax else _distance_to_labels(current_index, lambda label: "climax" in label.lower()),
+  }
+
+
+def _training_value(training_results, state_obj, policy):
+  results = []
+  for training_name, training_data in (training_results or {}).items():
+    training_data = training_data if isinstance(training_data, dict) else {}
+    action = _make_training_action(training_name, training_data)
+    usage_context = _usage_context(
+      state_obj,
+      action,
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    ) or {}
+    held_quantities = dict(((state_obj or {}).get("trackblazer_inventory_summary") or {}).get("held_quantities") or {})
+    shop_items = set((state_obj or {}).get("trackblazer_shop_items") or [])
+    best_item_key = None
+    if int(held_quantities.get("reset_whistle", 0) or 0) > 0 and usage_context.get("weak_summer_training"):
+      best_item_key = "reset_whistle"
+    elif any(int(held_quantities.get(key, 0) or 0) > 0 for key in _MEGAPHONE_KEYS) and usage_context.get("commit_training_after_items"):
+      best_item_key = next((key for key in _MEGAPHONE_KEYS if int(held_quantities.get(key, 0) or 0) > 0), None)
+    elif usage_context.get("failure_bypassed_by_items"):
+      for key in ("rich_hand_cream", "miracle_cure", "good_luck_charm", "vita_20", "vita_40", "vita_65", "royal_kale_juice"):
+        if int(held_quantities.get(key, 0) or 0) > 0 or key in shop_items:
+          best_item_key = key
+          break
+    elif usage_context.get("training_name"):
+      for suffix in _STAT_ITEM_PRIORITY:
+        match_key = f"{training_name}_{suffix}"
+        if int(held_quantities.get(match_key, 0) or 0) > 0 or match_key in shop_items:
+          best_item_key = match_key
+          break
+    score = _safe_float(training_data.get("weighted_stat_score"), None)
+    if score is None:
+      score_tuple = training_data.get("score_tuple") or ()
+      score = _safe_float(score_tuple[0], 0.0) if score_tuple else 0.0
+    total_stat_gain = sum(
+      int(value)
+      for stat_name, value in (training_data.get("stat_gains") or {}).items()
+      if stat_name != "sp" and isinstance(value, (int, float))
+    )
+    matching_stat_gain = int(((training_data.get("stat_gains") or {}).get(training_name)) or 0)
+    item_assist_available = bool(best_item_key)
+    item_assist_score_delta = _safe_float(usage_context.get("training_score"), 0.0) if item_assist_available else 0.0
+    results.append(
+      {
+        "name": training_name,
+        "score": float(score or 0.0),
+        "total_stat_gain": total_stat_gain,
+        "matching_stat_gain": matching_stat_gain,
+        "failure": int(training_data.get("failure") or 0),
+        "support_count": int(training_data.get("total_supports") or 0),
+        "rainbow_count": int(training_data.get("total_rainbow_friends") or 0),
+        "value_class": _training_value_class(score, policy.get("training_value_class_cutoffs") or {}),
+        "item_assist_available": item_assist_available,
+        "item_assist_score_delta": float(item_assist_score_delta or 0.0),
+        "best_item_key": best_item_key,
+        "usage_context": {
+          "commit_training_after_items": bool(usage_context.get("commit_training_after_items")),
+          "weak_summer_training": bool(usage_context.get("weak_summer_training")),
+          "failure_bypassed_by_items": bool(usage_context.get("failure_bypassed_by_items")),
+        },
+      }
+    )
+  return results
+
+
+def _best_training_summary(training_value):
+  if not training_value:
+    return {
+      "best_training_name": None,
+      "best_score": None,
+      "best_total": None,
+    }
+  best_entry = max(training_value, key=lambda entry: entry.get("score", 0.0))
+  return {
+    "best_training_name": best_entry.get("name"),
+    "best_score": best_entry.get("score"),
+    "best_total": best_entry.get("total_stat_gain"),
+  }
+
+
 def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj=None, action=None) -> DerivedTurnState:
   observed_data = observed.to_dict()
   planner_state = planner_state if isinstance(planner_state, dict) else {}
   state_obj = state_obj if isinstance(state_obj, dict) else {}
+  policy = getattr(config, "TRACKBLAZER_PLANNER_POLICY", {}) or {}
   turn_label = str(observed_data.get("turn") or "").lower()
-  training_data = (observed_data.get("selected_action") or {}).get("training_data") or {}
-  score_tuple = training_data.get("score_tuple") or ()
-  try:
-    best_score = float(score_tuple[0]) if score_tuple else None
-  except (TypeError, ValueError, IndexError):
-    best_score = None
-
-  stat_gains = training_data.get("stat_gains") or {}
-  training_total = sum(
-    int(value)
-    for value in stat_gains.values()
-    if isinstance(value, (int, float))
-  )
-  usage_context = {}
   derivation_warnings = []
-  if hasattr(action, "get") and state_obj:
-    try:
-      usage_context = _usage_context(
-        state_obj,
-        action,
-        policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-      ) or {}
-    except Exception as exc:
-      warning(f"[TB_PLANNER] derive_turn_state usage_context failed: {exc}")
-      derivation_warnings.append({
-        "source": "usage_context",
-        "error": str(exc),
-      })
-      usage_context = {}
 
   race_low_energy_override = {}
-  race_lookahead = {}
   if state_obj:
     try:
       race_low_energy_override = get_optional_race_low_energy_override(state_obj) or {}
@@ -73,122 +318,69 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
         "error": str(exc),
       })
       race_low_energy_override = {}
-    try:
-      race_lookahead = get_race_lookahead_energy_advice(
-        state_obj,
-        getattr(config, "OPERATOR_RACE_SELECTOR", None),
-      ) or {}
-    except Exception as exc:
-      warning(f"[TB_PLANNER] derive_turn_state race_lookahead failed: {exc}")
-      derivation_warnings.append({
-        "source": "race_lookahead",
-        "error": str(exc),
-      })
-      race_lookahead = {}
 
   observation_status = copy.deepcopy(observed_data.get("observation_status") or {})
-  missing_inputs = sorted(
-    key for key, value in observation_status.items()
-    if isinstance(value, dict) and value.get("stale")
-  )
-  selected_action = observed_data.get("selected_action") or {}
+  missing_inputs = list(observed_data.get("missing_inputs") or [])
+  energy_ratio = _safe_ratio(observed_data.get("energy_level"), observed_data.get("max_energy"))
+  training_value = _training_value(observed_data.get("training_results") or {}, state_obj, policy)
+  lookahead_summary = {}
+  try:
+    lookahead_summary = _lookahead_summary(state_obj, observed_data, policy)
+  except Exception as exc:
+    warning(f"[TB_PLANNER] derive_turn_state race_lookahead failed: {exc}")
+    derivation_warnings.append({
+      "source": "race_lookahead",
+      "error": str(exc),
+    })
+    lookahead_summary = {
+      "source": {},
+      "next_turn_races_count": 0,
+      "next_n_turns_races_count": 0,
+      "projected_energy_deficit": False,
+      "next_g1_distance": None,
+      "next_race_day_distance": None,
+    }
+  timeline_window = _timeline_window(observed_data, policy)
+  skill_purchase_check = copy.deepcopy(observed_data.get("skill_purchase_check") or {})
+  skill_cadence_open = False
+  # TODO: wire this to planner runtime action-count tracking once the runtime owns skill cadence.
+  if skill_purchase_check and skill_purchase_check.get("should_check"):
+    last_purchase = skill_purchase_check.get("last_skill_purchase_action_count")
+    min_turns = int(policy.get("skill_cadence_min_turns", 5))
+    try:
+      last_purchase = int(last_purchase)
+    except (TypeError, ValueError):
+      last_purchase = None
+    skill_cadence_open = bool(last_purchase is not None and last_purchase >= min_turns)
   data: Dict[str, Any] = {
     "turn_key": f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}",
     "timeline_label": observed_data.get("turn"),
     "is_summer": any(token in turn_label for token in _SUMMER_TOKENS),
-    "energy_ratio": _safe_ratio(observed_data.get("energy_level"), observed_data.get("max_energy")),
+    "energy_ratio": energy_ratio,
+    "energy_class": _energy_class(energy_ratio, policy.get("energy_class_cutoffs") or {}),
     "observation_status": observation_status,
     "missing_inputs": missing_inputs,
+    "training_value": training_value,
+    "training_value_summary": _best_training_summary(training_value),
+    "race_opportunity": _race_opportunity(observed_data, lookahead_summary),
     "race_available_summary": {
       "rival_indicator": bool(observed_data.get("rival_indicator_detected")),
       "race_mission_available": bool(observed_data.get("race_mission_available")),
       "lobby_scheduled_race": bool(observed_data.get("trackblazer_lobby_scheduled_race")),
       "climax_locked_race": bool(observed_data.get("trackblazer_climax_locked_race")),
     },
-    "training_value_summary": {
-      "best_training_name": selected_action.get("training_name"),
-      "best_score": best_score,
-      "best_total": training_total,
-      "failure_rate": training_data.get("failure"),
-      "support_count": training_data.get("total_supports"),
-      "rainbow_count": training_data.get("total_rainbow_friends"),
-    },
-    "action_summary": {
-      "func": selected_action.get("func"),
-      "race_name": selected_action.get("race_name"),
-      "race_grade_target": selected_action.get("race_grade_target"),
-      "prefer_rival_race": bool(selected_action.get("prefer_rival_race")),
-      "fallback_non_rival_race": bool(selected_action.get("fallback_non_rival_race")),
-      "is_race_day": bool(selected_action.get("is_race_day")),
-      "scheduled_race": bool(selected_action.get("scheduled_race")),
-      "trackblazer_lobby_scheduled_race": bool(selected_action.get("trackblazer_lobby_scheduled_race")),
-      "trackblazer_climax_race_day": bool(selected_action.get("trackblazer_climax_race_day")),
-      "race_mission_available": bool(selected_action.get("race_mission_available")),
-      "rest_promoted_to_training": bool(selected_action.get("rest_promoted_to_training")),
-      "consecutive_warning_cancelled": bool(selected_action.get("consecutive_warning_cancelled")),
-      "consecutive_warning_force_rest": bool(selected_action.get("consecutive_warning_force_rest")),
-      "consecutive_warning_cancel_reason": selected_action.get("consecutive_warning_cancel_reason"),
-      "rival_fallback_func": selected_action.get("rival_fallback_func"),
-    },
     "inventory_source": planner_state.get("inventory_source"),
     "shop_buy_count": len(planner_state.get("shop_buy_plan") or []),
     "pre_action_item_count": len(planner_state.get("pre_action_items") or []),
     "reassess_after_item_use": bool(planner_state.get("reassess_after_item_use")),
     "skill_scan_state": (((planner_state.get("turn_plan") or {}).get("planner_metadata") or {}).get("runtime") or {}).get("pending_skill_scan") or {},
-    "usage_context_summary": {
-      key: usage_context.get(key)
-      for key in (
-        "timeline_label",
-        "timeline_index",
-        "past_final_summer",
-        "climax_window",
-        "summer_window",
-        "energy_level",
-        "max_energy",
-        "energy_deficit",
-        "safe_energy_target",
-        "held_vita_restore_total",
-        "spendable_vita_restore_total",
-        "held_reset_whistles",
-        "held_vita_reaches_safe_energy",
-        "spendable_vita_reaches_safe_energy",
-        "action_func",
-        "training_name",
-        "training_score",
-        "matching_stat_gain",
-        "total_stat_gain",
-        "failure_rate",
-        "rainbow_count",
-        "support_count",
-        "failure_bypassed_by_items",
-        "high_value_training",
-        "very_high_value_training",
-        "committed_value_training",
-        "strong_burst_training",
-        "weak_summer_training",
-        "weak_climax_training",
-        "energy_rescue",
-        "commit_training_after_items",
-        "training_survives_race_gate",
-        "zero_energy_optional_race",
-        "race_low_energy_vita_rescue",
-        "scheduled_race_low_energy_vita_item_key",
-        "race_lookahead_active",
-        "race_lookahead_energy_item_key",
-        "race_lookahead_safe_energy_target",
-        "race_lookahead_reason",
-        "held_energy_available",
-        "held_charm_available",
-        "affordable_shop_energy_available",
-        "affordable_shop_charm_available",
-        "has_followup_failsafe",
-        "held_recovery_cover_available",
-      )
-      if key in usage_context
-    },
+    "item_availability": _item_availability(state_obj),
+    "timeline_window": timeline_window,
+    "lookahead_summary": lookahead_summary,
+    "skill_cadence_open": skill_cadence_open,
     "race_logic_summary": {
       "low_energy_override": race_low_energy_override,
-      "lookahead": race_lookahead,
+      "lookahead": copy.deepcopy(lookahead_summary.get("source") or {}),
     },
     "derivation_warnings": derivation_warnings,
   }

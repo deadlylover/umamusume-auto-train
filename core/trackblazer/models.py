@@ -77,6 +77,7 @@ class DerivedTurnState:
 
 @dataclass
 class CandidateAction:
+  node_id: str = ""
   kind: str = ""
   priority_score: float = 0.0
   rationale: str = ""

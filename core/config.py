@@ -7,6 +7,42 @@ from core.trackblazer_shop import normalize_shop_policy
 
 #put a default for sleep time multiplier since it's an important value
 SLEEP_TIME_MULTIPLIER = 1
+TRACKBLAZER_PLANNER_POLICY = {
+  "energy_class_cutoffs": {"critical": 0.05, "low": 0.30, "ok": 0.70},
+  "training_value_class_cutoffs": {"weak": 35, "adequate": 40, "strong": 50, "very_strong": 60},
+  "training_overrides_race_threshold": 40,
+  "rival_race_min_energy_ratio": 0.02,
+  "lookahead_horizon_turns": 3,
+  "max_fallback_depth": 3,
+  "bond_training_cutoff_turn": None,
+  "skill_cadence_min_turns": 5,
+}
+
+
+def normalize_trackblazer_planner_policy(raw_policy=None):
+  raw_policy = raw_policy if isinstance(raw_policy, dict) else {}
+  defaults = TRACKBLAZER_PLANNER_POLICY
+  raw_energy = raw_policy.get("energy_class_cutoffs") if isinstance(raw_policy.get("energy_class_cutoffs"), dict) else {}
+  raw_training = raw_policy.get("training_value_class_cutoffs") if isinstance(raw_policy.get("training_value_class_cutoffs"), dict) else {}
+  return {
+    "energy_class_cutoffs": {
+      "critical": float(raw_energy.get("critical", defaults["energy_class_cutoffs"]["critical"])),
+      "low": float(raw_energy.get("low", defaults["energy_class_cutoffs"]["low"])),
+      "ok": float(raw_energy.get("ok", defaults["energy_class_cutoffs"]["ok"])),
+    },
+    "training_value_class_cutoffs": {
+      "weak": float(raw_training.get("weak", defaults["training_value_class_cutoffs"]["weak"])),
+      "adequate": float(raw_training.get("adequate", defaults["training_value_class_cutoffs"]["adequate"])),
+      "strong": float(raw_training.get("strong", defaults["training_value_class_cutoffs"]["strong"])),
+      "very_strong": float(raw_training.get("very_strong", defaults["training_value_class_cutoffs"]["very_strong"])),
+    },
+    "training_overrides_race_threshold": float(raw_policy.get("training_overrides_race_threshold", defaults["training_overrides_race_threshold"])),
+    "rival_race_min_energy_ratio": float(raw_policy.get("rival_race_min_energy_ratio", defaults["rival_race_min_energy_ratio"])),
+    "lookahead_horizon_turns": int(raw_policy.get("lookahead_horizon_turns", defaults["lookahead_horizon_turns"])),
+    "max_fallback_depth": int(raw_policy.get("max_fallback_depth", defaults["max_fallback_depth"])),
+    "bond_training_cutoff_turn": raw_policy.get("bond_training_cutoff_turn", defaults["bond_training_cutoff_turn"]),
+    "skill_cadence_min_turns": int(raw_policy.get("skill_cadence_min_turns", defaults["skill_cadence_min_turns"])),
+  }
 
 
 def _migrate_deprecated_display_scaling(config):
@@ -127,6 +163,7 @@ def reload_config(print_config=True):
     load_var('TRACKBLAZER_SHOP_POLICY', normalize_shop_policy(trackblazer_config.get("shop_policy")))
     load_var('TRACKBLAZER_ITEM_USE_POLICY', normalize_item_use_policy(trackblazer_config.get("item_use_policy")))
     load_var('TRACKBLAZER_STAT_WEIGHTS', trackblazer_config.get("stat_weights"))
+    load_var('TRACKBLAZER_PLANNER_POLICY', normalize_trackblazer_planner_policy(trackblazer_config.get("planner_policy")))
     planner_config = config.get("planner", {})
     load_var('PLANNER_CONFIG', planner_config)
     load_var('PLANNER_USE_NEW_PLANNER', bool(planner_config.get("use_new_planner", False)))

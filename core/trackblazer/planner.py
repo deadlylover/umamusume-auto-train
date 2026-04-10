@@ -2559,9 +2559,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
   candidates = enumerate_candidate_actions(
     observed,
     derived,
-    state_obj=state_obj,
-    action=action,
-    planner_state={"planner_race_plan": planner_race_plan},
+    getattr(config, "TRACKBLAZER_PLANNER_POLICY", {}),
   )
   ranked_trainings = build_ranked_training_snapshot(
     state_obj=state_obj,
@@ -2573,6 +2571,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     version=PLANNER_VERSION,
     decision_path=decision_path,
     freshness=freshness,
+    # TODO: M4: rank candidates and replace _build_planner_race_plan() selection.
     selected_candidate=candidates[0].to_dict() if candidates else {},
     selection_rationale=str(planner_race_plan.get("selection_rationale") or ""),
     candidate_ranking=[candidate.to_dict() for candidate in candidates],

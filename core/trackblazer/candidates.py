@@ -4,274 +4,276 @@ import copy
 from typing import List
 
 from core.trackblazer.models import CandidateAction, DerivedTurnState, ObservedTurnState
-from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 
-def _priority_score(*values):
-  for value in values:
-    try:
-      return float(value)
-    except (TypeError, ValueError):
-      continue
-  return 0.0
-
-
-def _append_action_candidate(candidates, action_kind, selected_action, derived_data, rationale, source_facts=None):
+def _append_candidate(candidates, *, node_id, kind, rationale, requirements, expected_warnings=None, source_facts=None):
   candidates.append(
     CandidateAction(
-      kind=action_kind,
-      priority_score=_priority_score(
-        ((derived_data.get("usage_context_summary") or {}).get("training_score")),
-        ((derived_data.get("training_value_summary") or {}).get("best_score")),
-      ),
+      node_id=node_id,
+      kind=kind,
+      priority_score=0.0,
       rationale=rationale,
+      requirements=list(requirements or []),
+      expected_warnings=list(expected_warnings or []),
+      expected_followup_state={},
+      source_facts=copy.deepcopy(source_facts or {}),
+    )
+  )
+
+
+def _append_compatibility_candidates(candidates, observed_data, derived_data):
+  # Transitional: these legacy-shaped reporting candidates preserve existing review/check output
+  # during the M1-M3 plumbing slice. Planner-native nodes above remain the intended decision input.
+  legacy_seed_metadata = observed_data.get("legacy_seed_metadata") or {}
+  race_decision = legacy_seed_metadata.get("trackblazer_race_decision") or {}
+  legacy_func = str(legacy_seed_metadata.get("func") or "")
+
+  if legacy_func == "do_training":
+    _append_candidate(
+      candidates,
+      node_id=f"compat:training:{legacy_seed_metadata.get('training_name') or 'unknown'}",
+      kind="training",
+      rationale="transitional legacy-shaped training candidate for dual-run parity",
       requirements=[],
-      expected_warnings=[],
-      expected_followup_state={
-        "reassess_after_item_use": bool(derived_data.get("reassess_after_item_use")),
-      },
-      source_facts=source_facts or {},
+      source_facts={"training_name": legacy_seed_metadata.get("training_name")},
     )
-  )
+  elif legacy_func == "do_race":
+    _append_candidate(
+      candidates,
+      node_id=f"compat:race:{legacy_seed_metadata.get('race_name') or 'any'}",
+      kind="race",
+      rationale="transitional legacy-shaped race candidate for dual-run parity",
+      requirements=[],
+      source_facts={"race_name": legacy_seed_metadata.get("race_name")},
+    )
+  elif legacy_func == "do_rest":
+    _append_candidate(
+      candidates,
+      node_id="compat:rest",
+      kind="rest",
+      rationale="transitional legacy-shaped rest candidate for dual-run parity",
+      requirements=[],
+      source_facts={},
+    )
 
-
-def _kind_from_action(selected_action):
-  func = str(selected_action.get("func") or "")
-  if func.startswith("do_"):
-    return func[3:]
-  return func or "unknown"
-
-
-def _can_wrap_race_gate_directly(state_obj):
-  if not isinstance(state_obj, dict):
-    return False
-  if "rival_indicator_detected" in state_obj:
-    return True
-  if state_obj.get("trackblazer_climax_locked_race"):
-    return True
-  if state_obj.get("turn") == "Race Day":
-    return True
-  return False
-
-
-def _build_race_gate_candidate(race_decision, derived_data):
-  if not isinstance(race_decision, dict) or not race_decision:
-    return None
-  expected_warnings = []
-  if race_decision.get("should_race"):
-    expected_warnings.append("consecutive_race_warning")
-  return CandidateAction(
+  _append_candidate(
+    candidates,
+    node_id="compat:race_gate",
     kind="race_gate",
-    priority_score=_priority_score(
-      race_decision.get("training_score"),
-      ((derived_data.get("usage_context_summary") or {}).get("training_score")),
-    ),
-    rationale=str(race_decision.get("reason") or "trackblazer race gate"),
-    requirements=["cached_rival_indicator_or_mandatory_race_context"],
-    expected_warnings=expected_warnings,
-    expected_followup_state={
-      "should_race": bool(race_decision.get("should_race")),
-      "prefer_rival_race": bool(race_decision.get("prefer_rival_race")),
-      "prefer_rest_over_weak_training": bool(race_decision.get("prefer_rest_over_weak_training")),
+    rationale="transitional race-gate summary candidate for dual-run parity",
+    requirements=[],
+    expected_warnings=["consecutive_race_warning"] if any(getattr(entry, "kind", "") == "race" for entry in candidates) else [],
+    source_facts={
+      "race_opportunity": copy.deepcopy(derived_data.get("race_opportunity") or {}),
+      "training_value_summary": copy.deepcopy(derived_data.get("training_value_summary") or {}),
     },
-    source_facts=dict(race_decision),
   )
 
-
-def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, state_obj=None, action=None, planner_state=None) -> List[CandidateAction]:
-  observed_data = observed.to_dict()
-  derived_data = derived.to_dict()
-  planner_state = planner_state if isinstance(planner_state, dict) else {}
-  planner_race_plan = dict(planner_state.get("planner_race_plan") or {})
-  selected_action = observed_data.get("selected_action") or {}
-  race_decision = copy.deepcopy(selected_action.get("trackblazer_race_decision") or {})
-  candidates = []
-  action_kind = _kind_from_action(selected_action)
-
-  if selected_action.get("func"):
-    _append_action_candidate(
+  if legacy_seed_metadata.get("scheduled_race") and not legacy_seed_metadata.get("trackblazer_lobby_scheduled_race"):
+    _append_candidate(
       candidates,
-      action_kind,
-      selected_action,
-      derived_data,
-      "legacy selected action",
-      source_facts={
-        "training_name": selected_action.get("training_name"),
-        "race_name": selected_action.get("race_name"),
-      },
+      node_id=f"compat:scheduled_race:{legacy_seed_metadata.get('race_name') or 'scheduled'}",
+      kind="scheduled_race",
+      rationale="transitional scheduled-race candidate for dual-run parity",
+      requirements=[],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={"race_name": legacy_seed_metadata.get("race_name")},
     )
 
-  if action_kind == "training" and (selected_action.get("training_data") or {}).get("failure_bypassed_by_items"):
-    _append_action_candidate(
+  if legacy_seed_metadata.get("is_race_day") and not legacy_seed_metadata.get("trackblazer_climax_race_day"):
+    _append_candidate(
       candidates,
-      "failure_bypass_training",
-      selected_action,
-      derived_data,
-      "selected training remains viable because item policy can bypass failure risk",
-      source_facts={
-        "training_name": selected_action.get("training_name"),
-        "failure": (selected_action.get("training_data") or {}).get("failure"),
-      },
+      node_id="compat:forced_race_day",
+      kind="forced_race_day",
+      rationale="transitional forced-race-day candidate for dual-run parity",
+      requirements=[],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={"turn": observed_data.get("turn")},
     )
 
-  if action_kind == "training" and selected_action.get("rest_promoted_to_training"):
-    _append_action_candidate(
+  if observed_data.get("trackblazer_climax_race_day") or legacy_seed_metadata.get("trackblazer_climax_race_day"):
+    _append_candidate(
       candidates,
-      "stat_focused_training_override",
-      selected_action,
-      derived_data,
-      "stat-focused Trackblazer scoring promoted a provisional rest turn back into training",
-      source_facts={
-        "training_name": selected_action.get("training_name"),
-      },
+      node_id="compat:forced_climax_race",
+      kind="forced_climax_race",
+      rationale="transitional climax-race candidate for dual-run parity",
+      requirements=[],
+      source_facts={"trackblazer_climax_race_day": True},
     )
 
-  if selected_action.get("is_race_day") and not selected_action.get("trackblazer_climax_race_day"):
-    _append_action_candidate(
+  if observed_data.get("race_mission_available") or legacy_seed_metadata.get("race_mission_available"):
+    _append_candidate(
       candidates,
-      "forced_race_day",
-      selected_action,
-      derived_data,
-      "turn is on a forced race day in the legacy Trackblazer flow",
-      source_facts={
-        "is_race_day": True,
-        "race_name": selected_action.get("race_name"),
-      },
-    )
-
-  if observed_data.get("trackblazer_climax_race_day") or selected_action.get("trackblazer_climax_race_day"):
-    _append_action_candidate(
-      candidates,
-      "forced_climax_race",
-      selected_action,
-      derived_data,
-      "Trackblazer climax race-day UI replaces the normal lobby buttons",
-      source_facts={
-        "trackblazer_climax_race_day": True,
-        "banner_detected": bool(observed_data.get("trackblazer_climax_race_day_banner")),
-        "button_detected": bool(observed_data.get("trackblazer_climax_race_day_button")),
-      },
-    )
-
-  if selected_action.get("scheduled_race") and not selected_action.get("trackblazer_lobby_scheduled_race"):
-    _append_action_candidate(
-      candidates,
-      "scheduled_race",
-      selected_action,
-      derived_data,
-      "scheduled race from the legacy race schedule branch is active",
-      source_facts={
-        "scheduled_race": True,
-        "race_name": selected_action.get("race_name"),
-      },
-    )
-
-  if observed_data.get("race_mission_available") or selected_action.get("race_mission_available"):
-    _append_action_candidate(
-      candidates,
-      "mission_race",
-      selected_action,
-      derived_data,
-      "mission race branch is available in the legacy Trackblazer flow",
-      source_facts={
-        "race_mission_available": True,
-      },
-    )
-
-  if observed_data.get("trackblazer_lobby_scheduled_race") or selected_action.get("trackblazer_lobby_scheduled_race"):
-    _append_action_candidate(
-      candidates,
-      "lobby_scheduled_race",
-      selected_action,
-      derived_data,
-      "lobby scheduled-race indicator is present on the race button",
-      source_facts={
-        "trackblazer_lobby_scheduled_race": True,
-      },
+      node_id="compat:mission_race",
+      kind="mission_race",
+      rationale="transitional mission-race candidate for dual-run parity",
+      requirements=[],
+      source_facts={"race_mission_available": True},
     )
 
   if (
-    action_kind == "race"
-    and selected_action.get("race_name")
-    and selected_action.get("race_name") not in ("", "any")
-    and not selected_action.get("scheduled_race")
-    and not selected_action.get("trackblazer_lobby_scheduled_race")
-    and not selected_action.get("trackblazer_climax_race_day")
+    legacy_func == "do_race"
+    and legacy_seed_metadata.get("race_name")
+    and legacy_seed_metadata.get("race_name") not in ("", "any")
+    and not legacy_seed_metadata.get("scheduled_race")
+    and not legacy_seed_metadata.get("trackblazer_lobby_scheduled_race")
+    and not legacy_seed_metadata.get("trackblazer_climax_race_day")
   ):
-    _append_action_candidate(
+    _append_candidate(
       candidates,
-      "goal_race",
-      selected_action,
-      derived_data,
-      "legacy flow selected a concrete race target",
-      source_facts={
-        "race_name": selected_action.get("race_name"),
-      },
+      node_id=f"compat:goal_race:{legacy_seed_metadata.get('race_name')}",
+      kind="goal_race",
+      rationale="transitional goal-race candidate for dual-run parity",
+      requirements=[],
+      source_facts={"race_name": legacy_seed_metadata.get("race_name")},
     )
 
-  if action_kind == "race" and selected_action.get("fallback_non_rival_race"):
-    _append_action_candidate(
+  if legacy_seed_metadata.get("fallback_non_rival_race"):
+    _append_candidate(
       candidates,
-      "fallback_non_rival_race",
-      selected_action,
-      derived_data,
-      "race gate escalated a weak board into a non-rival fallback race",
-      source_facts={
-        "fallback_non_rival_race": True,
-        "race_name": selected_action.get("race_name"),
-        "reason": race_decision.get("reason"),
-      },
+      node_id="compat:fallback_non_rival_race",
+      kind="fallback_non_rival_race",
+      rationale="transitional fallback non-rival race candidate for dual-run parity",
+      requirements=[],
+      source_facts={"reason": race_decision.get("reason")},
     )
 
-  if action_kind == "rest" and race_decision.get("prefer_rest_over_weak_training"):
-    _append_action_candidate(
+  if legacy_func == "do_rest" and race_decision.get("prefer_rest_over_weak_training"):
+    _append_candidate(
       candidates,
-      "weak_training_rest",
-      selected_action,
-      derived_data,
-      "race gate converted the selected turn into rest because the board was too weak to train or race",
-      source_facts={
-        "prefer_rest_over_weak_training": True,
-        "reason": race_decision.get("reason"),
-      },
+      node_id="compat:weak_training_rest",
+      kind="weak_training_rest",
+      rationale="transitional weak-training rest candidate for dual-run parity",
+      requirements=[],
+      source_facts={"reason": race_decision.get("reason")},
     )
 
-  race_decision = {}
-  if _can_wrap_race_gate_directly(state_obj) and action is not None:
-    try:
-      race_decision = evaluate_trackblazer_race(state_obj, action) or {}
-    except Exception:
-      race_decision = copy.deepcopy(selected_action.get("trackblazer_race_decision") or {})
-  else:
-    race_decision = copy.deepcopy(selected_action.get("trackblazer_race_decision") or {})
-    if not race_decision:
-      race_decision = {
-        "reason": "race gate not re-run in read-only planner mode because cached rival-indicator context is missing",
-        "cached_only": True,
-      }
+  if legacy_seed_metadata.get("rest_promoted_to_training"):
+    _append_candidate(
+      candidates,
+      node_id="compat:stat_focused_training_override",
+      kind="stat_focused_training_override",
+      rationale="transitional stat-focused training override candidate for dual-run parity",
+      requirements=[],
+      source_facts={"training_name": legacy_seed_metadata.get("training_name")},
+    )
 
-  race_candidate = _build_race_gate_candidate(race_decision, derived_data)
-  if race_candidate is not None:
-    candidates.append(race_candidate)
 
-  branch_kind = str(planner_race_plan.get("branch_kind") or "")
-  if planner_race_plan.get("planner_owned") and branch_kind and branch_kind not in {"non_race", "training"}:
-    candidates.append(
-      CandidateAction(
-        kind=branch_kind,
-        priority_score=_priority_score(
-          (planner_race_plan.get("race_decision") or {}).get("training_score"),
-          ((derived_data.get("usage_context_summary") or {}).get("training_score")),
-        ),
-        rationale=str(planner_race_plan.get("selection_rationale") or "planner-owned race branch"),
-        requirements=[],
-        expected_warnings=(["consecutive_race_warning"] if (planner_race_plan.get("warning_plan") or {}).get("warning_expected") else []),
-        expected_followup_state={
-          "branch_kind": branch_kind,
-          "selected_func": ((planner_race_plan.get("selected_action") or {}).get("func")),
-        },
-        source_facts=copy.deepcopy(planner_race_plan.get("race_decision") or {}),
+def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, policy: dict) -> List[CandidateAction]:
+  observed_data = observed.to_dict()
+  derived_data = derived.to_dict()
+  missing_inputs = set(observed_data.get("missing_inputs") or [])
+  race_opportunity = derived_data.get("race_opportunity") or {}
+  training_values = list(derived_data.get("training_value") or [])
+  candidates = []
+
+  if "training" not in missing_inputs:
+    for training in training_values:
+      training_name = str(training.get("name") or "").strip()
+      if not training_name:
+        continue
+      _append_candidate(
+        candidates,
+        node_id=f"train:{training_name}",
+        kind="train",
+        rationale=f"training scan produced {training_name} as a visible candidate",
+        requirements=["training"],
+        source_facts=training,
       )
+      best_item_key = training.get("best_item_key")
+      if training.get("item_assist_available") and best_item_key:
+        _append_candidate(
+          candidates,
+          node_id=f"train:{training_name}+items:{best_item_key}",
+          kind="train",
+          rationale=f"{training_name} has planner-visible item assist via {best_item_key}",
+          requirements=["training", "items"],
+          source_facts={
+            "training": copy.deepcopy(training),
+            "item_key": best_item_key,
+          },
+        )
+
+  _append_candidate(
+    candidates,
+    node_id="rest",
+    kind="rest",
+    rationale="baseline recovery candidate is always enumerable in the stub planner pass",
+    requirements=["energy"],
+    source_facts={"energy_class": derived_data.get("energy_class"), "energy_ratio": derived_data.get("energy_ratio")},
+  )
+
+  if str(observed_data.get("current_mood") or "").upper() in {"BAD", "AWFUL"}:
+    _append_candidate(
+      candidates,
+      node_id="recreation",
+      kind="recreation",
+      rationale="low mood exposes recreation as a recovery option",
+      requirements=["mood"],
+      source_facts={"current_mood": observed_data.get("current_mood")},
     )
 
+  if list(observed_data.get("status_effect_names") or []):
+    _append_candidate(
+      candidates,
+      node_id="infirmary",
+      kind="infirmary",
+      rationale="status effects are present, so infirmary is available",
+      requirements=["status"],
+      source_facts={"status_effect_names": list(observed_data.get("status_effect_names") or [])},
+    )
+
+  energy_ratio = derived_data.get("energy_ratio")
+  rival_min_energy = float((policy or {}).get("rival_race_min_energy_ratio", 0.02) or 0.02)
+  if race_opportunity.get("rival_visible") and isinstance(energy_ratio, (int, float)) and energy_ratio > rival_min_energy:
+    _append_candidate(
+      candidates,
+      node_id="race:rival",
+      kind="race",
+      rationale="rival indicator is visible and energy clears the planner minimum",
+      requirements=["race_opportunity", "energy"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts=race_opportunity,
+    )
+
+  if race_opportunity.get("lobby_scheduled"):
+    scheduled_name = str(((observed_data.get("legacy_seed_metadata") or {}).get("race_name")) or "scheduled").strip() or "scheduled"
+    _append_candidate(
+      candidates,
+      node_id=f"race:scheduled:{scheduled_name}",
+      kind="race",
+      rationale="lobby scheduled-race indicator is present",
+      requirements=["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+      # Transitional: legacy seed metadata only supplies the debug label until planner-native scheduled-race naming lands.
+      source_facts={"race_name": scheduled_name, **copy.deepcopy(race_opportunity)},
+    )
+
+  if str(observed_data.get("turn") or "") == "Race Day":
+    _append_candidate(
+      candidates,
+      node_id="race:race_day",
+      kind="race",
+      rationale="current turn is labeled Race Day",
+      requirements=["turn_identity"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={"turn": observed_data.get("turn")},
+    )
+
+  if race_opportunity.get("climax_locked"):
+    _append_candidate(
+      candidates,
+      node_id="race:climax_locked",
+      kind="race",
+      rationale="climax lock is visible on the current lobby state",
+      requirements=["race_opportunity"],
+      source_facts=race_opportunity,
+    )
+
+  _append_compatibility_candidates(candidates, observed_data, derived_data)
   return candidates
+
+
+def _legacy_enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, policy: dict, state_obj=None, action=None, planner_state=None) -> List[CandidateAction]:
+  # TODO remove after Milestone 4 callers stop passing legacy arguments.
+  return enumerate_candidate_actions(observed, derived, policy)
