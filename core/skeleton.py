@@ -3803,10 +3803,18 @@ def _run_trackblazer_shop_purchases(state_obj, action):
   state_obj["trackblazer_shop_flow"] = result.get("trackblazer_shop_flow")
 
   if not result.get("success"):
+    flow = result.get("trackblazer_shop_flow") or {}
+    entry_result = flow.get("entry_result") or {}
+    if entry_result.get("clicked") and not flow.get("entered"):
+      return {
+        "status": "blocked",
+        "result": result,
+        "reason": flow.get("reason") or "shop_verification_failed",
+      }
     return {
       "status": "failed",
       "result": result,
-      "reason": (result.get("trackblazer_shop_flow") or {}).get("reason") or "trackblazer_shop_purchase_failed",
+      "reason": flow.get("reason") or "trackblazer_shop_purchase_failed",
     }
 
   refreshed_state = collect_trackblazer_inventory(
@@ -4439,6 +4447,18 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       f"status={shop_purchase_result.get('status')}",
       f"reason={shop_purchase_result.get('reason')}" if shop_purchase_result.get("reason") else None,
     )
+  if shop_purchase_result.get("status") == "blocked":
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Shop purchase needs recovery: {shop_purchase_result.get('reason')}",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return "blocked"
   if shop_purchase_result.get("status") == "failed":
     shop_result = shop_purchase_result.get("result") or {}
     shop_flow = (shop_result.get("trackblazer_shop_flow") or {})

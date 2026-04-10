@@ -199,6 +199,24 @@ def run_planner_action_with_review(
   if _step_present(turn_plan, "execute_shop_purchases"):
     _transition(state_obj, "execute_shop_purchases", "execute_shop_purchases", "started")
     shop_purchase_result = hooks.run_trackblazer_shop_purchases(state_obj, action)
+    if shop_purchase_result.get("status") == "blocked":
+      hooks.update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text=f"Shop purchase needs recovery: {shop_purchase_result.get('reason')}",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      _transition(state_obj, "execute_shop_purchases", "execute_shop_purchases", "blocked", shop_purchase_result.get("reason") or "trackblazer_shop_purchase_blocked")
+      return {
+        "status": "blocked",
+        "step_id": "execute_shop_purchases",
+        "reason": shop_purchase_result.get("reason") or "trackblazer_shop_purchase_blocked",
+        "committed": committed,
+      }
     if shop_purchase_result.get("status") == "failed":
       shop_result = shop_purchase_result.get("result") or {}
       shop_flow = shop_result.get("trackblazer_shop_flow") or {}

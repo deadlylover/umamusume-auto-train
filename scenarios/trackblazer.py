@@ -1715,7 +1715,7 @@ def detect_inventory_screen(threshold=0.8):
     region_ltrb = _trackblazer_ui_region()
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     checks = []
-    for key in ("use_training_items", "use_back"):
+    for key in ("use_training_items",):
         template_path = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get(key)
         if not template_path:
             continue
@@ -1724,14 +1724,49 @@ def detect_inventory_screen(threshold=0.8):
         checks.append(entry)
         if entry["passed_threshold"]:
             return True, entry, checks
+
     controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.2))
-    for key in ("close", "confirm_use"):
-        entry = controls.get(key)
+    confirm_candidates = controls.get("confirm_candidates") or {}
+    for key in ("inventory_confirm_use_available", "inventory_confirm_use_unavailable"):
+        entry = confirm_candidates.get(key)
         if not entry:
             continue
         checks.append(entry)
         if entry.get("passed_threshold"):
             return True, entry, checks
+
+    back_entry = None
+    back_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back")
+    if back_template:
+        back_entry = _best_match_entry(
+            back_template,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            screenshot=screenshot,
+        )
+        back_entry["key"] = "use_back"
+        checks.append(back_entry)
+
+    explicit_shop_entry = None
+    for key in (*_shop_confirm_template_keys(), "shop_aftersale_close"):
+        template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
+        if not template_path:
+            continue
+        entry = _best_match_entry(
+            template_path,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            screenshot=screenshot,
+        )
+        entry["key"] = key
+        checks.append(entry)
+        if explicit_shop_entry is None and entry.get("passed_threshold"):
+            explicit_shop_entry = entry
+
+    if explicit_shop_entry is not None:
+        return False, None, checks
+    if back_entry and back_entry.get("passed_threshold"):
+        return True, back_entry, checks
     return False, None, checks
 
 
@@ -4303,6 +4338,7 @@ def detect_shop_screen(threshold=0.7):
     region_ltrb = _trackblazer_ui_region()
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     checks = []
+    explicit_shop_entry = None
 
     for key in (*_shop_confirm_template_keys(), "shop_aftersale_close"):
         template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
@@ -4316,8 +4352,38 @@ def detect_shop_screen(threshold=0.7):
         )
         entry["key"] = key
         checks.append(entry)
-        if entry.get("passed_threshold"):
-            return True, entry, checks
+        if explicit_shop_entry is None and entry.get("passed_threshold"):
+            explicit_shop_entry = entry
+
+    if explicit_shop_entry is not None:
+        return True, explicit_shop_entry, checks
+
+    controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.2))
+    confirm_candidates = controls.get("confirm_candidates") or {}
+    inventory_specific_entry = None
+    for key in ("inventory_confirm_use_available", "inventory_confirm_use_unavailable"):
+        entry = confirm_candidates.get(key)
+        if not entry:
+            continue
+        checks.append(entry)
+        if inventory_specific_entry is None and entry.get("passed_threshold"):
+            inventory_specific_entry = entry
+
+    use_training_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_training_items")
+    if use_training_template:
+        use_training_entry = _best_match_entry(
+            use_training_template,
+            region_ltrb=region_ltrb,
+            threshold=threshold,
+            screenshot=screenshot,
+        )
+        use_training_entry["key"] = "use_training_items"
+        checks.append(use_training_entry)
+        if inventory_specific_entry is None and use_training_entry.get("passed_threshold"):
+            inventory_specific_entry = use_training_entry
+
+    if inventory_specific_entry is not None:
+        return False, None, checks
 
     back_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_back")
     if back_template:
