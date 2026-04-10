@@ -7,6 +7,7 @@
 import utils.constants as constants
 import utils.device_action_wrapper as device_action
 import core.config as config
+import copy
 from utils.log import info, warning, debug
 from utils.tools import get_secs, sleep
 import core.bot as bot
@@ -20,9 +21,12 @@ import cv2
 import json
 import Levenshtein
 from pathlib import Path
+import uuid
 
 _SKILL_RUNTIME_DEBUG_LOCK = threading.Lock()
 _SKILL_RUNTIME_DEBUG_CAPTURE_ENABLED = False  # Re-enable this if you need buffered skill-scan frames written under logs/runtime_debug again.
+_SKILL_PREVIEW_TASKS_LOCK = threading.Lock()
+_SKILL_PREVIEW_TASKS = {}
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2891,6 +2895,226 @@ def _finalize_multi_increment_results(target_results, dry_run):
     return summary
 
 
+def _build_preview_candidate_payload(candidate_row, candidate):
+    candidate_row = candidate_row if isinstance(candidate_row, dict) else {}
+    candidate = candidate if isinstance(candidate, dict) else {}
+    return {
+        "frame_index": candidate.get("frame_index"),
+        "scrollbar_ratio": candidate.get("scrollbar_ratio"),
+        "match_name": candidate_row.get("match_name"),
+        "match_score": candidate_row.get("match_score"),
+        "increment_pairing": candidate_row.get("increment_pairing"),
+        "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
+        "ocr_variant_used": candidate_row.get("ocr_variant"),
+        "chosen_variant": candidate_row.get("chosen_variant") or candidate_row.get("ocr_variant"),
+        "ocr_variants_seen": list(candidate_row.get("ocr_variants_seen") or []),
+        "name_match_method": candidate_row.get("name_match_method"),
+        "consensus_score": candidate_row.get("consensus_score"),
+        "token_evidence": dict(candidate_row.get("token_evidence") or {}),
+        "reject_reason": candidate_row.get("reject_reason") or "",
+        "obtained_evidence": candidate_row.get("obtained_evidence") or "none",
+        "increment_ready": bool(_match_has_safe_increment(candidate_row)),
+    }
+
+
+def _start_buffered_preview_scan(target_skills, save_debug_frames=False, debug_session_name=None):
+    ordered_targets = []
+    seen = set()
+    for skill_name in (target_skills or []):
+        normalized = _normalize_skill_text(skill_name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered_targets.append(skill_name)
+
+    flow = {
+        "target_skills": ordered_targets,
+        "scan_timing": {},
+        "scrollbar_initial": None,
+        "scrollbar_reset": None,
+        "drag_result": None,
+        "bottom_completion_result": None,
+        "all_frames": [],
+        "frame_signatures_seen": 0,
+        "frame_signatures_unique": 0,
+        "target_results": [],
+        "reason": "",
+    }
+    task = {
+        "flow": flow,
+        "ordered_targets": ordered_targets,
+        "live_index": None,
+        "t_flow": _time(),
+        "t_capture_done": None,
+    }
+    if not ordered_targets:
+        flow["reason"] = "no_target_skills_configured"
+        task["t_capture_done"] = task["t_flow"]
+        return task
+
+    skill_shortlist = list(ordered_targets)
+    normalized_shortlist = _normalize_skill_shortlist(skill_shortlist)
+    debug_session_dir = (
+        _ensure_skill_runtime_debug_dir(
+            debug_session_name or f"skill_preview_multi_{int(_time() * 1000)}"
+        )
+        if save_debug_frames
+        else None
+    )
+    live_index = _LiveAnalysisIndex()
+    task["live_index"] = live_index
+
+    info(f"Skill scanner: detecting scrollbar for buffered preview {ordered_targets}...")
+    scrollbar = inspect_skill_scrollbar()
+    flow["scrollbar_initial"] = scrollbar
+    if not scrollbar.get("detected"):
+        flow["reason"] = "scrollbar_not_detected"
+        live_index.mark_done()
+        task["t_capture_done"] = _time()
+        return task
+
+    if not scrollbar.get("is_at_top"):
+        flow["scrollbar_reset"] = _drag_skill_scrollbar(scrollbar, edge="top")
+        sleep(0.3)
+        scrollbar = inspect_skill_scrollbar()
+
+    initial_screenshot = _capture_live_skill_screenshot()
+    initial_frame = _analyze_skill_frame({
+        "index": -1,
+        "elapsed": 0.0,
+        "capture_elapsed": 0.0,
+        "screenshot": initial_screenshot,
+        "skill_shortlist": skill_shortlist,
+        "normalized_shortlist": normalized_shortlist,
+    })
+    if debug_session_dir is not None:
+        _save_skill_runtime_debug_frame(
+            debug_session_dir,
+            "initial_frame_top",
+            initial_screenshot,
+            frame_summary={
+                "index": -1,
+                "elapsed": 0.0,
+                "scrollbar_ratio": ((initial_frame.get("scrollbar") or {}).get("position_ratio")),
+                "ocr_rows_count": initial_frame.get("ocr_rows_count", 0),
+                "matched_names": [m.get("match_name") for m in (initial_frame.get("matched_targets") or [])],
+                "increment_count": initial_frame.get("increment_count", 0),
+                "timing": initial_frame.get("timing"),
+            },
+        )
+    live_index.append(initial_frame)
+
+    if scrollbar.get("scrollable"):
+        drag_result = _capture_skill_frames_during_scrollbar_drag(
+            scrollbar,
+            skill_shortlist,
+            normalized_shortlist=normalized_shortlist,
+            drag_duration=6.0,
+            frame_interval=0.22,
+            debug_session_dir=debug_session_dir,
+            live_index=live_index,
+        )
+        flow["drag_result"] = {
+            "stop_reason": drag_result.get("stop_reason"),
+            "swiped": drag_result.get("swiped"),
+            "timing": drag_result.get("timing"),
+        }
+        if drag_result.get("stop_reason") != "scrollbar_bottom_reached":
+            extra_frames, bottom_completion = _complete_scan_to_bottom(
+                skill_shortlist,
+                normalized_shortlist=normalized_shortlist,
+                start_index=max(1, len(live_index.get_frames())),
+                debug_session_dir=debug_session_dir,
+            )
+            flow["bottom_completion_result"] = bottom_completion
+            for frame in extra_frames:
+                live_index.append(frame)
+    else:
+        live_index.mark_done()
+
+    task["t_capture_done"] = _time()
+    return task
+
+
+def _resolve_buffered_preview_scan(task):
+    task = task if isinstance(task, dict) else {}
+    flow = dict(task.get("flow") or {})
+    ordered_targets = list(task.get("ordered_targets") or [])
+    live_index = task.get("live_index")
+    t_flow = float(task.get("t_flow") or _time())
+    t_capture_done = float(task.get("t_capture_done") or t_flow)
+
+    if not ordered_targets:
+        flow["scan_timing"] = {
+            "wall": round(_time() - t_flow, 4),
+            "capture_phase": round(max(0.0, t_capture_done - t_flow), 4),
+            "post_close_processing_phase": 0.0,
+        }
+        return flow
+
+    if live_index is None:
+        flow["reason"] = flow.get("reason") or "preview_live_index_missing"
+        flow["scan_timing"] = {
+            "wall": round(_time() - t_flow, 4),
+            "capture_phase": round(max(0.0, t_capture_done - t_flow), 4),
+            "post_close_processing_phase": round(max(0.0, _time() - t_capture_done), 4),
+        }
+        return flow
+
+    _finalize_waterfall_summary(flow, live_index)
+
+    target_results = []
+    actionable_count = 0
+    for skill_name in ordered_targets:
+        entry = _build_scan_entry(skill_name, source="buffered_preview")
+        candidate = live_index.find_best_candidate(skill_name)
+        if not candidate:
+            _set_target_entry_reason(entry, "target_not_found_in_any_frame")
+            target_results.append(entry)
+            continue
+
+        candidate_row = candidate.get("row") or {}
+        _sync_target_entry_telemetry(entry, match_row=candidate_row)
+        entry["candidate"] = _build_preview_candidate_payload(candidate_row, candidate)
+
+        if candidate_row.get("obtained") and not _match_has_safe_increment(candidate_row):
+            _set_target_entry_reason(entry, "target_obtained_no_increment", match_row=candidate_row)
+            target_results.append(entry)
+            continue
+        if not candidate_row.get("increment_match"):
+            _set_target_entry_reason(entry, "preview_increment_missing", match_row=candidate_row)
+            target_results.append(entry)
+            continue
+        if not _match_has_safe_increment(candidate_row):
+            _set_target_entry_reason(entry, "preview_increment_pair_unsafe", match_row=candidate_row)
+            target_results.append(entry)
+            continue
+
+        entry["increment_click_result"] = {
+            "target": True,
+            "simulated": True,
+            "reason": "preview_increment_available",
+        }
+        _set_target_entry_reason(entry, "preview_increment_available", match_row=candidate_row)
+        actionable_count += 1
+        target_results.append(entry)
+
+    flow["target_results"] = target_results
+    wall = max(0.0, _time() - t_flow)
+    capture_phase = max(0.0, t_capture_done - t_flow)
+    flow["scan_timing"] = {
+        "wall": round(wall, 4),
+        "capture_phase": round(capture_phase, 4),
+        "post_close_processing_phase": round(max(0.0, wall - capture_phase), 4),
+    }
+    flow["reason"] = (
+        "preview_targets_ready"
+        if actionable_count
+        else (flow.get("reason") or "no_targets_incremented")
+    )
+    return flow
+
+
 def scan_and_increment_skills(target_skills, dry_run=False,
                               save_debug_frames=False, debug_session_name=None,
                               target_hints=None):
@@ -3207,6 +3431,26 @@ def _log_scan_debug(flow, all_frames):
         info(f"Skill scanner: matched targets: {matched_summary}")
 
 
+def _build_skill_scan_result_summary(scan_result):
+    summary = {
+        "target_skills": scan_result.get("target_skills"),
+        "target_results": scan_result.get("target_results"),
+        "reason": scan_result.get("reason"),
+        "scan_timing": scan_result.get("scan_timing"),
+        "frame_count": scan_result.get("frame_signatures_seen", 0),
+        "unique_frames": scan_result.get("frame_signatures_unique", 0),
+    }
+    if scan_result.get("drag_result"):
+        summary["drag_result"] = scan_result["drag_result"]
+    if scan_result.get("bottom_completion_result"):
+        summary["bottom_completion_result"] = scan_result["bottom_completion_result"]
+    if scan_result.get("shortcut_result"):
+        summary["shortcut_result"] = scan_result["shortcut_result"]
+    if scan_result.get("finalize_result"):
+        summary["finalize_result"] = scan_result["finalize_result"]
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Skills page open / close helpers
 # ---------------------------------------------------------------------------
@@ -3440,36 +3684,44 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
     # Step 2: Scan and increment all targets from the shortlist.
     info(f"[SKILL] Scanning skill list (dry_run={dry_run})...")
     t0 = _time()
-    scan_result = scan_and_increment_skills(
-        target_skills=skill_shortlist,
-        dry_run=dry_run,
-        save_debug_frames=enable_debug_frames,
-        debug_session_name=debug_session_name,
-        target_hints=target_hints,
-    )
+    preview_mode = bool(dry_run and str(trigger or "") == "automatic_preview")
+    if preview_mode:
+        scan_task = _start_buffered_preview_scan(
+            target_skills=skill_shortlist,
+            save_debug_frames=enable_debug_frames,
+            debug_session_name=debug_session_name,
+        )
+        already_open = (flow.get("open_result") or {}).get("already_open", False)
+        if allow_open and not already_open:
+            info("[SKILL] Closing skills page before buffered preview analysis...")
+            close_t0 = _time()
+            close_result = _close_skills_page()
+            flow["timing_close"] = round(_time() - close_t0, 3)
+            flow["close_result"] = close_result
+            flow["closed"] = bool(close_result.get("closed"))
+            if not flow["closed"]:
+                flow["reason"] = "failed_to_close_skills_page"
+                flow["timing_total"] = round(_time() - t_total, 3)
+                warning("[SKILL] Failed to close skills page before preview analysis.")
+                return result
+        scan_result = _resolve_buffered_preview_scan(scan_task)
+    else:
+        scan_result = scan_and_increment_skills(
+            target_skills=skill_shortlist,
+            dry_run=dry_run,
+            save_debug_frames=enable_debug_frames,
+            debug_session_name=debug_session_name,
+            target_hints=target_hints,
+        )
     flow["timing_scan"] = round(_time() - t0, 3)
     flow["scanned"] = True
-    flow["scan_result"] = {
-        "target_skills": scan_result.get("target_skills"),
-        "target_results": scan_result.get("target_results"),
-        "reason": scan_result.get("reason"),
-        "scan_timing": scan_result.get("scan_timing"),
-        "frame_count": scan_result.get("frame_signatures_seen", 0),
-        "unique_frames": scan_result.get("frame_signatures_unique", 0),
-    }
-    if scan_result.get("drag_result"):
-        flow["scan_result"]["drag_result"] = scan_result["drag_result"]
-    if scan_result.get("bottom_completion_result"):
-        flow["scan_result"]["bottom_completion_result"] = scan_result["bottom_completion_result"]
-    if scan_result.get("shortcut_result"):
-        flow["scan_result"]["shortcut_result"] = scan_result["shortcut_result"]
-    if scan_result.get("finalize_result"):
-        flow["scan_result"]["finalize_result"] = scan_result["finalize_result"]
+    flow["scan_timing"] = scan_result.get("scan_timing")
+    flow["scan_result"] = _build_skill_scan_result_summary(scan_result)
     result["skill_purchase_scan"] = scan_result
 
     # Step 3: Close skills page (skip if it was already open before we started).
     already_open = (flow.get("open_result") or {}).get("already_open", False)
-    if allow_open and not already_open:
+    if allow_open and not already_open and not preview_mode:
         info("[SKILL] Closing skills page...")
         t0 = _time()
         close_result = _close_skills_page()
@@ -3483,6 +3735,9 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
         flow["closed"] = False
         flow["reason"] = flow["reason"] or "skills_page_was_already_open"
         info("[SKILL] Skipping close — skills page was already open.")
+    elif preview_mode:
+        flow["closed"] = bool(flow.get("closed"))
+        flow["reason"] = flow["reason"] or "buffered_preview_complete"
     else:
         flow["closed"] = False
         flow["reason"] = flow["reason"] or "skills_page_left_open"
@@ -3494,3 +3749,144 @@ def collect_skill_purchase(target_skill=None, skill_shortlist=None,
          f"(open={flow.get('timing_open', '-')} scan={flow.get('timing_scan', '-')} "
          f"close={flow.get('timing_close', '-')})")
     return result
+
+
+def start_deferred_skill_preview(skill_shortlist=None, trigger="automatic_preview", save_debug_frames=None, debug_session_name=None):
+    """Start a buffered preview scan, close the skills page, then finish OCR in the background."""
+    if not skill_shortlist:
+        skill_shortlist = list(getattr(config, "SKILL_LIST", []))
+    flow = {
+        "trigger": trigger,
+        "execution_intent": bot.get_execution_intent(),
+        "dry_run": True,
+        "target_skill": None,
+        "skill_shortlist": list(skill_shortlist or []),
+        "target_hints": [],
+        "opened": False,
+        "scanned": False,
+        "closed": False,
+        "skipped": False,
+        "reason": "",
+        "open_result": None,
+        "scan_result": None,
+        "close_result": None,
+    }
+    result = {
+        "started": False,
+        "task_id": "",
+        "skill_purchase_flow": flow,
+        "skill_purchase_scan": None,
+    }
+    t_total = _time()
+    enable_debug_frames = bool(trigger == "manual_console") if save_debug_frames is None else bool(save_debug_frames)
+
+    if not bot.get_skill_auto_buy_enabled() and trigger != "manual_console":
+        flow["skipped"] = True
+        flow["reason"] = "auto_buy_skill_disabled"
+        flow["timing_total"] = round(_time() - t_total, 3)
+        return result
+    if not skill_shortlist:
+        flow["skipped"] = True
+        flow["reason"] = "no_skill_shortlist"
+        flow["timing_total"] = round(_time() - t_total, 3)
+        return result
+
+    open_t0 = _time()
+    open_result = _open_skills_page()
+    flow["timing_open"] = round(_time() - open_t0, 3)
+    flow["open_result"] = open_result
+    flow["opened"] = bool(open_result.get("opened"))
+    if not flow["opened"]:
+        flow["reason"] = "failed_to_open_skills_page"
+        flow["timing_total"] = round(_time() - t_total, 3)
+        return result
+
+    scan_t0 = _time()
+    scan_task = _start_buffered_preview_scan(
+        target_skills=skill_shortlist,
+        save_debug_frames=enable_debug_frames,
+        debug_session_name=debug_session_name,
+    )
+    close_t0 = _time()
+    close_result = _close_skills_page()
+    flow["timing_close"] = round(_time() - close_t0, 3)
+    flow["close_result"] = close_result
+    flow["closed"] = bool(close_result.get("closed"))
+    if not flow["closed"]:
+        flow["reason"] = "failed_to_close_skills_page"
+        flow["timing_total"] = round(_time() - t_total, 3)
+        return result
+
+    task_id = uuid.uuid4().hex
+    task = {
+        "id": task_id,
+        "started_at": t_total,
+        "scan_started_at": scan_t0,
+        "flow_seed": copy.deepcopy(flow),
+        "scan_task": scan_task,
+        "thread": None,
+        "result": None,
+        "error": "",
+    }
+
+    def _run():
+        try:
+            scan_result = _resolve_buffered_preview_scan(scan_task)
+            final_flow = copy.deepcopy(task["flow_seed"])
+            final_flow["timing_scan"] = round(_time() - scan_t0, 3)
+            final_flow["timing_total"] = round(_time() - t_total, 3)
+            final_flow["scanned"] = True
+            final_flow["scan_timing"] = scan_result.get("scan_timing")
+            final_flow["scan_result"] = _build_skill_scan_result_summary(scan_result)
+            final_flow["reason"] = final_flow.get("reason") or scan_result.get("reason", "")
+            task["result"] = {
+                "skill_purchase_flow": final_flow,
+                "skill_purchase_scan": scan_result,
+            }
+        except Exception as exc:
+            task["error"] = str(exc)
+            warning(f"[SKILL] Deferred skill preview failed: {exc}")
+
+    thread = threading.Thread(target=_run, daemon=True)
+    task["thread"] = thread
+    with _SKILL_PREVIEW_TASKS_LOCK:
+        _SKILL_PREVIEW_TASKS[task_id] = task
+    thread.start()
+    flow["reason"] = "buffered_preview_processing"
+    flow["timing_total"] = round(_time() - t_total, 3)
+    result["started"] = True
+    result["task_id"] = task_id
+    return result
+
+
+def resolve_deferred_skill_preview(task_id, wait=True):
+    """Resolve a deferred preview task; optionally wait for completion."""
+    if not task_id:
+        return {"status": "missing", "result": None, "reason": "missing_task_id"}
+    with _SKILL_PREVIEW_TASKS_LOCK:
+        task = _SKILL_PREVIEW_TASKS.get(task_id)
+    if task is None:
+        return {"status": "missing", "result": None, "reason": "task_not_found"}
+
+    thread = task.get("thread")
+    if thread is not None and wait:
+        thread.join()
+    if thread is not None and thread.is_alive():
+        return {"status": "pending", "result": None, "reason": "task_still_processing"}
+    if task.get("error"):
+        with _SKILL_PREVIEW_TASKS_LOCK:
+            _SKILL_PREVIEW_TASKS.pop(task_id, None)
+        return {"status": "failed", "result": None, "reason": task.get("error") or "task_failed"}
+    result = task.get("result")
+    if result is None:
+        return {"status": "pending", "result": None, "reason": "result_not_ready"}
+    with _SKILL_PREVIEW_TASKS_LOCK:
+        _SKILL_PREVIEW_TASKS.pop(task_id, None)
+    return {"status": "ready", "result": result, "reason": ""}
+
+
+def discard_deferred_skill_preview(task_id):
+    if not task_id:
+        return
+    with _SKILL_PREVIEW_TASKS_LOCK:
+        _SKILL_PREVIEW_TASKS.pop(task_id, None)

@@ -1052,9 +1052,12 @@ class OperatorConsole:
     if last_completed_metrics:
       sections.append(self._format_turn_metrics_section(last_completed_metrics, title="Last Completed Turn"))
     sections = [section for section in sections if section]
+    flow_text = self._format_flow_timing(snapshot)
     if sections:
+      if flow_text and flow_text != "No timing data":
+        sections.append(flow_text)
       return "\n\n".join(sections)
-    return self._format_flow_timing(snapshot)
+    return flow_text
 
   def _format_flow_timing(self, snapshot):
     state_summary = snapshot.get("state_summary") or {}
@@ -1100,7 +1103,12 @@ class OperatorConsole:
       lines.append("=== Open Breakdown ===")
       lines.extend(self._format_timing_mapping(open_timing))
     # Scan breakdown (from inventory scan info log)
-    scan_timing = flow.get("scan_timing") or ((flow.get("scan_result") or {}).get("flow") if isinstance(flow.get("scan_result"), dict) else {}) or {}
+    scan_timing = (
+      flow.get("scan_timing")
+      or ((flow.get("scan_result") or {}).get("scan_timing") if isinstance(flow.get("scan_result"), dict) else {})
+      or ((flow.get("scan_result") or {}).get("flow") if isinstance(flow.get("scan_result"), dict) else {})
+      or {}
+    )
     if scan_timing:
       lines.append("")
       lines.append("=== Scan Breakdown ===")

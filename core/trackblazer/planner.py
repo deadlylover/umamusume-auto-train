@@ -2958,6 +2958,30 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
   }
 
 
+def _flow_timing_snapshot(flow):
+  flow = flow if isinstance(flow, dict) else {}
+  snapshot = {}
+  for key in (
+    "timing_open",
+    "timing_scan",
+    "timing_controls",
+    "timing_close",
+    "timing_total",
+    "timing_confirm",
+  ):
+    if flow.get(key) is not None:
+      snapshot[key] = copy.deepcopy(flow.get(key))
+  if flow.get("scan_timing"):
+    snapshot["scan_timing"] = copy.deepcopy(flow.get("scan_timing"))
+  open_result = flow.get("open_result") or flow.get("entry_result")
+  close_result = flow.get("close_result")
+  if open_result:
+    snapshot["open_result"] = copy.deepcopy(open_result)
+  if close_result:
+    snapshot["close_result"] = copy.deepcopy(close_result)
+  return snapshot
+
+
 def _build_item_refresh_step_planned_clicks():
   return [
     _planned_click(
@@ -3832,9 +3856,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "projected_post_buy_summary": projected_summary,
     },
     timing={
-      "inventory": copy.deepcopy((inventory_flow or {}).get("timing") or {}),
-      "shop": copy.deepcopy((shop_flow or {}).get("timing") or {}),
-      "skill": copy.deepcopy(((state_obj.get("skill_purchase_flow") or {}).get("timing")) or {}),
+      "inventory": _flow_timing_snapshot(inventory_flow),
+      "shop": _flow_timing_snapshot(shop_flow),
+      "skill": _flow_timing_snapshot(state_obj.get("skill_purchase_flow") or {}),
     },
     debug_summary={
       "shop_item_count": len(shop_buy_plan),

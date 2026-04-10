@@ -26,7 +26,7 @@ from core.skill import (
   mark_skill_purchase_checked,
   update_skill_action_count,
 )
-from core.skill_scanner import collect_skill_purchase
+from core.skill_scanner import collect_skill_purchase, discard_deferred_skill_preview, resolve_deferred_skill_preview, start_deferred_skill_preview
 from core.operator_console import ensure_operator_console, publish_runtime_state
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
 from core.race_selector import get_race_gate_for_turn_label
@@ -44,6 +44,7 @@ from core.trackblazer.planner import (
   get_turn_plan,
   mark_planner_fallback,
   plan_once,
+  ensure_planner_runtime_state,
   set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
   sync_turn_plan_execution_contract,
@@ -2411,6 +2412,156 @@ def _skill_purchase_preview_key(current_action_count, context):
   )
 
 
+def _skill_preview_turn_key(state_obj):
+  return f"{(state_obj or {}).get('year') or '?'}|{(state_obj or {}).get('turn') or '?'}"
+
+
+def _skill_preview_context_key(context):
+  return "|".join(_normalize_skill_name(item) for item in list((context or {}).get("shopping_list") or []) if _normalize_skill_name(item))
+
+
+def _set_pending_skill_preview_state(state_obj, **updates):
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  pending = dict(runtime_state.get("pending_skill_scan") or {})
+  pending.update(updates)
+  runtime_state["pending_skill_scan"] = pending
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  return pending
+
+
+def _clear_pending_skill_preview_state(state_obj):
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  previous_job_id = ((runtime_state.get("pending_skill_scan") or {}).get("job_id") or "")
+  if previous_job_id:
+    discard_deferred_skill_preview(previous_job_id)
+  runtime_state["pending_skill_scan"] = {
+    "status": "stale",
+    "job_id": "",
+    "turn_key": _skill_preview_turn_key(state_obj),
+    "observation_id": "",
+    "skill_context_key": "",
+    "captured_sp": None,
+    "captured_shortlist_hash": "",
+    "result_ref": "",
+    "reason": "",
+  }
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+
+
+def _record_skill_preview_timing_step(context, preview_flow, preview_scan):
+  preview_timing_total = preview_flow.get("timing_total")
+  if preview_timing_total is None:
+    return
+  bot.record_turn_timing_step(
+    label="Skill check",
+    category="scan",
+    key="skill_check",
+    duration=float(preview_timing_total),
+    detail=_turn_metric_detail(
+      f"sp={(context or {}).get('current_sp', '?')}",
+      f"queued={'yes' if _skill_purchase_has_actionable_targets(preview_scan) else 'no'}",
+      f"reason={preview_flow.get('reason') or (context or {}).get('reason')}",
+    ),
+    data={
+      "timing_total": preview_flow.get("timing_total"),
+      "timing_open": preview_flow.get("timing_open"),
+      "timing_scan": preview_flow.get("timing_scan"),
+      "timing_close": preview_flow.get("timing_close"),
+    },
+  )
+
+
+def _maybe_start_deferred_skill_purchase_preview(state_obj, current_action_count):
+  if not isinstance(state_obj, dict):
+    return "skipped"
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return "skipped"
+
+  context = get_skill_purchase_context(state_obj, current_action_count, race_check=False, action=None)
+  state_obj["skill_purchase_check"] = {
+    **get_skill_purchase_check_state(),
+    **context,
+  }
+  if not context.get("should_check"):
+    return "skipped"
+
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  pending = dict(runtime_state.get("pending_skill_scan") or {})
+  current_turn_key = _skill_preview_turn_key(state_obj)
+  context_key = _skill_preview_context_key(context)
+  if (
+    pending.get("job_id")
+    and pending.get("turn_key") == current_turn_key
+    and pending.get("captured_shortlist_hash") == context_key
+    and pending.get("status") in {"queued", "capturing", "processing", "ready"}
+  ):
+    return "already_started"
+
+  start_result = start_deferred_skill_preview(
+    skill_shortlist=context.get("shopping_list"),
+    trigger="automatic_preview",
+  )
+  if not start_result.get("started"):
+    preview_flow = start_result.get("skill_purchase_flow") or {}
+    state_obj["skill_purchase_flow"] = preview_flow
+    state_obj["skill_purchase_scan"] = start_result.get("skill_purchase_scan") or {}
+    state_obj["skill_purchase_check"] = {
+      **get_skill_purchase_check_state(),
+      **context,
+      "reason": preview_flow.get("reason") or context.get("reason"),
+    }
+    return "failed"
+
+  state_obj["skill_purchase_flow"] = start_result.get("skill_purchase_flow") or {}
+  state_obj["skill_purchase_scan"] = {}
+  state_obj["skill_purchase_check"] = {
+    **get_skill_purchase_check_state(),
+    **context,
+    "reason": "Skill scan capture complete. OCR is processing in the background while the rest of the turn is scanned.",
+  }
+  _set_pending_skill_preview_state(
+    state_obj,
+    status="processing",
+    job_id=start_result.get("task_id") or "",
+    turn_key=current_turn_key,
+    captured_sp=context.get("current_sp"),
+    captured_shortlist_hash=context_key,
+    reason="background_preview_processing",
+  )
+  return "started"
+
+
+def _consume_pending_skill_purchase_preview(state_obj, context):
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  pending = dict(runtime_state.get("pending_skill_scan") or {})
+  current_turn_key = _skill_preview_turn_key(state_obj)
+  if pending.get("turn_key") != current_turn_key:
+    return None
+  if pending.get("captured_shortlist_hash") and pending.get("captured_shortlist_hash") != _skill_preview_context_key(context):
+    return None
+  job_id = pending.get("job_id") or ""
+  if not job_id:
+    return None
+
+  resolution = resolve_deferred_skill_preview(job_id, wait=True)
+  if resolution.get("status") == "ready":
+    result = resolution.get("result") or {}
+    preview_flow = result.get("skill_purchase_flow") or {}
+    preview_scan = result.get("skill_purchase_scan") or {}
+    state_obj["skill_purchase_flow"] = preview_flow
+    state_obj["skill_purchase_scan"] = preview_scan
+    _clear_pending_skill_preview_state(state_obj)
+    return result
+
+  _clear_pending_skill_preview_state(state_obj)
+  if resolution.get("status") == "failed":
+    state_obj["skill_purchase_flow"] = {
+      "reason": resolution.get("reason") or "background_preview_failed",
+      "timing_total": None,
+    }
+  return None
+
+
 def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_check=False):
   if not isinstance(state_obj, dict):
     return "skipped"
@@ -2438,15 +2589,22 @@ def _attach_skill_purchase_plan(state_obj, action, current_action_count, race_ch
     state_obj.pop("skill_purchase_preview_key", None)
     return "skipped"
 
-  preview_result = collect_skill_purchase(
-    skill_shortlist=context.get("shopping_list"),
-    trigger="automatic_preview",
-    dry_run=True,
-  )
+  preview_result = _consume_pending_skill_purchase_preview(state_obj, context)
+  if preview_result is None:
+    preview_t0 = time.time()
+    preview_result = collect_skill_purchase(
+      skill_shortlist=context.get("shopping_list"),
+      trigger="automatic_preview",
+      dry_run=True,
+    )
+    preview_flow = preview_result.get("skill_purchase_flow") or {}
+    if preview_flow.get("timing_total") is None:
+      preview_flow["timing_total"] = round(time.time() - preview_t0, 3)
   preview_flow = preview_result.get("skill_purchase_flow") or {}
   preview_scan = preview_result.get("skill_purchase_scan") or {}
   state_obj["skill_purchase_flow"] = preview_flow
   state_obj["skill_purchase_scan"] = preview_scan
+  _record_skill_preview_timing_step(context, preview_flow, preview_scan)
 
   # Detect if every shortlist skill is already learned (obtained badge, no increment).
   # If so, permanently skip skill checks for the rest of this run.
@@ -5097,6 +5255,7 @@ def career_lobby(dry_run_turn=False):
         and state_obj.get("year") == "Junior Year Pre-Debut"
       )
       if constants.SCENARIO_NAME in ("mant", "trackblazer") and not trackblazer_pre_debut:
+        _maybe_start_deferred_skill_purchase_preview(state_obj, action_count)
         # Detect lobby buff icon (megaphone/ankle weight effect active).
         buff_match = device_action.locate(
           constants.TRACKBLAZER_LOBBY_BUFF_ICON,
@@ -5379,27 +5538,11 @@ def career_lobby(dry_run_turn=False):
             bot.push_debug_history({
               "event": "trackblazer_shop_post_close",
               "asset": "inventory_refresh",
-              "result": "refreshing",
+              "result": "skipped_scan_only",
               "context": "trackblazer_shop_inventory",
               "trigger": "post_shop_refresh",
+              "reason": "shop_scan_only_no_purchase_state_change",
             })
-            update_operator_snapshot(
-              phase="checking_inventory",
-              message="Refreshing Trackblazer inventory after shop.",
-              sub_phase="scan_items_post_shop",
-            )
-            with _timed_turn_step("Post-shop inventory refresh", "scan", key="post_shop_inventory_refresh") as step:
-              state_obj = collect_trackblazer_inventory(
-                state_obj,
-                allow_open_non_execute=True,
-                trigger="post_shop_refresh",
-              )
-              step["detail"] = _inventory_step_detail(state_obj)
-              step["data"] = {
-                "timing_total": _flow_timing_total(state_obj.get("trackblazer_inventory_flow") or {}),
-                "trigger": "post_shop_refresh",
-              }
-            _cache_trackblazer_inventory(state_obj, turn_key=action_count)
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
           elif pending_shop_check:
