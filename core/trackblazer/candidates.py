@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 from typing import List
 
+import core.config as config
+import utils.constants as constants
 from core.trackblazer.models import CandidateAction, DerivedTurnState, ObservedTurnState
 
 
@@ -159,6 +161,75 @@ def _append_compatibility_candidates(candidates, observed_data, derived_data):
     )
 
 
+def planner_native_scheduled_race_name(observed_data) -> str:
+  observed_data = observed_data if isinstance(observed_data, dict) else {}
+  turn_label = str(observed_data.get("year") or "").strip()
+  races_on_date = list(constants.RACES.get(turn_label, []) or [])
+  if not races_on_date or not bool(getattr(config, "USE_RACE_SCHEDULE", False)):
+    return ""
+
+  scheduled_races_on_date = list(getattr(config, "RACE_SCHEDULE", {}).get(turn_label, []) or [])
+  best_race_name = ""
+  best_fans_gained = None
+  for race in scheduled_races_on_date:
+    if not isinstance(race, dict):
+      continue
+    race_name = str(race.get("name") or "").strip()
+    if not race_name:
+      continue
+    try:
+      fans_gained = int(race.get("fans_gained"))
+    except (TypeError, ValueError):
+      fans_gained = -1
+    if best_fans_gained is None or fans_gained > best_fans_gained:
+      best_race_name = race_name
+      best_fans_gained = fans_gained
+  return best_race_name
+
+
+def planner_native_goal_race_name(observed_data) -> str:
+  observed_data = observed_data if isinstance(observed_data, dict) else {}
+  year = str(observed_data.get("year") or "")
+  turn = observed_data.get("turn")
+  criteria = str(observed_data.get("criteria") or "")
+  keywords = ("fan", "Maiden", "Progress")
+
+  try:
+    numeric_turn = int(turn)
+  except (TypeError, ValueError):
+    numeric_turn = 0
+
+  if year == "Junior Year Pre-Debut":
+    return ""
+  if numeric_turn > int(getattr(config, "RACE_TURN_THRESHOLD", 0) or 0) and "Maiden" not in criteria:
+    return ""
+  if not any(word in criteria for word in keywords):
+    return ""
+  if "Progress" not in criteria:
+    return "any"
+  if "G1" not in criteria and "GI" not in criteria:
+    return "any"
+
+  best_race_name = ""
+  best_fans_gained = None
+  for race in list(constants.RACES.get(year, []) or []):
+    if not isinstance(race, dict):
+      continue
+    if str(race.get("grade") or "").upper() != "G1":
+      continue
+    race_name = str(race.get("name") or "").strip()
+    if not race_name:
+      continue
+    try:
+      fans_gained = int((race.get("fans") or {}).get("gained"))
+    except (TypeError, ValueError):
+      fans_gained = -1
+    if best_fans_gained is None or fans_gained > best_fans_gained:
+      best_race_name = race_name
+      best_fans_gained = fans_gained
+  return best_race_name or "any"
+
+
 def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTurnState, policy: dict) -> List[CandidateAction]:
   observed_data = observed.to_dict()
   derived_data = derived.to_dict()
@@ -237,15 +308,14 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
     )
 
   if race_opportunity.get("lobby_scheduled"):
-    scheduled_name = str(((observed_data.get("legacy_seed_metadata") or {}).get("race_name")) or "scheduled").strip() or "scheduled"
+    scheduled_name = planner_native_scheduled_race_name(observed_data) or "scheduled"
     _append_candidate(
       candidates,
       node_id=f"race:scheduled:{scheduled_name}",
       kind="race",
-      rationale="lobby scheduled-race indicator is present",
+      rationale="lobby scheduled-race indicator is present and planner-native schedule evaluation selected this race",
       requirements=["race_opportunity"],
       expected_warnings=["consecutive_race_warning"],
-      # Transitional: legacy seed metadata only supplies the debug label until planner-native scheduled-race naming lands.
       source_facts={"race_name": scheduled_name, **copy.deepcopy(race_opportunity)},
     )
 
@@ -268,6 +338,29 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       rationale="climax lock is visible on the current lobby state",
       requirements=["race_opportunity"],
       source_facts=race_opportunity,
+    )
+
+  if bool(getattr(config, "DO_MISSION_RACES_IF_POSSIBLE", False)) and observed_data.get("race_mission_available"):
+    _append_candidate(
+      candidates,
+      node_id="race:mission",
+      kind="race",
+      rationale="mission race is available and mission racing is enabled in planner policy",
+      requirements=["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={"race_mission_available": True},
+    )
+
+  goal_race_name = planner_native_goal_race_name(observed_data)
+  if goal_race_name:
+    _append_candidate(
+      candidates,
+      node_id=f"race:goal:{goal_race_name}",
+      kind="race",
+      rationale="goal criteria require a planner-native race branch on this turn",
+      requirements=["lookahead"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={"race_name": goal_race_name, "criteria": observed_data.get("criteria")},
     )
 
   _append_compatibility_candidates(candidates, observed_data, derived_data)

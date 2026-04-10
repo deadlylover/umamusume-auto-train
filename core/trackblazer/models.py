@@ -1186,7 +1186,11 @@ class TurnPlan:
     return clicks
 
   def to_execution_payload(self) -> Dict[str, Any]:
+    race_plan = dict(self.race_plan or {})
     return {
+      "selected_action": copy.deepcopy(dict(race_plan.get("selected_action") or {})),
+      "warning_plan": copy.deepcopy(dict(self.warning_plan or {})),
+      "fallback_policy": copy.deepcopy(dict(self.fallback_policy or {})),
       "item_execution": copy.deepcopy((self.item_plan or {}).get("execution_payload") or {}),
       "reobserve_boundaries": copy.deepcopy(self.reobserve_boundaries),
       "step_sequence": [step.to_dict() for step in self.step_sequence],

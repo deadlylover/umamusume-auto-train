@@ -282,10 +282,12 @@ def main():
 
     scheduled_state = _base_state()
     scheduled_action = _training_action()
-    scheduled_probe = _race_action()
-    scheduled_probe["scheduled_race"] = True
-    scheduled_probe["race_name"] = "tokyo_yushun"
-    with patch("core.trackblazer.planner._scheduled_race_probe", return_value=scheduled_probe):
+    scheduled_state["trackblazer_lobby_scheduled_race"] = True
+    with patch.object(config, "USE_RACE_SCHEDULE", True), patch.object(
+      config,
+      "RACE_SCHEDULE",
+      {scheduled_state["year"]: [{"name": "tokyo_yushun", "fans_gained": 1000}]},
+    ):
       activation = _activate_trackblazer_planner_turn(scheduled_state, scheduled_action)
       assert activation.get("status") == "planner"
       scheduled_snapshot = _snapshot(scheduled_state, scheduled_action, "scheduled_race")

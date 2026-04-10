@@ -36,6 +36,7 @@ from core.trackblazer.planner import (
   RUNTIME_PATH_LEGACY_RUNTIME,
   RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
   RUNTIME_PATH_PLANNER_RUNTIME,
+  apply_selected_action_payload,
   decision_path_for_runtime_path,
   apply_turn_plan_action_payload,
   clear_planner_fallback,
@@ -1476,6 +1477,15 @@ def _activate_trackblazer_planner_turn(state_obj, action):
 
 def _handoff_planner_runtime_fallback_to_legacy_same_turn(state_obj, action, planner_runtime_result):
   planner_reason = (planner_runtime_result or {}).get("reason") or "planner_runtime_failed"
+  action_snapshot = _snapshot_action_payload_for_restore(action)
+  planner_state = state_obj.get(PLANNER_STATE_KEY) or {}
+  turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
+  if turn_plan_snapshot:
+    try:
+      apply_turn_plan_action_payload(action, TurnPlan.from_snapshot(turn_plan_snapshot))
+    except Exception as exc:
+      warning(f"[TB_PLANNER] planner_runtime_handoff_hydration_failed: {exc}")
+      _restore_action_payload_from_snapshot(action, action_snapshot)
   update_operator_snapshot(
     state_obj,
     action,
@@ -1692,7 +1702,8 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   )
   if not scout_fallback:
     scout_fallback = _effective_rival_fallback_payload(action)
-  if _apply_legacy_rival_fallback_payload(action, scout_fallback):
+  if scout_fallback.get("func"):
+    apply_selected_action_payload(action, scout_fallback)
     update_operator_snapshot(
       state_obj,
       action,

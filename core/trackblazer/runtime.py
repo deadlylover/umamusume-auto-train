@@ -3,15 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-import core.config as config
 import utils.constants as constants
-from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.executor import PlannerExecutorHooks, run_planner_action_with_review
-from core.trackblazer.compat import set_rival_fallback_action
 from core.trackblazer.planner import (
   RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
   RUNTIME_PATH_PLANNER_RUNTIME,
+  apply_selected_action_payload,
   append_planner_runtime_transition,
+  build_turn_plan_execution_action,
   get_turn_plan,
   mark_planner_fallback,
   set_trackblazer_runtime_path,
@@ -50,96 +49,36 @@ def _set_disable_skip_turn_fallback(action, enabled):
     action.options.pop("disable_skip_turn_fallback", None)
 
 
-def _selected_race_still_pending(state_obj, action):
-  fallback_gate = get_race_gate_for_turn_label(
-    state_obj.get("year"),
-    getattr(config, "OPERATOR_RACE_SELECTOR", None),
-  ) if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer") else {}
-  has_selected_race = bool(
-    (action.get("trackblazer_race_decision") or {}).get("should_race")
-    or action.get("scheduled_race")
-    or action.get("is_race_day")
-    or action.get("trackblazer_lobby_scheduled_race")
-    or (fallback_gate.get("race_allowed") and fallback_gate.get("selected_race"))
-  )
-  return has_selected_race
-
-
-def _planner_fallback_action(action):
-  planner_race = action.get("trackblazer_planner_race") or {}
-  fallback_action = planner_race.get("fallback_action") or {}
-  return fallback_action if isinstance(fallback_action, dict) else {}
-
-
-def _fallback_func(action):
-  planner_race = action.get("trackblazer_planner_race") or {}
-  planner_race = planner_race if isinstance(planner_race, dict) else {}
-  planner_fallback_func = (_planner_fallback_action(action) or {}).get("func")
-  if planner_race:
-    return planner_fallback_func
-  if planner_fallback_func:
-    return planner_fallback_func
-  return action.get("_rival_fallback_func")
-
-
-def _warning_outcome(action):
-  outcome = action.get("planner_warning_outcome") or {}
-  if isinstance(outcome, dict) and outcome.get("cancelled"):
-    return {
-      "cancelled": True,
-      "force_rest": bool(outcome.get("force_rest")),
-      "reason": str(outcome.get("reason") or ""),
-    }
-  if (action.get("trackblazer_planner_race") or {}) or (action.get("planner_race_warning_policy") or {}):
-    return {}
-  legacy_cancelled = bool(action.get("_consecutive_warning_cancelled"))
-  if not legacy_cancelled:
-    return {}
-  return {
-    "cancelled": True,
-    "force_rest": bool(action.get("_consecutive_warning_force_rest")),
-    "reason": str(action.get("_consecutive_warning_cancel_reason") or ""),
-  }
-
-
-def _warning_force_rest(action):
-  return bool((_warning_outcome(action) or {}).get("force_rest"))
-
-
-def _set_rest_fallback(action):
-  planner_race = action.get("trackblazer_planner_race") or {}
-  if isinstance(planner_race, dict) and planner_race:
-    fallback_action = dict(planner_race.get("fallback_action") or {})
-    fallback_action["func"] = "do_rest"
-    planner_race["fallback_action"] = fallback_action
-    action["trackblazer_planner_race"] = planner_race
-    return
-  set_rival_fallback_action(action, func="do_rest")
-
-
-def _prepare_retry_order(action):
-  available_actions = list(getattr(action, "available_actions", []) or [])
-  if available_actions:
-    available_actions.pop(0)
-  if _warning_force_rest(action):
-    info(
-      "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
-      "Prioritizing rest fallback."
-    )
-    _set_rest_fallback(action)
-    if "do_rest" in available_actions:
-      available_actions = ["do_rest"] + [name for name in available_actions if name != "do_rest"]
-    else:
-      available_actions.insert(0, "do_rest")
-  return available_actions
-
-
-def _prepare_retry_candidate(state_obj, action, function_name, hooks: PlannerRuntimeHooks):
-  action.func = function_name
-  _set_disable_skip_turn_fallback(action, enabled=(function_name == "do_rest"))
+def _apply_retry_payload(state_obj, action, retry_payload, hooks: PlannerRuntimeHooks):
+  retry_payload = retry_payload if isinstance(retry_payload, dict) else {}
+  apply_selected_action_payload(action, retry_payload)
+  _set_disable_skip_turn_fallback(action, enabled=(action.func == "do_rest"))
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     hooks.attach_trackblazer_pre_action_item_plan(state_obj, action)
   return action
+
+
+def _planner_retry_entries(turn_plan):
+  fallback_policy = dict((turn_plan.fallback_policy if turn_plan else {}) or {})
+  return [
+    dict(entry)
+    for entry in list(fallback_policy.get("chain") or [])
+    if isinstance(entry, dict) and isinstance(entry.get("target_payload"), dict) and entry.get("target_payload")
+  ]
+
+
+def _retry_entry_key(entry):
+  entry = entry if isinstance(entry, dict) else {}
+  return "|".join(
+    str(part or "")
+    for part in (
+      entry.get("trigger"),
+      entry.get("source_node_id"),
+      entry.get("target_func"),
+      ((entry.get("target_payload") or {}).get("training_name") if isinstance(entry.get("target_payload"), dict) else ""),
+      ((entry.get("target_payload") or {}).get("race_name") if isinstance(entry.get("target_payload"), dict) else ""),
+    )
+  )
 
 
 def _attach_skill_plan_for_attempt(state_obj, action, current_action_count, hooks: PlannerRuntimeHooks):
@@ -199,16 +138,17 @@ def run_trackblazer_planner_turn(
       _transition(state_obj, "planner_runtime", "planner_runtime", "failed", "skill_plan_attach_failed")
       return {"status": "failed", "reason": "skill_plan_attach_failed"}
     _, turn_plan = _refresh_planner_turn(state_obj, action)
+    execution_action = build_turn_plan_execution_action(action, turn_plan)
   except Exception as exc:
     return _planner_runtime_fallback_to_legacy(state_obj, action, f"planner_runtime_setup_failed: {exc}")
 
-  attempt_action_names = []
+  attempted_retry_keys = []
   exhausted_reason = "planner_runtime_exhausted"
   while True:
     attempted_planner_execution = True
     outcome = run_planner_action_with_review(
       state_obj,
-      action,
+      execution_action,
       turn_plan,
       action_count,
       review_message,
@@ -229,7 +169,7 @@ def run_trackblazer_planner_turn(
     runtime_hooks.push_turn_retry_debug(
       state_obj,
       reason="Planner-mode action attempt failed; trying fallback actions inside planner runtime.",
-      reasons=[action.func or "unknown_action"],
+      reasons=[execution_action.func or "unknown_action"],
       before_phase="evaluating_strategy",
       context="planner_runtime",
       event="turn_retry",
@@ -238,9 +178,9 @@ def run_trackblazer_planner_turn(
       phase="evaluating_strategy",
     )
 
-    consecutive_warning_retry_training = runtime_hooks.should_retry_training_after_consecutive_warning(action)
+    consecutive_warning_retry_training = runtime_hooks.should_retry_training_after_consecutive_warning(execution_action)
     if consecutive_warning_retry_training:
-      if runtime_hooks.prepare_training_fallback_after_consecutive_warning(action):
+      if runtime_hooks.prepare_training_fallback_after_consecutive_warning(execution_action):
         info(
           "[FALLBACK] Consecutive-race warning blocked optional rival race after energy rescue. "
           "Retrying the rescued training fallback."
@@ -251,43 +191,50 @@ def run_trackblazer_planner_turn(
           "but no valid training fallback was available."
         )
 
-    available_actions = _prepare_retry_order(action)
+    retry_entries = _planner_retry_entries(turn_plan)
     if consecutive_warning_retry_training:
-      available_actions = ["do_training"] + [name for name in available_actions if name != "do_training"]
+      retry_entries = [
+        {
+          "trigger": "consecutive_warning_retry_training",
+          "target_func": "do_training",
+          "target_payload": {
+            "func": "do_training",
+            "training_name": execution_action.get("training_name"),
+            "training_data": execution_action.get("training_data"),
+          },
+          "target_label": execution_action.get("training_name") or "training",
+          "source_node_id": "warning_retry_training",
+          "planner_ranked": False,
+        },
+      ] + retry_entries
 
-    if action.get("race_mission_available") and action.func == "do_race":
+    if execution_action.get("race_mission_available") and execution_action.func == "do_race":
       info("Couldn't match race mission to aptitudes, trying next action.")
     else:
-      info(f"Action {action.func} failed in planner runtime, trying other actions.")
-    info(f"Available actions: {available_actions}")
-
-    has_selected_race = _selected_race_still_pending(state_obj, action)
-    if _warning_force_rest(action) and not consecutive_warning_retry_training:
-      has_selected_race = False
-    allow_rest_fallback_for_optional_rival = bool(
-      action.get("prefer_rival_race")
-      and _fallback_func(action) == "do_rest"
-      and not action.get("scheduled_race")
-      and not action.get("trackblazer_lobby_scheduled_race")
-      and not action.get("is_race_day")
-    )
+      info(f"Action {execution_action.func} failed in planner runtime, trying other actions.")
+    info(f"Planner fallback entries: {[entry.get('target_func') for entry in retry_entries]}")
 
     retried = False
-    for function_name in available_actions:
-      if function_name in attempt_action_names:
+    for retry_entry in retry_entries:
+      retry_key = _retry_entry_key(retry_entry)
+      retry_payload = dict(retry_entry.get("target_payload") or {})
+      if retry_key in attempted_retry_keys:
         continue
-      if function_name == "do_rest" and has_selected_race and not allow_rest_fallback_for_optional_rival:
-        info("[FALLBACK] Skipping do_rest fallback — selected race is still pending.")
+      if not retry_payload.get("func"):
         continue
 
-      attempt_action_names.append(function_name)
-      info(f"[TB_PLANNER] Retrying via planner runtime candidate: {function_name}")
-      _prepare_retry_candidate(state_obj, action, function_name, runtime_hooks)
-      skill_result = _attach_skill_plan_for_attempt(state_obj, action, action_count, runtime_hooks)
+      attempted_retry_keys.append(retry_key)
+      info(
+        "[TB_PLANNER] Retrying via planner runtime fallback: "
+        f"{retry_entry.get('trigger') or 'retry_next'} -> {retry_payload.get('func')}"
+      )
+      _apply_retry_payload(state_obj, execution_action, retry_payload, runtime_hooks)
+      skill_result = _attach_skill_plan_for_attempt(state_obj, execution_action, action_count, runtime_hooks)
       if skill_result == "failed":
         return {"status": "failed", "reason": "skill_plan_attach_failed_after_retry"}
       try:
-        _, turn_plan = _refresh_planner_turn(state_obj, action)
+        _, turn_plan = _refresh_planner_turn(state_obj, execution_action)
+        execution_action = build_turn_plan_execution_action(execution_action, turn_plan)
       except Exception as exc:
         if outcome.get("committed"):
           warning(f"[TB_PLANNER] Retry replan failed after committed planner steps: {exc}")

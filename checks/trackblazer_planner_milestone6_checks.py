@@ -98,10 +98,11 @@ def _race_action():
   return action
 
 
-def _turn_plan(*step_types):
+def _turn_plan(*step_types, fallback_policy=None):
   return TurnPlan(
     version=3,
     decision_path="planner",
+    fallback_policy=dict(fallback_policy or {}),
     freshness=PlannerFreshness(turn_key="Senior Year Early Jul|12"),
     step_sequence=[
       ExecutionStep(
@@ -309,6 +310,7 @@ def _test_executor_resolve_consecutive_warning_step_owned():
 def _test_runtime_retry_owned_by_planner_runtime():
   state_obj = _base_state()
   action = _race_action()
+  action.available_actions = ["do_race", "do_rest"]
   recorder = []
   attempt_funcs = []
 
@@ -319,7 +321,24 @@ def _test_runtime_retry_owned_by_planner_runtime():
       return {"status": "failed", "reason": "synthetic_failure", "committed": False}
     return {"status": "executed", "reason": "turn_complete", "committed": True}
 
-  with patch("core.trackblazer.runtime.set_turn_plan_decision_path", return_value=({}, _turn_plan("await_operator_review"))), patch(
+  fallback_policy = {
+    "planner_owned": True,
+    "chain": [
+      {
+        "trigger": "race_gate_blocked",
+        "target_func": "do_training",
+        "target_payload": {
+          "func": "do_training",
+          "training_name": "speed",
+          "training_data": dict(action["training_data"]),
+        },
+        "source_node_id": "train:speed",
+        "planner_ranked": True,
+      },
+    ],
+  }
+
+  with patch("core.trackblazer.runtime.set_turn_plan_decision_path", return_value=({}, _turn_plan("await_operator_review", fallback_policy=fallback_policy))), patch(
     "core.trackblazer.runtime.run_planner_action_with_review",
     side_effect=_fake_executor,
   ):
@@ -334,6 +353,29 @@ def _test_runtime_retry_owned_by_planner_runtime():
 
   assert result.get("status") == "executed"
   assert attempt_funcs == ["do_race", "do_training"], attempt_funcs
+
+
+def _test_runtime_empty_planner_retry_chain_falls_back_to_legacy():
+  state_obj = _base_state()
+  action = _race_action()
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+  recorder = []
+
+  with patch("core.trackblazer.runtime.set_turn_plan_decision_path", return_value=({}, _turn_plan("await_operator_review"))), patch(
+    "core.trackblazer.runtime.run_planner_action_with_review",
+    return_value={"status": "failed", "reason": "synthetic_failure", "committed": False},
+  ):
+    result = run_trackblazer_planner_turn(
+      state_obj,
+      action,
+      0,
+      "review",
+      executor_hooks=_executor_hooks(recorder),
+      runtime_hooks=_runtime_hooks(recorder),
+    )
+
+  assert result.get("status") == "fallback_to_legacy", result
+  assert state_obj.get("_trackblazer_planner_force_fallback"), state_obj
 
 
 def _test_runtime_safe_legacy_fallback():
@@ -399,6 +441,7 @@ def main():
   _test_executor_item_failure_can_block_retry()
   _test_executor_resolve_consecutive_warning_step_owned()
   _test_runtime_retry_owned_by_planner_runtime()
+  _test_runtime_empty_planner_retry_chain_falls_back_to_legacy()
   _test_runtime_safe_legacy_fallback()
   _test_same_turn_fallback_handoff_control_flow()
   _test_skeleton_delegates_planner_runtime()
