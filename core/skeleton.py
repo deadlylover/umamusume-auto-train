@@ -2384,6 +2384,15 @@ def _build_trackblazer_planned_actions(state_obj, action, planner_state=None):
   return {}
 
 
+def _clone_action_for_review_snapshot(action):
+  if action is None:
+    return None
+  cloned = Action(**copy.deepcopy(getattr(action, "options", {}) or {}))
+  cloned.func = getattr(action, "func", None)
+  cloned.available_actions = list(getattr(action, "available_actions", []) or [])
+  return cloned
+
+
 def _attach_trackblazer_pre_action_item_plan(state_obj, action):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return action
@@ -4137,7 +4146,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     and planner_turn_plan.decision_path == "planner"
     and hasattr(action, "__setitem__")
   ):
-    apply_turn_plan_action_payload(action, planner_turn_plan)
+    snapshot_action = _clone_action_for_review_snapshot(action)
+    apply_turn_plan_action_payload(snapshot_action, planner_turn_plan)
   planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})
   planner_review_context = dict((planner_turn_plan.review_context if planner_turn_plan else {}) or {})
   planner_selected_action = dict(planner_review_context.get("selected_action") or {})
@@ -4241,10 +4251,13 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "trackblazer_race_decision": action.get("trackblazer_race_decision") if hasattr(action, "get") else None,
     "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead") if hasattr(action, "get") else None,
   }
-  selected_action = {
-    **live_selected_action,
-    **planner_selected_action,
-  }
+  selected_action = copy.deepcopy(planner_selected_action)
+  for key, value in live_selected_action.items():
+    if value is None:
+      continue
+    if isinstance(value, (str, list, tuple, dict)) and not value:
+      continue
+    selected_action[key] = copy.deepcopy(value)
   ranked_trainings = []
   available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
   if not available_trainings:

@@ -5,11 +5,18 @@ from unittest.mock import patch
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
+from core.skeleton import build_review_snapshot
 from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
 from core.trackblazer.models import TurnPlan
 from core.trackblazer.observe import hydrate_observed_turn_state
-from core.trackblazer.planner import _apply_shop_deviation_rules, plan_once
+from core.trackblazer.planner import (
+  PLANNER_STATE_KEY,
+  RUNTIME_PATH_PLANNER_RUNTIME,
+  _apply_shop_deviation_rules,
+  plan_once,
+  set_trackblazer_runtime_path,
+)
 
 
 def _base_state():
@@ -199,12 +206,36 @@ def _test_shop_deviation_rules_record_rationale():
   assert all(entry.get("reason") for entry in deviations), deviations
 
 
+def _test_build_review_snapshot_does_not_mutate_live_action():
+  state_obj = _base_state()
+  action = _base_action(state_obj)
+  set_trackblazer_runtime_path(state_obj, RUNTIME_PATH_PLANNER_RUNTIME, source="test")
+  planner_state = _plan_once_with_stubs(state_obj, action)
+  state_obj[PLANNER_STATE_KEY] = copy.deepcopy(planner_state)
+
+  original_func = action.func
+  original_training_name = action.get("training_name")
+  original_training_data = copy.deepcopy(action.get("training_data") or {})
+  original_available_actions = list(action.available_actions or [])
+
+  with patch("core.skeleton.plan_once", return_value=copy.deepcopy(planner_state)):
+    snapshot = build_review_snapshot(state_obj, action, sub_phase="action_run")
+
+  assert action.func == original_func, (original_func, action.func)
+  assert action.get("training_name") == original_training_name, action.get("training_name")
+  assert action.get("training_data") == original_training_data, action.get("training_data")
+  assert list(action.available_actions or []) == original_available_actions, action.available_actions
+  assert (snapshot.get("selected_action") or {}).get("func") == original_func, snapshot.get("selected_action")
+  assert (snapshot.get("selected_action") or {}).get("training_name") == original_training_name, snapshot.get("selected_action")
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
   _test_skill_cadence_candidate_gate()
   _test_skill_cadence_candidate_is_ranked_but_not_selected_main_action()
   _test_shop_deviation_rules_record_rationale()
+  _test_build_review_snapshot_does_not_mutate_live_action()
   print("trackblazer planner milestone 9 checks: ok")
 
 
