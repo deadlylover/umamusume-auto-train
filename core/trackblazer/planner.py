@@ -1342,6 +1342,678 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   }
 
 
+def _candidate_is_compat(node_id: str) -> bool:
+  return str(node_id or "").startswith("compat:")
+
+
+def _candidate_training_name(node_id: str) -> str:
+  node_id = str(node_id or "")
+  if not node_id.startswith("train:"):
+    return ""
+  body = node_id.split("train:", 1)[1]
+  return body.split("+items:", 1)[0].strip()
+
+
+def _candidate_item_key(node_id: str) -> str:
+  node_id = str(node_id or "")
+  if "+items:" not in node_id:
+    return ""
+  return node_id.split("+items:", 1)[1].strip()
+
+
+def _candidate_is_forced_race(node_id: str) -> bool:
+  node_id = str(node_id or "")
+  return node_id.startswith("race:scheduled:") or node_id.startswith("race:goal:") or node_id.startswith("race:g1_today:") or node_id in {
+    "race:mission",
+    "race:race_day",
+    "race:climax_locked",
+  }
+
+
+def _candidate_order_rank(node_id: str) -> int:
+  node_id = str(node_id or "")
+  if node_id == "race:climax_locked":
+    return 0
+  if node_id == "race:race_day":
+    return 1
+  if node_id.startswith("race:scheduled:"):
+    return 2
+  if node_id.startswith("race:goal:"):
+    return 3
+  if node_id.startswith("race:g1_today:"):
+    return 4
+  if node_id == "race:mission":
+    return 5
+  if node_id.startswith("train:") and "+items:" in node_id:
+    return 6
+  if node_id.startswith("train:"):
+    return 7
+  if node_id == "race:rival":
+    return 8
+  if node_id == "race:fallback":
+    return 9
+  if node_id == "rest":
+    return 10
+  if node_id == "recreation":
+    return 11
+  if node_id == "infirmary":
+    return 12
+  return 20
+
+
+def _safe_float(value, default=0.0):
+  try:
+    return float(value)
+  except (TypeError, ValueError):
+    return default
+
+
+def _transitional_planner_native_candidates_from_race_plan(planner_race_plan) -> List[Dict[str, Any]]:
+  planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
+  branch_kind = str(planner_race_plan.get("branch_kind") or "")
+  selected_action = dict(planner_race_plan.get("selected_action") or {})
+  if selected_action.get("func") != "do_race":
+    return []
+
+  race_name = str(selected_action.get("race_name") or "any")
+  candidates = []
+
+  def _append(node_id, rationale, requirements, expected_warnings=None):
+    candidates.append(
+      {
+        "node_id": node_id,
+        "kind": "race",
+        "priority_score": 0.0,
+        "rationale": rationale,
+        "requirements": list(requirements or []),
+        "expected_warnings": list(expected_warnings or []),
+        "expected_followup_state": {},
+        "source_facts": {
+          "transitional_source": "planner_race_plan",
+          "branch_kind": branch_kind,
+          "race_name": race_name,
+        },
+      }
+    )
+
+  if branch_kind in {"scheduled_race", "lobby_scheduled_race"}:
+    _append(
+      f"race:scheduled:{race_name or 'scheduled'}",
+      "transitional planner-native scheduled race candidate (remove when M6 race evaluators are planner-native)",
+      ["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "goal_race":
+    _append(
+      f"race:goal:{race_name or 'goal'}",
+      "transitional planner-native goal race candidate (remove when M6 race evaluators are planner-native)",
+      ["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "mission_race":
+    _append(
+      "race:mission",
+      "transitional planner-native mission race candidate (remove when M6 race evaluators are planner-native)",
+      ["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "optional_rival_race":
+    _append(
+      "race:rival",
+      "transitional planner-native rival race candidate sourced from existing race branch",
+      ["race_opportunity", "energy"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "optional_fallback_race":
+    _append(
+      "race:fallback",
+      "transitional planner-native fallback race candidate sourced from existing race branch",
+      ["race_opportunity", "training", "lookahead"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "forced_race_day":
+    _append(
+      "race:race_day",
+      "transitional planner-native forced race-day candidate sourced from existing race branch",
+      ["turn_identity"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "forced_climax_race":
+    _append(
+      "race:climax_locked",
+      "transitional planner-native climax-locked race candidate sourced from existing race branch",
+      ["race_opportunity"],
+    )
+
+  return candidates
+
+
+def _score_planner_native_candidates(observed_data, derived_data, policy, planner_native_candidates):
+  observed_data = observed_data if isinstance(observed_data, dict) else {}
+  derived_data = derived_data if isinstance(derived_data, dict) else {}
+  policy = policy if isinstance(policy, dict) else {}
+  planner_native_candidates = list(planner_native_candidates or [])
+  missing_inputs = set(observed_data.get("missing_inputs") or [])
+
+  training_entries = {
+    str(entry.get("name") or ""): dict(entry or {})
+    for entry in list(derived_data.get("training_value") or [])
+    if isinstance(entry, dict) and entry.get("name")
+  }
+  training_threshold = _safe_float(policy.get("training_overrides_race_threshold"), 40.0)
+  rival_min_energy = _safe_float(policy.get("rival_race_min_energy_ratio"), 0.02)
+
+  lookahead = dict(derived_data.get("lookahead_summary") or {})
+  race_opportunity = dict(derived_data.get("race_opportunity") or {})
+  timeline_window = dict(derived_data.get("timeline_window") or {})
+  energy_ratio = _safe_float(derived_data.get("energy_ratio"), None)
+  if energy_ratio is None:
+    energy_ratio = 0.5
+
+  scored = []
+  best_training_score = float("-inf")
+  best_training_class = "weak"
+
+  for raw_candidate in planner_native_candidates:
+    candidate = copy.deepcopy(raw_candidate if isinstance(raw_candidate, dict) else {})
+    node_id = str(candidate.get("node_id") or "")
+    missing_requirements = sorted(
+      requirement
+      for requirement in list(candidate.get("requirements") or [])
+      if str(requirement) in missing_inputs
+    )
+    source_facts = dict(candidate.get("source_facts") or {})
+    if missing_requirements:
+      candidate["priority_score"] = float("-inf")
+      candidate["rationale"] = (
+        f"{candidate.get('rationale') or ''}; dropped due to missing inputs: {', '.join(missing_requirements)}"
+      ).strip("; ")
+      source_facts["dropped_missing_inputs"] = missing_requirements
+      candidate["source_facts"] = source_facts
+      scored.append(candidate)
+      continue
+
+    training_name = _candidate_training_name(node_id)
+    item_key = _candidate_item_key(node_id)
+    score = 0.0
+    score_components = {}
+    viable = True
+
+    if node_id.startswith("train:"):
+      training = dict(training_entries.get(training_name) or {})
+      base_score = _safe_float(training.get("score"), 0.0)
+      failure_pct = max(0.0, min(100.0, _safe_float(training.get("failure"), 0.0)))
+      failure_penalty = max(0.0, 1.0 - (failure_pct / 100.0))
+      if item_key and dict(training.get("usage_context") or {}).get("failure_bypassed_by_items"):
+        failure_penalty = 1.0
+      rainbow_multiplier = 1.0 + (0.06 * min(3.0, _safe_float(training.get("rainbow_count"), 0.0)))
+      support_count = _safe_float(training.get("support_count"), 0.0)
+      bond_multiplier = 1.0 if timeline_window.get("past_bond_training_cutoff") else 1.0 + (0.02 * min(5.0, support_count))
+      score = base_score * failure_penalty * rainbow_multiplier * bond_multiplier
+      score_components = {
+        "base_score": base_score,
+        "failure_penalty": failure_penalty,
+        "rainbow_multiplier": rainbow_multiplier,
+        "bond_multiplier": bond_multiplier,
+      }
+      if item_key:
+        item_delta = _safe_float(training.get("item_assist_score_delta"), 0.0)
+        opportunity_cost = 0.0
+        if item_key == "reset_whistle" and not timeline_window.get("summer_window"):
+          opportunity_cost += 100.0
+        if item_key in {"vita_65", "royal_kale_juice"} and (
+          timeline_window.get("summer_window")
+          or _safe_float(timeline_window.get("summer_distance"), 99.0) <= 1.0
+        ):
+          opportunity_cost += 8.0
+        if "hammer" in item_key:
+          if timeline_window.get("tsc_active"):
+            opportunity_cost += 100.0
+          if _safe_float(timeline_window.get("climax_distance"), 99.0) <= 1.0:
+            opportunity_cost += 35.0
+        if "megaphone" in item_key and not dict(training.get("usage_context") or {}).get("commit_training_after_items"):
+          opportunity_cost += 6.0
+        score += item_delta - opportunity_cost
+        score_components["item_delta"] = item_delta
+        score_components["item_opportunity_cost"] = opportunity_cost
+      if score > best_training_score:
+        best_training_score = score
+        best_training_class = str(training.get("value_class") or "weak")
+    elif node_id == "rest":
+      score = (1.0 - energy_ratio) * 100.0
+      if lookahead.get("projected_energy_deficit"):
+        score += 18.0
+      if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
+        score += 8.0
+      score_components = {"energy_component": (1.0 - energy_ratio) * 100.0}
+    elif node_id == "recreation":
+      mood = str(observed_data.get("current_mood") or "").upper()
+      if mood not in {"BAD", "AWFUL"}:
+        viable = False
+      score = 52.0 if mood == "AWFUL" else (38.0 if mood == "BAD" else float("-inf"))
+      score_components = {"mood": mood}
+    elif node_id == "infirmary":
+      status_count = float(len(list(observed_data.get("status_effect_names") or [])))
+      if status_count <= 0:
+        viable = False
+      score = 22.0 * status_count
+      score_components = {"status_count": int(status_count)}
+    elif node_id == "race:rival":
+      rival_visible = bool(race_opportunity.get("rival_visible"))
+      optional_safe = bool(race_opportunity.get("optional_safe_under_lookahead"))
+      if (not rival_visible) or (energy_ratio <= rival_min_energy):
+        viable = False
+      score = 46.0 + (4.0 if optional_safe else -6.0)
+      if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
+        score -= 20.0
+      score_components = {
+        "rival_visible": rival_visible,
+        "optional_safe_under_lookahead": optional_safe,
+      }
+    elif node_id == "race:fallback":
+      rival_visible = bool(race_opportunity.get("rival_visible"))
+      if rival_visible:
+        viable = False
+      score = 38.0
+      if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
+        score -= 12.0
+      score_components = {"rival_visible": rival_visible}
+    elif _candidate_is_forced_race(node_id):
+      forced_bias = {
+        "race:climax_locked": 120.0,
+        "race:race_day": 110.0,
+        "race:mission": 100.0,
+      }
+      score = 10000.0 + forced_bias.get(node_id, 90.0)
+      score_components = {"forced_race": True}
+    elif node_id == "skill_purchase":
+      score = 12.0
+      score_components = {"skill_cadence_open": bool(derived_data.get("skill_cadence_open"))}
+    elif node_id.startswith("use_reset_whistle"):
+      score = 40.0 if timeline_window.get("summer_window") else float("-inf")
+      viable = bool(timeline_window.get("summer_window"))
+      score_components = {"summer_window": bool(timeline_window.get("summer_window"))}
+    elif node_id.startswith("use_hammer:"):
+      score = 20.0
+      if timeline_window.get("tsc_active"):
+        score -= 100.0
+      score_components = {"tsc_active": bool(timeline_window.get("tsc_active"))}
+    else:
+      score = 0.0
+      score_components = {"unclassified": True}
+
+    if not viable:
+      score = float("-inf")
+
+    source_facts["scoring"] = {
+      "score_components": score_components,
+      "policy": {
+        "training_overrides_race_threshold": training_threshold,
+        "rival_race_min_energy_ratio": rival_min_energy,
+      },
+    }
+    candidate["source_facts"] = source_facts
+    candidate["priority_score"] = float(score)
+    scored.append(candidate)
+
+  forced_viable = [
+    entry
+    for entry in scored
+    if _candidate_is_forced_race(entry.get("node_id"))
+    and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf")
+  ]
+
+  rival_entry = next((entry for entry in scored if entry.get("node_id") == "race:rival"), None)
+  fallback_entry = next((entry for entry in scored if entry.get("node_id") == "race:fallback"), None)
+  non_forced_best = max(
+    (
+      _safe_float(entry.get("priority_score"), float("-inf"))
+      for entry in scored
+      if not _candidate_is_forced_race(entry.get("node_id"))
+      and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf")
+    ),
+    default=float("-inf"),
+  )
+  non_race_best = max(
+    (
+      _safe_float(entry.get("priority_score"), float("-inf"))
+      for entry in scored
+      if not str(entry.get("node_id") or "").startswith("race:")
+      and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf")
+    ),
+    default=float("-inf"),
+  )
+
+  if not forced_viable:
+    if best_training_score >= training_threshold:
+      for entry in (rival_entry, fallback_entry):
+        if not entry:
+          continue
+        if _safe_float(entry.get("priority_score"), float("-inf")) == float("-inf"):
+          continue
+        entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) - 500.0
+        entry["rationale"] = (
+          f"{entry.get('rationale') or ''}; penalized because training score "
+          f"{best_training_score:.2f} >= override threshold {training_threshold:.2f}"
+        ).strip("; ")
+    else:
+      rival_score = _safe_float(rival_entry.get("priority_score"), float("-inf")) if rival_entry else float("-inf")
+      fallback_score = _safe_float(fallback_entry.get("priority_score"), float("-inf")) if fallback_entry else float("-inf")
+      if rival_entry and rival_score != float("-inf"):
+        rival_entry["priority_score"] = max(rival_score, non_forced_best + 1.0)
+      elif fallback_entry and fallback_score != float("-inf") and best_training_class == "weak":
+        fallback_entry["priority_score"] = max(fallback_score, non_race_best + 1.0)
+
+  if (
+    str(observed_data.get("year") or "") == "Junior Year Pre-Debut"
+    and best_training_score != float("-inf")
+  ):
+    for entry in scored:
+      if entry.get("node_id") != "rest":
+        continue
+      rest_score = _safe_float(entry.get("priority_score"), float("-inf"))
+      if rest_score == float("-inf"):
+        continue
+      if rest_score >= best_training_score:
+        entry["priority_score"] = best_training_score - 1.0
+        entry["rationale"] = (
+          f"{entry.get('rationale') or ''}; pre-debut guard keeps training ahead of provisional rest fallback"
+        ).strip("; ")
+
+  if (
+    _safe_float(lookahead.get("next_turn_races_count"), 0.0) >= 1.0
+    and not bool(race_opportunity.get("rival_visible"))
+    and energy_ratio > rival_min_energy
+  ):
+    if fallback_entry and _safe_float(fallback_entry.get("priority_score"), float("-inf")) != float("-inf"):
+      fallback_entry["priority_score"] = _safe_float(fallback_entry.get("priority_score"), 0.0) + 8.0
+    for entry in scored:
+      if entry.get("node_id") == "rest" and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf"):
+        entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) - 4.0
+
+  if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
+    for entry in scored:
+      if entry.get("node_id") in {"race:rival", "race:fallback"} and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf"):
+        entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) - 8.0
+
+  if lookahead.get("projected_energy_deficit"):
+    for entry in scored:
+      if entry.get("node_id") == "rest" and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf"):
+        entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) + 6.0
+
+  ranked = sorted(
+    scored,
+    key=lambda entry: (
+      -_safe_float(entry.get("priority_score"), float("-inf")),
+      _candidate_order_rank(entry.get("node_id")),
+      str(entry.get("node_id") or ""),
+    ),
+  )
+  return ranked
+
+
+def _rank_candidates_for_selection(candidates, observed_data, derived_data, policy, planner_race_plan):
+  candidates = [candidate.to_dict() for candidate in list(candidates or [])]
+  planner_native_candidates = [
+    copy.deepcopy(candidate)
+    for candidate in candidates
+    if not _candidate_is_compat(candidate.get("node_id"))
+  ]
+  existing_nodes = {str(candidate.get("node_id") or "") for candidate in planner_native_candidates}
+  for injected in _transitional_planner_native_candidates_from_race_plan(planner_race_plan):
+    node_id = str(injected.get("node_id") or "")
+    if node_id and node_id not in existing_nodes:
+      planner_native_candidates.append(copy.deepcopy(injected))
+      existing_nodes.add(node_id)
+
+  ranked_native = _score_planner_native_candidates(
+    observed_data,
+    derived_data,
+    policy,
+    planner_native_candidates,
+  )
+  selected_candidate = next(
+    (
+      dict(candidate)
+      for candidate in ranked_native
+      if _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
+    ),
+    {},
+  )
+  if selected_candidate:
+    selection_rationale = (
+      f"selected {selected_candidate.get('node_id')} via planner scoring "
+      f"(score={_safe_float(selected_candidate.get('priority_score'), 0.0):.3f})"
+    )
+  else:
+    selection_rationale = "no viable planner-native candidate after scoring; retaining compatibility payload"
+
+  compat_candidates = [
+    copy.deepcopy(candidate)
+    for candidate in candidates
+    if _candidate_is_compat(candidate.get("node_id"))
+  ]
+  ranked_all = ranked_native + compat_candidates
+  return ranked_all, ranked_native, selected_candidate, selection_rationale
+
+
+def _candidate_branch_kind(node_id: str, selected_func: str) -> str:
+  node_id = str(node_id or "")
+  selected_func = str(selected_func or "")
+  if node_id == "race:race_day":
+    return "forced_race_day"
+  if node_id == "race:climax_locked":
+    return "forced_climax_race"
+  if node_id.startswith("race:scheduled:"):
+    return "scheduled_race"
+  if node_id.startswith("race:goal:"):
+    return "goal_race"
+  if node_id.startswith("race:g1_today:"):
+    return "forced_race_day"
+  if node_id == "race:mission":
+    return "mission_race"
+  if node_id == "race:rival":
+    return "optional_rival_race"
+  if node_id == "race:fallback":
+    return "optional_fallback_race"
+  if selected_func == "do_training":
+    return "training"
+  return "non_race"
+
+
+def _selected_payload_from_candidate(selected_candidate, state_obj, action, planner_race_plan):
+  selected_candidate = selected_candidate if isinstance(selected_candidate, dict) else {}
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
+  selected_action = dict(planner_race_plan.get("selected_action") or {})
+  race_decision = dict(selected_action.get("trackblazer_race_decision") or planner_race_plan.get("race_decision") or {})
+  race_lookahead = copy.deepcopy(selected_action.get("trackblazer_race_lookahead") or {})
+  fallback_action = copy.deepcopy(
+    ((planner_race_plan.get("action_payload") or {}).get("fallback_action"))
+    or _capture_effective_rival_fallback_payload(action)
+    or {}
+  )
+  node_id = str(selected_candidate.get("node_id") or "")
+  item_key = _candidate_item_key(node_id)
+  selected_score = _safe_float(selected_candidate.get("priority_score"), float("-inf"))
+  rationale = str(selected_candidate.get("rationale") or "")
+  if selected_score != float("-inf"):
+    rationale = f"{rationale} [planner_score={selected_score:.3f}]".strip()
+  if not race_decision.get("reason") and rationale:
+    race_decision["reason"] = rationale
+
+  selected_func = "do_rest"
+  training_name = None
+  training_data = {}
+  training_function = _action_value(action, "training_function") or "stat_weight_training"
+  race_name = selected_action.get("race_name") or _action_value(action, "race_name") or "any"
+  race_image_path = selected_action.get("race_image_path") or _action_value(action, "race_image_path")
+  race_grade_target = selected_action.get("race_grade_target") or _action_value(action, "race_grade_target")
+  prefer_rival_race = bool(selected_action.get("prefer_rival_race"))
+  fallback_non_rival_race = bool(selected_action.get("fallback_non_rival_race"))
+  scheduled_race = bool(selected_action.get("scheduled_race"))
+  lobby_scheduled_race = bool(selected_action.get("trackblazer_lobby_scheduled_race"))
+  race_mission_available = bool(selected_action.get("race_mission_available"))
+  is_race_day = bool(selected_action.get("is_race_day"))
+  trackblazer_climax_race_day = bool(selected_action.get("trackblazer_climax_race_day"))
+
+  if node_id.startswith("train:"):
+    selected_func = "do_training"
+    training_name = _candidate_training_name(node_id)
+    training_data = copy.deepcopy((state_obj.get("training_results") or {}).get(training_name) or {})
+    if not training_data:
+      training_data = copy.deepcopy((_action_value(action, "available_trainings") or {}).get(training_name) or {})
+    if item_key and training_data:
+      training_data["planner_selected_item_key"] = item_key
+    race_decision = {
+      **race_decision,
+      "should_race": False,
+      "branch_kind": "training",
+    }
+  elif node_id == "rest":
+    selected_func = "do_rest"
+    race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
+  elif node_id == "recreation":
+    selected_func = "do_recreation"
+    race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
+  elif node_id == "infirmary":
+    selected_func = "do_infirmary"
+    race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
+  elif node_id.startswith("race:"):
+    selected_func = "do_race"
+    if node_id.startswith("race:scheduled:"):
+      race_name = node_id.split("race:scheduled:", 1)[1] or race_name
+      scheduled_race = True
+      if race_name and race_name != "any" and not race_image_path:
+        race_image_path = f"assets/races/{race_name}.png"
+    if node_id == "race:race_day":
+      is_race_day = True
+    if node_id == "race:climax_locked":
+      trackblazer_climax_race_day = True
+      is_race_day = True
+    if node_id == "race:mission":
+      race_mission_available = True
+    if node_id == "race:rival":
+      prefer_rival_race = True
+      fallback_non_rival_race = False
+    if node_id == "race:fallback":
+      prefer_rival_race = False
+      fallback_non_rival_race = True
+    race_decision = {
+      **race_decision,
+      "should_race": True,
+    }
+
+  branch_kind = _candidate_branch_kind(node_id, selected_func)
+  race_decision = {
+    **race_decision,
+    "branch_kind": branch_kind,
+  }
+
+  warning_plan = dict(planner_race_plan.get("warning_plan") or {})
+  if selected_func == "do_race":
+    if str(planner_race_plan.get("branch_kind") or "") != branch_kind or not warning_plan:
+      warning_plan = _warning_policy_for_race_branch(branch_kind, fallback_action)
+  else:
+    warning_plan = {}
+
+  selected_payload = _planner_selected_action_payload(
+    action,
+    func=selected_func,
+    training_name=training_name,
+    training_function=training_function,
+    training_data=training_data,
+    race_name=race_name,
+    race_image_path=race_image_path,
+    race_grade_target=race_grade_target,
+    prefer_rival_race=prefer_rival_race,
+    fallback_non_rival_race=fallback_non_rival_race,
+    scheduled_race=scheduled_race,
+    lobby_scheduled_race=lobby_scheduled_race,
+    race_mission_available=race_mission_available,
+    is_race_day=is_race_day,
+    trackblazer_climax_race_day=trackblazer_climax_race_day,
+    race_decision=race_decision,
+    race_lookahead=race_lookahead,
+    warning_policy=warning_plan,
+    fallback_action=fallback_action,
+    branch_kind=branch_kind,
+  )
+  return selected_payload, branch_kind, warning_plan, fallback_action
+
+
+def _apply_ranked_selection_to_race_plan(state_obj, action, planner_race_plan, selected_candidate, selection_rationale):
+  planner_race_plan = copy.deepcopy(planner_race_plan if isinstance(planner_race_plan, dict) else {})
+  selected_candidate = selected_candidate if isinstance(selected_candidate, dict) else {}
+  if not selected_candidate:
+    return planner_race_plan
+
+  selected_payload, branch_kind, warning_plan, fallback_action = _selected_payload_from_candidate(
+    selected_candidate,
+    state_obj,
+    action,
+    planner_race_plan,
+  )
+  if selected_payload.get("func") == "do_race":
+    fallback_policy = _fallback_chain(branch_kind, fallback_action, warning_plan)
+  else:
+    fallback_policy = {"planner_owned": True, "chain": []}
+    warning_plan = {}
+
+  action_payload = {
+    "planner_owned": True,
+    "branch_kind": branch_kind,
+    "func": selected_payload.get("func"),
+    "options": copy.deepcopy(selected_payload),
+    "fallback_action": copy.deepcopy(fallback_action),
+    "available_actions": list((_capture_action_payload(action, state_obj=state_obj).get("available_actions") or [])),
+  }
+  race_check = copy.deepcopy(planner_race_plan.get("race_check") or {})
+  race_check["branch_kind"] = branch_kind
+  race_check["scheduled_race"] = bool(selected_payload.get("scheduled_race") or selected_payload.get("trackblazer_lobby_scheduled_race"))
+  race_check["scheduled_race_source"] = (
+    "lobby_button"
+    if selected_payload.get("trackblazer_lobby_scheduled_race") else
+    ("config_schedule" if selected_payload.get("scheduled_race") else "")
+  )
+  race_check["scout_required"] = bool(branch_kind == "optional_rival_race")
+
+  race_scout = copy.deepcopy(planner_race_plan.get("race_scout") or {})
+  race_scout["planner_owned"] = True
+  race_scout["required"] = bool(branch_kind == "optional_rival_race")
+  if selected_payload.get("func") != "do_race":
+    race_scout["required"] = False
+
+  race_entry_gate = copy.deepcopy(planner_race_plan.get("race_entry_gate") or {})
+  if selected_payload.get("func") == "do_race":
+    if not race_entry_gate:
+      race_entry_gate = {
+        "planner_owned": True,
+        "opens_from_lobby": True,
+        "expected_branch": "continue_to_race_list" if warning_plan.get("accept_warning") else "return_to_lobby",
+        "warning_meaning": "This race would become the third consecutive race" if warning_plan.get("warning_expected") else "",
+        "consecutive_warning_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive"),
+        "consecutive_warning_ok_template": constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok"),
+        "ok_action": "continue_to_race_list",
+        "cancel_action": "return_to_lobby",
+        "force_accept_warning": bool(warning_plan.get("force_accept_warning")),
+      }
+  else:
+    race_entry_gate = {}
+
+  planner_race_plan["branch_kind"] = branch_kind
+  planner_race_plan["selection_rationale"] = str(selection_rationale or "")
+  planner_race_plan["selected_action"] = copy.deepcopy(selected_payload)
+  planner_race_plan["action_payload"] = action_payload
+  planner_race_plan["race_check"] = race_check
+  planner_race_plan["race_decision"] = copy.deepcopy(selected_payload.get("trackblazer_race_decision") or {})
+  planner_race_plan["race_entry_gate"] = race_entry_gate
+  planner_race_plan["race_scout"] = race_scout
+  planner_race_plan["warning_plan"] = copy.deepcopy(warning_plan or {})
+  planner_race_plan["fallback_policy"] = copy.deepcopy(fallback_policy or {})
+  return planner_race_plan
+
+
 def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payload, race_plan=None) -> List[ExecutionStep]:
   race_plan = race_plan if isinstance(race_plan, dict) else {}
   selected_race_action = dict(race_plan.get("selected_action") or {})
@@ -2556,10 +3228,25 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "planner_race_plan": planner_race_plan,
     "turn_plan": {"planner_metadata": {"runtime": runtime_state}},
   }, state_obj=state_obj, action=action)
+  policy = getattr(config, "TRACKBLAZER_PLANNER_POLICY", {})
   candidates = enumerate_candidate_actions(
     observed,
     derived,
-    getattr(config, "TRACKBLAZER_PLANNER_POLICY", {}),
+    policy,
+  )
+  candidate_ranking, ranked_native_candidates, selected_candidate, selection_rationale = _rank_candidates_for_selection(
+    candidates,
+    observed.to_dict(),
+    derived.to_dict(),
+    policy,
+    planner_race_plan,
+  )
+  selected_race_plan = _apply_ranked_selection_to_race_plan(
+    state_obj,
+    action,
+    planner_race_plan,
+    selected_candidate,
+    selection_rationale,
   )
   ranked_trainings = build_ranked_training_snapshot(
     state_obj=state_obj,
@@ -2571,10 +3258,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     version=PLANNER_VERSION,
     decision_path=decision_path,
     freshness=freshness,
-    # TODO: M4: rank candidates and replace _build_planner_race_plan() selection.
-    selected_candidate=candidates[0].to_dict() if candidates else {},
-    selection_rationale=str(planner_race_plan.get("selection_rationale") or ""),
-    candidate_ranking=[candidate.to_dict() for candidate in candidates],
+    selected_candidate=copy.deepcopy(selected_candidate),
+    selection_rationale=str(selection_rationale or ""),
+    candidate_ranking=copy.deepcopy(candidate_ranking),
     shop_plan={
       "would_buy": shop_buy_plan,
       "shop_summary": copy.deepcopy(shop_summary),
@@ -2599,9 +3285,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "execution_payload": copy.deepcopy(item_execution_payload),
       "subgraph": _build_item_plan_subgraph(item_execution_payload),
       "selected_action_binding": {
-        "func": ((planner_race_plan.get("selected_action") or {}).get("func")) if decision_path == "planner" else getattr(action, "func", None),
-        "training_name": ((planner_race_plan.get("selected_action") or {}).get("training_name")) if decision_path == "planner" else (action.get("training_name") if hasattr(action, "get") else None),
-        "race_name": ((planner_race_plan.get("selected_action") or {}).get("race_name")) if decision_path == "planner" else (action.get("race_name") if hasattr(action, "get") else None),
+        "func": ((selected_race_plan.get("selected_action") or {}).get("func")) if decision_path == "planner" else getattr(action, "func", None),
+        "training_name": ((selected_race_plan.get("selected_action") or {}).get("training_name")) if decision_path == "planner" else (action.get("training_name") if hasattr(action, "get") else None),
+        "race_name": ((selected_race_plan.get("selected_action") or {}).get("race_name")) if decision_path == "planner" else (action.get("race_name") if hasattr(action, "get") else None),
       },
       "reassess_boundary": {
         "required": bool(reassess_after_item_use),
@@ -2610,9 +3296,9 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
         "transition_kind": (item_execution_payload.get("reassess_transition") or {}).get("transition_kind"),
       },
     },
-    race_plan=copy.deepcopy(planner_race_plan),
-    warning_plan=copy.deepcopy(planner_race_plan.get("warning_plan") or {}),
-    fallback_policy=copy.deepcopy(planner_race_plan.get("fallback_policy") or {}),
+    race_plan=copy.deepcopy(selected_race_plan),
+    warning_plan=copy.deepcopy(selected_race_plan.get("warning_plan") or {}),
+    fallback_policy=copy.deepcopy(selected_race_plan.get("fallback_policy") or {}),
     reobserve_boundaries=copy.deepcopy(reobserve_boundaries),
     inventory_snapshot={
       "source": inventory_source,
@@ -2638,7 +3324,8 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "execution_item_count": len(execution_items),
       "ranked_training_count": len(ranked_trainings),
       "inventory_source": inventory_source,
-      "race_branch_kind": planner_race_plan.get("branch_kind"),
+      "race_branch_kind": selected_race_plan.get("branch_kind"),
+      "planner_native_candidate_count": len(ranked_native_candidates),
     },
     planner_metadata={
       "planner_version": PLANNER_VERSION,
@@ -2661,7 +3348,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       action,
       shop_buy_plan,
       item_execution_payload,
-      dict(planner_race_plan or {}) if decision_path == "planner" else {},
+      dict(selected_race_plan or {}) if decision_path == "planner" else {},
     ),
   )
   turn_plan.review_context = {
