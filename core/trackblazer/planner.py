@@ -13,7 +13,6 @@ from core.actions import Action
 from core.strategies import Strategy
 from core.trackblazer.compat import (
   capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
-  set_rival_fallback_action as _set_legacy_rival_fallback_action,
 )
 from core.trackblazer.candidates import enumerate_candidate_actions
 from core.trackblazer.derive import derive_turn_state
@@ -860,8 +859,12 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   goal_race_active = bool(_action_func(goal_probe) == "do_race" and _action_value(goal_probe, "race_name"))
 
   existing_rival_scout = copy.deepcopy(_action_value(action, "rival_scout", {}) or {})
-  warning_cancelled = bool(_action_value(action, "_consecutive_warning_cancelled"))
-  warning_cancel_reason = str(_action_value(action, "_consecutive_warning_cancel_reason") or "")
+  warning_outcome = dict(_action_value(action, "planner_warning_outcome") or {})
+  warning_cancelled = bool(warning_outcome.get("cancelled"))
+  warning_cancel_reason = str(warning_outcome.get("reason") or "")
+  if not warning_cancelled:
+    warning_cancelled = bool(_action_value(action, "_consecutive_warning_cancelled"))
+    warning_cancel_reason = str(_action_value(action, "_consecutive_warning_cancel_reason") or "")
   existing_planner_race = copy.deepcopy(_action_value(action, "trackblazer_planner_race", {}) or {})
   existing_planner_branch = str(existing_planner_race.get("branch_kind") or "")
 
@@ -1226,15 +1229,6 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     "available_actions": list(base_action.get("available_actions") or []),
   }
 
-  legacy_fallback_branches = {
-    "optional_rival_race",
-    "optional_fallback_race",
-    "goal_race",
-    "mission_race",
-  }
-  if action_payload["func"] == "do_race" and branch_kind in legacy_fallback_branches:
-    action_payload["compatibility_fallback_payload"] = copy.deepcopy(base_fallback)
-
   if existing_rival_scout:
     race_scout = {
       **dict(race_scout or {}),
@@ -1586,37 +1580,40 @@ def _build_shop_step_planned_clicks(shop_buy_plan):
 
 def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferred_use, reassess_after_item_use, item_context):
   trigger_items = [entry.get("key") for entry in list(execution_items or []) if isinstance(entry, dict) and entry.get("key")]
-  reassess_reason = _item_reassess_reason(execution_items) if reassess_after_item_use else "Selected pre-action items can flow directly into the already selected action"
+  effective_reassess = bool(reassess_after_item_use and execution_items)
+  reassess_reason = _item_reassess_reason(execution_items) if effective_reassess else "Selected pre-action items can flow directly into the already selected action"
   reassess_kind = "continue_selected_action"
   if "reset_whistle" in trigger_items:
     reassess_kind = "reset_whistle_reroll"
   elif any(entry.get("usage_group") == "energy" for entry in list(execution_items or []) if isinstance(entry, dict)):
     reassess_kind = "energy_rescue_reassess" if item_context.get("energy_rescue") else "energy_item_reassess"
-  inventory_refresh = {
-    "trigger": "post_shop_purchase_refresh" if shop_buy_plan else "pre_action_refresh",
-    "reason": (
-      "refresh inventory against purchased items before item-use planning"
-      if shop_buy_plan else
-      "refresh inventory immediately before item-use planning"
-    ),
-  }
-  path = [
-    "inventory_refresh" if execution_items else "selected_action_ready",
-    "replan_items" if execution_items else "selected_action_ready",
-    "execute_pre_action_items" if execution_items else "skip_pre_action_items",
-    "await_lobby_after_items" if execution_items else "selected_action_ready",
-    "reassess" if reassess_after_item_use else "selected_action_ready",
-  ]
-  transitions = [
-    {
-      "from": "inventory_refresh",
-      "to": "replan_items",
-      "reason": inventory_refresh["reason"],
-      "reobserve": False,
-      "trigger_items": [],
-    },
-  ]
-  if execution_items:
+  has_execution_items = bool(execution_items)
+  if has_execution_items:
+    inventory_refresh = {
+      "trigger": "post_shop_purchase_refresh" if shop_buy_plan else "pre_action_refresh",
+      "required": True,
+      "reason": (
+        "refresh inventory against purchased items before item-use planning"
+        if shop_buy_plan else
+        "refresh inventory immediately before item-use planning"
+      ),
+    }
+    path = [
+      "inventory_refresh",
+      "replan_items",
+      "execute_pre_action_items",
+      "await_lobby_after_items",
+      "reassess" if effective_reassess else "selected_action_ready",
+    ]
+    transitions = [
+      {
+        "from": "inventory_refresh",
+        "to": "replan_items",
+        "reason": inventory_refresh["reason"],
+        "reobserve": False,
+        "trigger_items": [],
+      },
+    ]
     transitions.append(
       {
         "from": "replan_items",
@@ -1638,18 +1635,26 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
     transitions.append(
       {
         "from": "await_lobby_after_items",
-        "to": "reassess" if reassess_after_item_use else "selected_action_ready",
+        "to": "reassess" if effective_reassess else "selected_action_ready",
         "reason": reassess_reason or "selected action remains valid after item use",
-        "reobserve": bool(reassess_after_item_use),
+        "reobserve": bool(effective_reassess),
         "trigger_items": trigger_items,
       }
     )
+  else:
+    inventory_refresh = {
+      "trigger": "none",
+      "required": False,
+      "reason": "No pre-action items selected; inventory refresh is skipped.",
+    }
+    path = ["selected_action_ready"]
+    transitions = []
 
   action_mutations = {
     "trackblazer_shop_buy_plan": copy.deepcopy(list(shop_buy_plan or [])),
     "trackblazer_pre_action_items": copy.deepcopy(list(execution_items or [])),
     "trackblazer_item_use_context": copy.deepcopy(dict(item_context or {})),
-    "trackblazer_reassess_after_item_use": bool(reassess_after_item_use),
+    "trackblazer_reassess_after_item_use": bool(effective_reassess),
   }
   return {
     "planner_owned": True,
@@ -1658,14 +1663,14 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
     "execution_items": copy.deepcopy(list(execution_items or [])),
     "deferred_items": copy.deepcopy(list(deferred_use or [])),
     "reassess_transition": {
-      "required": bool(reassess_after_item_use),
+      "required": bool(effective_reassess),
       "transition_kind": reassess_kind,
       "reason": reassess_reason,
       "trigger_items": trigger_items,
-      "selected_action_invalidated": bool(reassess_after_item_use),
-      "requires_reobserve": bool(reassess_after_item_use),
-      "requires_training_rescan": bool(reassess_after_item_use),
-      "target_phase": "collecting_main_state" if reassess_after_item_use else "execute_main_action",
+      "selected_action_invalidated": bool(effective_reassess),
+      "requires_reobserve": bool(effective_reassess),
+      "requires_training_rescan": bool(effective_reassess),
+      "target_phase": "collecting_main_state" if effective_reassess else "execute_main_action",
     },
     "path": path,
     "transitions": transitions,
@@ -2229,7 +2234,6 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
     race_plan = dict(turn_plan.race_plan or {})
     race_payload = dict(race_plan.get("action_payload") or {})
     selected_payload = dict(race_payload.get("options") or {})
-    compatibility_fallback_payload = dict(race_payload.get("compatibility_fallback_payload") or {})
     target_func = race_payload.get("func") or selected_payload.get("func") or _action_func(action)
     for key in (
       "race_name",
@@ -2272,13 +2276,6 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
       available_actions = [target_func] + [name for name in available_actions if name != target_func]
     if hasattr(action, "available_actions"):
       action.available_actions = available_actions
-    if compatibility_fallback_payload:
-      _set_legacy_rival_fallback_action(
-        action,
-        func=compatibility_fallback_payload.get("func"),
-        training_name=compatibility_fallback_payload.get("training_name"),
-        training_data=copy.deepcopy(compatibility_fallback_payload.get("training_data") or {}),
-      )
 
     turn_plan.review_context = {
       **dict(turn_plan.review_context or {}),
@@ -2500,6 +2497,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     },
     "would_buy": shop_buy_plan,
   }
+  # Legacy reconstruction is retained only for dual-run comparison scaffolding.
   review_planned_actions = build_review_planned_actions(
     state_obj,
     action,
@@ -2606,7 +2604,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       ),
       "ranked_trainings": copy.deepcopy(ranked_trainings),
     },
-    legacy_shared_plan=review_planned_actions,
+    legacy_shared_plan={},
     step_sequence=_build_step_sequence(
       state_obj,
       action,

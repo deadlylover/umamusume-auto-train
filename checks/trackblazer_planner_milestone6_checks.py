@@ -145,6 +145,7 @@ def _executor_hooks(recorder, *, execute_intent="execute", item_result=None):
     wait_for_lobby_after_item_use=lambda *args, **kwargs: recorder.append(("wait_items", None)) or True,
     enforce_operator_race_gate_before_execute=lambda *args, **kwargs: recorder.append(("race_gate", None)) or None,
     run_planner_race_preflight=lambda *args, **kwargs: recorder.append(("race_preflight", None)) or None,
+    resolve_consecutive_race_warning=lambda *args, **kwargs: recorder.append(("resolve_warning", kwargs.get("turn_plan"))) or {"status": "completed", "reason": "warning_policy_prepared"},
     resolve_post_action_resolution=lambda *args, **kwargs: recorder.append(("resolve_post", None)) or True,
     trackblazer_action_failure_should_block_retry=lambda state_obj, action: recorder.append(("block_retry", action.func)) or False,
     update_operator_snapshot=lambda *args, **kwargs: recorder.append(("snapshot", kwargs.get("phase"))),
@@ -278,6 +279,33 @@ def _test_executor_item_failure_can_block_retry():
   assert result.get("status") == "blocked", result
 
 
+def _test_executor_resolve_consecutive_warning_step_owned():
+  state_obj = _base_state()
+  action = _race_action()
+  action.run = lambda: True
+  recorder = []
+  turn_plan = _turn_plan(
+    "await_operator_review",
+    "resolve_consecutive_race_warning",
+    "execute_main_action",
+    "resolve_post_action",
+  )
+
+  result = run_planner_action_with_review(
+    state_obj,
+    action,
+    turn_plan,
+    0,
+    "review",
+    _executor_hooks(recorder),
+  )
+
+  assert result.get("status") == "executed", result
+  event_names = [entry[0] for entry in recorder]
+  assert "resolve_warning" in event_names, event_names
+  assert event_names.index("resolve_warning") < event_names.index("resolve_post"), event_names
+
+
 def _test_runtime_retry_owned_by_planner_runtime():
   state_obj = _base_state()
   action = _race_action()
@@ -327,10 +355,39 @@ def _test_runtime_safe_legacy_fallback():
   assert state_obj.get("_trackblazer_planner_force_fallback"), result
 
 
+def _test_same_turn_fallback_handoff_control_flow():
+  state_obj = _base_state()
+  action = _race_action()
+  planner_runtime_result = {
+    "status": "fallback_to_legacy",
+    "reason": "synthetic runtime fallback",
+  }
+
+  with patch("core.skeleton.update_operator_snapshot") as update_snapshot_mock, patch(
+    "core.skeleton._push_turn_retry_debug"
+  ) as retry_debug_mock:
+    reason = skeleton._handoff_planner_runtime_fallback_to_legacy_same_turn(
+      state_obj,
+      action,
+      planner_runtime_result,
+    )
+
+  assert reason == "synthetic runtime fallback"
+  update_snapshot_mock.assert_called_once()
+  retry_debug_mock.assert_called_once()
+  retry_kwargs = retry_debug_mock.call_args.kwargs
+  assert retry_kwargs.get("result") == "planner_runtime_same_turn_legacy_handoff", retry_kwargs
+  assert retry_kwargs.get("same_turn_retry") is True, retry_kwargs
+
+
 def _test_skeleton_delegates_planner_runtime():
   source = inspect.getsource(skeleton.career_lobby)
   assert "run_trackblazer_planner_turn(" in source
-  assert 'result="planner_runtime_recollect"' in source
+  assert "_handoff_planner_runtime_fallback_to_legacy_same_turn(" in source
+  assert "planner_activation = {\"status\": \"fallback\"" in source
+  assert 'result="planner_runtime_recollect"' not in source
+  helper_source = inspect.getsource(skeleton._handoff_planner_runtime_fallback_to_legacy_same_turn)
+  assert 'result="planner_runtime_same_turn_legacy_handoff"' in helper_source
 
 
 def main():
@@ -340,8 +397,10 @@ def main():
   _test_executor_reassess_transition()
   _test_executor_skill_emergency_close_matches_legacy()
   _test_executor_item_failure_can_block_retry()
+  _test_executor_resolve_consecutive_warning_step_owned()
   _test_runtime_retry_owned_by_planner_runtime()
   _test_runtime_safe_legacy_fallback()
+  _test_same_turn_fallback_handoff_control_flow()
   _test_skeleton_delegates_planner_runtime()
   print("trackblazer planner milestone 6 checks: ok")
 

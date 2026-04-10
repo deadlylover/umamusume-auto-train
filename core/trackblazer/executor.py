@@ -31,6 +31,7 @@ class PlannerExecutorHooks:
   resolve_post_action_resolution: Callable[[Dict[str, Any], Any], bool]
   trackblazer_action_failure_should_block_retry: Callable[[Dict[str, Any], Any], bool]
   update_operator_snapshot: Callable[..., Any]
+  resolve_consecutive_race_warning: Optional[Callable[..., Dict[str, Any]]] = None
 
 
 def _step_present(turn_plan: TurnPlan, step_type: str) -> bool:
@@ -442,6 +443,45 @@ def run_planner_action_with_review(
       }
     _transition(state_obj, "execute_rival_scout", "execute_rival_scout", "completed", "rival_scout_resolved")
 
+  if _step_present(turn_plan, "resolve_consecutive_race_warning"):
+    _transition(state_obj, "resolve_consecutive_race_warning", "resolve_consecutive_race_warning", "started")
+    resolver = getattr(hooks, "resolve_consecutive_race_warning", None)
+    warning_result = (
+      resolver(
+        state_obj,
+        action,
+        turn_plan=turn_plan,
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      if callable(resolver) else
+      {"status": "completed", "reason": "warning_step_noop"}
+    )
+    warning_status = str((warning_result or {}).get("status") or "completed")
+    warning_reason = str((warning_result or {}).get("reason") or "")
+    if warning_status in {"failed", "blocked", "reassess", "previewed", "executed"}:
+      _transition(
+        state_obj,
+        "resolve_consecutive_race_warning",
+        "resolve_consecutive_race_warning",
+        warning_status,
+        warning_reason or "warning_policy_terminal",
+      )
+      return {
+        "status": warning_status,
+        "step_id": "resolve_consecutive_race_warning",
+        "reason": warning_reason or "warning_policy_terminal",
+        "committed": committed,
+      }
+    _transition(
+      state_obj,
+      "resolve_consecutive_race_warning",
+      "resolve_consecutive_race_warning",
+      "completed",
+      warning_reason or "warning_policy_ready",
+    )
+
   hooks.update_operator_snapshot(
     state_obj,
     action,
@@ -461,8 +501,12 @@ def run_planner_action_with_review(
       "failed",
       f"action_failed:{getattr(action, 'func', '')}",
       {
+        "warning_outcome": dict(getattr(action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {}),
         "warning_cancelled": bool(getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancelled")),
-        "warning_reason": getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancel_reason"),
+        "warning_reason": (
+          (dict(getattr(action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {}).get("reason"))
+          or getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancel_reason")
+        ),
       },
     )
     hooks.update_operator_snapshot(

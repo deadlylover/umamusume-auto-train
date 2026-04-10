@@ -1078,63 +1078,51 @@ class TurnPlan:
   step_sequence: List[ExecutionStep] = field(default_factory=list)
 
   def to_planned_actions(self) -> Dict[str, Any]:
-    planned = dict(self.legacy_shared_plan)
-    planner_race_owned = self.decision_path == "planner"
+    planned = {}
 
-    inventory_scan = dict(planned.get("inventory_scan") or {})
-    inventory_scan.update(dict((self.inventory_snapshot or {}).get("scan") or {}))
+    inventory_scan = copy.deepcopy(dict((self.inventory_snapshot or {}).get("scan") or {}))
     if inventory_scan:
       planned["inventory_scan"] = inventory_scan
 
-    shop_scan = dict(planned.get("shop_scan") or {})
-    shop_scan.update(dict((self.shop_plan or {}).get("scan") or {}))
+    shop_scan = copy.deepcopy(dict((self.shop_plan or {}).get("scan") or {}))
     if shop_scan:
       planned["shop_scan"] = shop_scan
 
-    planner_would_buy = list((self.shop_plan or {}).get("would_buy") or [])
-    if planner_would_buy:
-      planned["would_buy"] = planner_would_buy
+    planned["would_buy"] = copy.deepcopy(list((self.shop_plan or {}).get("would_buy") or []))
+    planned["would_use"] = copy.deepcopy(list((self.item_plan or {}).get("pre_action_items") or []))
+    planned["deferred_use"] = copy.deepcopy(list((self.item_plan or {}).get("deferred_use") or []))
 
-    planner_would_use = list((self.item_plan or {}).get("pre_action_items") or [])
-    if planner_would_use:
-      planned["would_use"] = planner_would_use
-
-    planner_deferred_use = list((self.item_plan or {}).get("deferred_use") or [])
-    if planner_deferred_use or "deferred_use" not in planned:
-      planned["deferred_use"] = planner_deferred_use
-
-    item_context = dict((self.item_plan or {}).get("context") or {})
+    item_context = copy.deepcopy(dict((self.item_plan or {}).get("context") or {}))
     if item_context:
       planned["would_use_context"] = item_context
 
-    item_subgraph = dict((self.item_plan or {}).get("subgraph") or {})
+    item_subgraph = copy.deepcopy(dict((self.item_plan or {}).get("subgraph") or {}))
     if item_subgraph:
       planned["item_plan_subgraph"] = item_subgraph
 
-    reassess_boundary = dict((self.item_plan or {}).get("reassess_boundary") or {})
+    reassess_boundary = copy.deepcopy(dict((self.item_plan or {}).get("reassess_boundary") or {}))
     if reassess_boundary:
       planned["reassess_boundary"] = reassess_boundary
 
-    if planner_race_owned:
-      race_plan = dict(self.race_plan or {})
-      race_check = dict(race_plan.get("race_check") or {})
-      race_decision = dict(race_plan.get("race_decision") or {})
-      race_entry_gate = dict(race_plan.get("race_entry_gate") or {})
-      race_scout = dict(race_plan.get("race_scout") or {})
-      if race_check:
-        planned["race_check"] = race_check
-      if race_decision:
-        planned["race_decision"] = race_decision
-      if race_entry_gate:
-        planned["race_entry_gate"] = race_entry_gate
-      if race_scout:
-        planned["race_scout"] = race_scout
-      warning_plan = dict(self.warning_plan or {})
-      if warning_plan:
-        planned["race_warning_policy"] = warning_plan
-      fallback_policy = dict(self.fallback_policy or {})
-      if fallback_policy:
-        planned["race_fallback_policy"] = fallback_policy
+    race_plan = dict(self.race_plan or {})
+    race_check = copy.deepcopy(dict(race_plan.get("race_check") or {}))
+    race_decision = copy.deepcopy(dict(race_plan.get("race_decision") or {}))
+    race_entry_gate = copy.deepcopy(dict(race_plan.get("race_entry_gate") or {}))
+    race_scout = copy.deepcopy(dict(race_plan.get("race_scout") or {}))
+    if race_check:
+      planned["race_check"] = race_check
+    if race_decision:
+      planned["race_decision"] = race_decision
+    if race_entry_gate:
+      planned["race_entry_gate"] = race_entry_gate
+    if race_scout:
+      planned["race_scout"] = race_scout
+    warning_plan = copy.deepcopy(dict(self.warning_plan or {}))
+    if warning_plan:
+      planned["race_warning_policy"] = warning_plan
+    fallback_policy = copy.deepcopy(dict(self.fallback_policy or {}))
+    if fallback_policy:
+      planned["race_fallback_policy"] = fallback_policy
 
     if self.reobserve_boundaries:
       planned["reobserve_boundaries"] = copy.deepcopy(self.reobserve_boundaries)
@@ -1235,6 +1223,6 @@ class TurnPlan:
       "debug_summary": dict(self.debug_summary),
       "planner_metadata": dict(self.planner_metadata),
       "review_context": dict(self.review_context),
-      "legacy_shared_plan": self.to_planned_actions(),
+      "legacy_shared_plan": copy.deepcopy(dict(self.legacy_shared_plan or {})),
       "step_sequence": [step.to_dict() for step in self.step_sequence],
     }

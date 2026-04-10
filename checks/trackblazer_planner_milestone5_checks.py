@@ -7,6 +7,8 @@ import core.config as config
 import utils.constants as constants
 from core.actions import Action
 from core.skeleton import _activate_trackblazer_planner_turn, build_review_snapshot
+from core.trackblazer.executor import PlannerExecutorHooks
+from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 
 
 def _base_state():
@@ -117,6 +119,37 @@ def _snapshot(state_obj, action, note, expected_path="planner_runtime"):
   return snapshot
 
 
+def _runtime_executor_hooks():
+  return PlannerExecutorHooks(
+    skill_purchase_plan=lambda action: {},
+    review_action_before_execution=lambda *args, **kwargs: True,
+    wait_for_execute_intent=lambda *args, **kwargs: "check_only",
+    run_skill_purchase_plan=lambda *args, **kwargs: {"status": "skipped"},
+    run_trackblazer_shop_purchases=lambda *args, **kwargs: {"status": "skipped"},
+    wait_for_lobby_after_shop_purchase=lambda: True,
+    refresh_trackblazer_pre_action_inventory=lambda *args, **kwargs: {"status": "skipped"},
+    execute_trackblazer_pre_action_items=lambda *args, **kwargs: {"status": "skipped"},
+    wait_for_lobby_after_item_use=lambda *args, **kwargs: True,
+    enforce_operator_race_gate_before_execute=lambda *args, **kwargs: None,
+    run_planner_race_preflight=lambda *args, **kwargs: None,
+    resolve_post_action_resolution=lambda *args, **kwargs: True,
+    trackblazer_action_failure_should_block_retry=lambda *args, **kwargs: False,
+    update_operator_snapshot=lambda *args, **kwargs: None,
+    resolve_consecutive_race_warning=lambda *args, **kwargs: {"status": "completed", "reason": "warning_policy_prepared"},
+  )
+
+
+def _runtime_hooks():
+  return PlannerRuntimeHooks(
+    attach_skill_purchase_plan=lambda *args, **kwargs: "attached",
+    attach_trackblazer_pre_action_item_plan=lambda state_obj, action: action,
+    push_turn_retry_debug=lambda *args, **kwargs: None,
+    update_operator_snapshot=lambda *args, **kwargs: None,
+    should_retry_training_after_consecutive_warning=lambda action: False,
+    prepare_training_fallback_after_consecutive_warning=lambda action: False,
+  )
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -220,6 +253,30 @@ def main():
     forced_snapshot = _snapshot(forced_state, forced_action, "forced_race_day")
     assert (forced_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "forced_race_day"
     assert (forced_snapshot.get("selected_action") or {}).get("is_race_day") is True
+
+    forced_climax_runtime_state = _base_state()
+    forced_climax_runtime_state["trackblazer_climax_race_day"] = True
+    forced_climax_runtime_action = _training_action()
+    activation = _activate_trackblazer_planner_turn(forced_climax_runtime_state, forced_climax_runtime_action)
+    assert activation.get("status") == "planner"
+    assert forced_climax_runtime_action.func == "do_race"
+    assert forced_climax_runtime_action.get("trackblazer_climax_race_day") is True
+    runtime_result = run_trackblazer_planner_turn(
+      forced_climax_runtime_state,
+      forced_climax_runtime_action,
+      0,
+      "forced_climax_runtime_ownership",
+      executor_hooks=_runtime_executor_hooks(),
+      runtime_hooks=_runtime_hooks(),
+      sub_phase="preview_race_selection",
+    )
+    assert runtime_result.get("status") == "previewed", runtime_result
+    assert forced_climax_runtime_state.get("trackblazer_runtime_path") == "planner_runtime"
+    assert (
+      (
+        forced_climax_runtime_state.get("trackblazer_planner_state") or {}
+      ).get("turn_plan") or {}
+    ).get("decision_path") == "planner"
 
     scheduled_state = _base_state()
     scheduled_action = _training_action()

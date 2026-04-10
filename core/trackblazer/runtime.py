@@ -65,22 +65,67 @@ def _selected_race_still_pending(state_obj, action):
   return has_selected_race
 
 
+def _planner_fallback_action(action):
+  planner_race = action.get("trackblazer_planner_race") or {}
+  fallback_action = planner_race.get("fallback_action") or {}
+  return fallback_action if isinstance(fallback_action, dict) else {}
+
+
+def _fallback_func(action):
+  planner_fallback_func = (_planner_fallback_action(action) or {}).get("func")
+  if planner_fallback_func:
+    return planner_fallback_func
+  return action.get("_rival_fallback_func")
+
+
+def _warning_outcome(action):
+  outcome = action.get("planner_warning_outcome") or {}
+  if isinstance(outcome, dict) and outcome.get("cancelled"):
+    return {
+      "cancelled": True,
+      "force_rest": bool(outcome.get("force_rest")),
+      "reason": str(outcome.get("reason") or ""),
+    }
+  legacy_cancelled = bool(action.get("_consecutive_warning_cancelled"))
+  if not legacy_cancelled:
+    return {}
+  return {
+    "cancelled": True,
+    "force_rest": bool(action.get("_consecutive_warning_force_rest")),
+    "reason": str(action.get("_consecutive_warning_cancel_reason") or ""),
+  }
+
+
+def _warning_force_rest(action):
+  return bool((_warning_outcome(action) or {}).get("force_rest"))
+
+
+def _set_rest_fallback(action):
+  planner_race = action.get("trackblazer_planner_race") or {}
+  if isinstance(planner_race, dict) and planner_race:
+    fallback_action = dict(planner_race.get("fallback_action") or {})
+    fallback_action["func"] = "do_rest"
+    planner_race["fallback_action"] = fallback_action
+    action["trackblazer_planner_race"] = planner_race
+    return
+  set_rival_fallback_action(action, func="do_rest")
+
+
 def _prepare_retry_order(action):
   available_actions = list(getattr(action, "available_actions", []) or [])
   if available_actions:
     available_actions.pop(0)
-  consecutive_warning_retry_training = False
-  if bool(action.get("_consecutive_warning_force_rest")):
+  if _warning_force_rest(action):
     info(
       "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
       "Prioritizing rest fallback."
     )
-    set_rival_fallback_action(action, func="do_rest")
+    _set_rest_fallback(action)
     if "do_rest" in available_actions:
       available_actions = ["do_rest"] + [name for name in available_actions if name != "do_rest"]
     else:
       available_actions.insert(0, "do_rest")
-  return available_actions, consecutive_warning_retry_training
+  return available_actions
 
 
 def _prepare_retry_candidate(state_obj, action, function_name, hooks: PlannerRuntimeHooks):
@@ -200,7 +245,7 @@ def run_trackblazer_planner_turn(
           "but no valid training fallback was available."
         )
 
-    available_actions, _ = _prepare_retry_order(action)
+    available_actions = _prepare_retry_order(action)
     if consecutive_warning_retry_training:
       available_actions = ["do_training"] + [name for name in available_actions if name != "do_training"]
 
@@ -211,11 +256,11 @@ def run_trackblazer_planner_turn(
     info(f"Available actions: {available_actions}")
 
     has_selected_race = _selected_race_still_pending(state_obj, action)
-    if bool(action.get("_consecutive_warning_force_rest")) and not consecutive_warning_retry_training:
+    if _warning_force_rest(action) and not consecutive_warning_retry_training:
       has_selected_race = False
     allow_rest_fallback_for_optional_rival = bool(
       action.get("prefer_rival_race")
-      and action.get("_rival_fallback_func") == "do_rest"
+      and _fallback_func(action) == "do_rest"
       and not action.get("scheduled_race")
       and not action.get("trackblazer_lobby_scheduled_race")
       and not action.get("is_race_day")

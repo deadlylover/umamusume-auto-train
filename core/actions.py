@@ -247,6 +247,24 @@ def go_to_racebox_top():
       return True
   return False
 
+
+def _planner_fallback_action(options=None):
+  options = options if isinstance(options, dict) else {}
+  planner_payload = options.get("trackblazer_planner_race") or {}
+  if not isinstance(planner_payload, dict):
+    return {}
+  fallback_action = planner_payload.get("fallback_action") or {}
+  return fallback_action if isinstance(fallback_action, dict) else {}
+
+
+def _fallback_func(options=None):
+  options = options if isinstance(options, dict) else {}
+  planner_fallback_func = (_planner_fallback_action(options) or {}).get("func")
+  if planner_fallback_func:
+    return planner_fallback_func
+  return options.get("_rival_fallback_func")
+
+
 def _should_accept_consecutive_race_warning(options=None):
   options = options or {}
   planner_policy = options.get("planner_race_warning_policy") or {}
@@ -257,7 +275,7 @@ def _should_accept_consecutive_race_warning(options=None):
   # out on consecutive-race warning and let rest proceed.
   if (
     options.get("prefer_rival_race")
-    and options.get("_rival_fallback_func") == "do_rest"
+    and _fallback_func(options) == "do_rest"
     and not options.get("scheduled_race")
     and not options.get("trackblazer_lobby_scheduled_race")
     and not options.get("is_race_day")
@@ -274,16 +292,28 @@ def _should_accept_consecutive_race_warning(options=None):
 def _mark_consecutive_warning_outcome(options=None, *, force_rest=False, reason=None):
   if not isinstance(options, dict):
     return
+  planner_policy = options.get("planner_race_warning_policy") or {}
+  planner_race_payload = options.get("trackblazer_planner_race") or {}
+  planner_race_payload = planner_race_payload if isinstance(planner_race_payload, dict) else {}
+  planner_owned = bool(
+    (isinstance(planner_policy, dict) and planner_policy.get("planner_owned"))
+    or planner_race_payload.get("branch_kind")
+  )
   options["planner_warning_outcome"] = {
     "cancelled": True,
     "force_rest": bool(force_rest),
     "reason": str(reason or ""),
   }
-  options["_consecutive_warning_cancelled"] = True
-  if force_rest:
-    options["_consecutive_warning_force_rest"] = True
-  if reason:
-    options["_consecutive_warning_cancel_reason"] = str(reason)
+  if planner_owned:
+    options.pop("_consecutive_warning_cancelled", None)
+    options.pop("_consecutive_warning_force_rest", None)
+    options.pop("_consecutive_warning_cancel_reason", None)
+  else:
+    options["_consecutive_warning_cancelled"] = True
+    if force_rest:
+      options["_consecutive_warning_force_rest"] = True
+    if reason:
+      options["_consecutive_warning_cancel_reason"] = str(reason)
 
 
 def _should_force_rest_after_optional_warning(options=None):
@@ -306,7 +336,7 @@ def _should_force_rest_after_optional_warning(options=None):
   return bool(
     race_decision.get("should_race")
     and race_decision.get("prefer_rival_race")
-    and options.get("_rival_fallback_func") == "do_training"
+    and _fallback_func(options) == "do_training"
   )
 
 def enter_race(race_name="any", race_image_path="", options=None):
@@ -320,7 +350,7 @@ def enter_race(race_name="any", race_image_path="", options=None):
   is_rest_promoted_optional_race = bool(
     options
     and options.get("prefer_rival_race")
-    and options.get("_rival_fallback_func") == "do_rest"
+    and _fallback_func(options) == "do_rest"
     and not options.get("scheduled_race")
     and not options.get("trackblazer_lobby_scheduled_race")
     and not options.get("is_race_day")

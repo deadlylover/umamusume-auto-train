@@ -5,7 +5,11 @@ import core.bot as bot
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
-from core.skeleton import _activate_trackblazer_planner_turn, build_review_snapshot
+from core.skeleton import (
+  _activate_trackblazer_planner_turn,
+  _attach_trackblazer_pre_action_item_plan,
+  build_review_snapshot,
+)
 from core.trackblazer.executor import PlannerExecutorHooks
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 
@@ -193,6 +197,56 @@ def _test_forced_runtime_fallback_sets_explicit_path():
   assert planner_runtime.get("runtime_path") == "planner_fallback_legacy"
 
 
+def _test_activation_failure_restores_action_payload():
+  bot.set_trackblazer_use_new_planner_enabled(True)
+  state_obj = _base_state()
+  action = _rest_action()
+  original_payload = {
+    "func": action.func,
+    "options": copy.deepcopy(action.options),
+    "available_actions": list(action.available_actions),
+  }
+
+  def _mutating_failure(*args, **kwargs):
+    target_action = args[1]
+    target_action.func = "do_race"
+    target_action["race_name"] = "any"
+    target_action["trackblazer_climax_race_day"] = True
+    raise RuntimeError("synthetic planner activation failure")
+
+  with patch("core.skeleton.set_turn_plan_decision_path", side_effect=_mutating_failure):
+    activation = _activate_trackblazer_planner_turn(state_obj, action)
+
+  assert activation.get("status") == "fallback", activation
+  assert action.func == original_payload["func"], action.func
+  assert action.options == original_payload["options"], action.options
+  assert list(action.available_actions) == original_payload["available_actions"], action.available_actions
+
+
+def _test_legacy_hydration_failure_keeps_action_unchanged():
+  bot.set_trackblazer_use_new_planner_enabled(False)
+  state_obj = _base_state()
+  action = _rest_action()
+  original_payload = {
+    "func": action.func,
+    "options": copy.deepcopy(action.options),
+    "available_actions": list(action.available_actions),
+  }
+
+  with patch("core.skeleton._hydrate_legacy_action_from_turn_plan", side_effect=RuntimeError("synthetic hydration failure")):
+    hydrated_action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+
+  assert hydrated_action is action
+  assert action.func == original_payload["func"], action.func
+  assert action.options == original_payload["options"], action.options
+  assert list(action.available_actions) == original_payload["available_actions"], action.available_actions
+  hydration_failure = state_obj.get("_trackblazer_planner_hydration_failure") or {}
+  assert "planner_hydration_failed" in (hydration_failure.get("reason") or ""), hydration_failure
+  snapshot = build_review_snapshot(state_obj, action, reasoning_notes="legacy_hydration_failure", ocr_debug=[])
+  assert snapshot.get("trackblazer_runtime_path") == "legacy_runtime", snapshot.get("trackblazer_runtime_path")
+  assert (snapshot.get("selected_action") or {}).get("func") == "do_rest", snapshot.get("selected_action")
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -201,6 +255,8 @@ def main():
     _test_pre_debut_planner_still_prefers_training_over_stale_rest()
     _test_planner_snapshot_and_boundary_history_are_copyable()
     _test_forced_runtime_fallback_sets_explicit_path()
+    _test_activation_failure_restores_action_payload()
+    _test_legacy_hydration_failure_keeps_action_unchanged()
     print("trackblazer planner milestone 7 checks: ok")
   finally:
     bot.set_trackblazer_use_new_planner_enabled(False)

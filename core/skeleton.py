@@ -36,7 +36,6 @@ from core.trackblazer.planner import (
   RUNTIME_PATH_PLANNER_RUNTIME,
   decision_path_for_runtime_path,
   apply_turn_plan_action_payload,
-  build_review_planned_actions,
   clear_planner_fallback,
   get_trackblazer_runtime_path,
   get_turn_plan,
@@ -1170,6 +1169,95 @@ def _action_option_pop(action, key):
     action.options.pop(key, None)
 
 
+def _snapshot_action_payload_for_restore(action):
+  if isinstance(action, dict):
+    return {
+      "kind": "dict",
+      "payload": copy.deepcopy(action),
+    }
+  if hasattr(action, "options"):
+    return {
+      "kind": "action",
+      "func": _action_func(action),
+      "options": copy.deepcopy(dict(getattr(action, "options", {}) or {})),
+      "available_actions": list(getattr(action, "available_actions", []) or []),
+    }
+  return {}
+
+
+def _restore_action_payload_from_snapshot(action, snapshot):
+  snapshot = snapshot if isinstance(snapshot, dict) else {}
+  if not snapshot:
+    return
+  if snapshot.get("kind") == "dict" and isinstance(action, dict):
+    action.clear()
+    action.update(copy.deepcopy(snapshot.get("payload") or {}))
+    return
+  if snapshot.get("kind") == "action" and hasattr(action, "options"):
+    action.func = snapshot.get("func")
+    action.options.clear()
+    action.options.update(copy.deepcopy(snapshot.get("options") or {}))
+    if hasattr(action, "available_actions"):
+      action.available_actions = list(snapshot.get("available_actions") or [])
+
+
+def _planner_fallback_payload(action):
+  planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
+  fallback_payload = (
+    planner_race_payload.get("fallback_action")
+    if isinstance(planner_race_payload, dict) else
+    {}
+  )
+  return dict(fallback_payload or {}) if isinstance(fallback_payload, dict) else {}
+
+
+def _effective_rival_fallback_payload(action):
+  planner_fallback = _planner_fallback_payload(action)
+  if planner_fallback.get("func"):
+    return planner_fallback
+  return _capture_legacy_rival_fallback_payload(action)
+
+
+def _effective_rival_fallback_func(action):
+  return str((_effective_rival_fallback_payload(action) or {}).get("func") or "")
+
+
+def _set_rest_fallback_action(action):
+  planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
+  if isinstance(planner_race_payload, dict) and planner_race_payload:
+    fallback_payload = dict(planner_race_payload.get("fallback_action") or {})
+    fallback_payload["func"] = "do_rest"
+    planner_race_payload["fallback_action"] = fallback_payload
+    action["trackblazer_planner_race"] = planner_race_payload
+    return
+  _set_legacy_rival_fallback_action(action, func="do_rest")
+
+
+def _consecutive_warning_outcome(action):
+  planner_outcome = _action_value(action, "planner_warning_outcome") or {}
+  if isinstance(planner_outcome, dict) and planner_outcome.get("cancelled"):
+    return {
+      "cancelled": True,
+      "force_rest": bool(planner_outcome.get("force_rest")),
+      "reason": str(planner_outcome.get("reason") or ""),
+    }
+  if bool(_action_value(action, "_consecutive_warning_cancelled")):
+    return {
+      "cancelled": True,
+      "force_rest": bool(_action_value(action, "_consecutive_warning_force_rest")),
+      "reason": str(_action_value(action, "_consecutive_warning_cancel_reason") or ""),
+    }
+  return {}
+
+
+def _consecutive_warning_force_rest(action):
+  return bool((_consecutive_warning_outcome(action) or {}).get("force_rest"))
+
+
+def _consecutive_warning_cancel_reason(action):
+  return str((_consecutive_warning_outcome(action) or {}).get("reason") or "")
+
+
 def _clear_optional_race_action_fields(action):
   _clear_legacy_optional_race_action_fields(action)
 
@@ -1189,6 +1277,7 @@ def _activate_trackblazer_planner_turn(state_obj, action):
       source="planner_mode_disabled",
     )
     return {"status": "disabled"}
+  action_snapshot = _snapshot_action_payload_for_restore(action)
   try:
     clear_planner_fallback(state_obj)
     set_trackblazer_runtime_path(
@@ -1205,6 +1294,7 @@ def _activate_trackblazer_planner_turn(state_obj, action):
   except Exception as exc:
     reason = f"planner_race_cutover_failed: {exc}"
     warning(f"[TB_PLANNER] {reason}")
+    _restore_action_payload_from_snapshot(action, action_snapshot)
     mark_planner_fallback(state_obj, reason)
     set_trackblazer_runtime_path(
       state_obj,
@@ -1212,14 +1302,36 @@ def _activate_trackblazer_planner_turn(state_obj, action):
       reason=reason,
       source="planner_turn_activation",
     )
-    try:
-      set_turn_plan_decision_path(state_obj, action, "planner→legacy (fallback)", reason=reason)
-    except Exception:
-      pass
     return {
       "status": "fallback",
       "reason": reason,
     }
+
+
+def _handoff_planner_runtime_fallback_to_legacy_same_turn(state_obj, action, planner_runtime_result):
+  planner_reason = (planner_runtime_result or {}).get("reason") or "planner_runtime_failed"
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="recovering",
+    status="warning",
+    message="Planner runtime failed after activation; handing off to legacy execution in the same turn.",
+    sub_phase="evaluate_trackblazer_race",
+    reasoning_notes=planner_reason,
+  )
+  _push_turn_retry_debug(
+    state_obj,
+    reason="Planner runtime fell back before execution; handing off to legacy execution in the same turn.",
+    reasons=[planner_reason],
+    before_phase="evaluating_strategy",
+    context="planner_runtime_fallback",
+    event="turn_retry",
+    result="planner_runtime_same_turn_legacy_handoff",
+    same_turn_retry=True,
+    sub_phase="evaluate_trackblazer_race",
+    phase="evaluating_strategy",
+  )
+  return planner_reason
 
 
 def _operator_race_gate_for_state(state_obj):
@@ -1245,7 +1357,7 @@ def _operator_race_gate_message(gate, context="racing"):
 
 
 def _revert_optional_race_to_fallback(action):
-  fallback_payload = _capture_legacy_rival_fallback_payload(action)
+  fallback_payload = _effective_rival_fallback_payload(action)
   if fallback_payload.get("func") in ("", None, "do_race"):
     return False
   return _apply_legacy_rival_fallback_payload(action, fallback_payload)
@@ -1254,7 +1366,7 @@ def _revert_optional_race_to_fallback(action):
 def _should_retry_training_after_consecutive_warning(action):
   if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
     return False
-  if _action_value(action, "_consecutive_warning_cancel_reason") != "optional_rival_promoted_from_rest":
+  if _consecutive_warning_cancel_reason(action) != "optional_rival_promoted_from_rest":
     return False
   item_context = _trackblazer_item_use_context(action)
   if not isinstance(item_context, dict) or not item_context.get("energy_rescue"):
@@ -1266,7 +1378,7 @@ def _prepare_training_fallback_after_consecutive_warning(action):
   if not _legacy_has_training_fallback(action):
     return False
 
-  fallback_payload = _capture_legacy_rival_fallback_payload(action)
+  fallback_payload = _effective_rival_fallback_payload(action)
   training_name = fallback_payload.get("training_name")
   training_data = fallback_payload.get("training_data")
 
@@ -1398,7 +1510,7 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     {},
   )
   if not scout_fallback:
-    scout_fallback = _capture_legacy_rival_fallback_payload(action)
+    scout_fallback = _effective_rival_fallback_payload(action)
   if _apply_legacy_rival_fallback_payload(action, scout_fallback):
     update_operator_snapshot(
       state_obj,
@@ -1411,6 +1523,44 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     )
     return None
   return "failed"
+
+
+def _resolve_consecutive_race_warning_for_executor(
+  state_obj,
+  action,
+  *,
+  turn_plan=None,
+  sub_phase=None,
+  ocr_debug=None,
+  planned_clicks=None,
+):
+  if not _trackblazer_planner_mode_enabled() or _action_func(action) != "do_race":
+    return {"status": "completed", "reason": "warning_policy_not_applicable"}
+  warning_plan = dict(getattr(turn_plan, "warning_plan", {}) or {})
+  if not warning_plan:
+    warning_plan = dict(_action_value(action, "planner_race_warning_policy") or {})
+  if not warning_plan:
+    return {"status": "completed", "reason": "warning_policy_missing"}
+
+  warning_plan["planner_owned"] = True
+  action["planner_race_warning_policy"] = copy.deepcopy(warning_plan)
+  action["planner_warning_outcome"] = {
+    "cancelled": False,
+    "force_rest": bool(warning_plan.get("force_rest_on_cancel")),
+    "reason": "",
+    "resolved": False,
+    "policy_source": "executor_step",
+  }
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message="Planner warning policy is armed for race entry.",
+    sub_phase=sub_phase or SUB_PHASE_RESOLVE_CONSECUTIVE_RACE_WARNING,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  return {"status": "completed", "reason": "warning_policy_prepared"}
 
 
 def _strategy_decision_note(state_obj, action):
@@ -1771,43 +1921,12 @@ def _build_skill_purchase_scan_hints(scan_result):
   return hints
 
 
-def _trackblazer_items_require_reassess(items):
-  for entry in (items or []):
-    if not isinstance(entry, dict):
-      continue
-    if entry.get("key") == "reset_whistle":
-      return True
-    if entry.get("usage_group") == "energy":
-      return True
-  return False
-
-
 def _trackblazer_training_score(action):
   return get_trackblazer_training_score(action)
 
 
 def _trackblazer_training_score_threshold():
   return get_training_behavior_strong_training_score_threshold()
-
-
-def _order_trackblazer_pre_action_items(items):
-  ordered_items = list(items or [])
-  if not ordered_items:
-    return []
-
-  kale_indexes = [index for index, entry in enumerate(ordered_items) if entry.get("key") == "royal_kale_juice"]
-  mood_indexes = [index for index, entry in enumerate(ordered_items) if entry.get("usage_group") == "mood"]
-  if not kale_indexes or not mood_indexes:
-    return ordered_items
-
-  kale_index = kale_indexes[0]
-  first_mood_index = mood_indexes[0]
-  if kale_index < first_mood_index:
-    return ordered_items
-
-  kale_entry = ordered_items.pop(kale_index)
-  ordered_items.insert(first_mood_index, kale_entry)
-  return ordered_items
 
 
 def _planned_clicks_for_action(action):
@@ -2045,7 +2164,7 @@ def _build_trackblazer_planned_actions(state_obj, action, planner_state=None):
   turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
   if turn_plan_snapshot:
     return TurnPlan.from_snapshot(turn_plan_snapshot).to_planned_actions()
-  return build_review_planned_actions(state_obj, action, planner_state=planner_state)
+  return {}
 
 
 def _attach_trackblazer_pre_action_item_plan(state_obj, action):
@@ -2053,8 +2172,19 @@ def _attach_trackblazer_pre_action_item_plan(state_obj, action):
     return action
   if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
     return action
-
-  return _hydrate_legacy_action_from_turn_plan(state_obj, action, limit=8)
+  action_snapshot = _snapshot_action_payload_for_restore(action)
+  try:
+    return _hydrate_legacy_action_from_turn_plan(state_obj, action, limit=8)
+  except Exception as exc:
+    reason = f"planner_hydration_failed: {exc}"
+    warning(f"[TB_PLANNER] {reason}")
+    _restore_action_payload_from_snapshot(action, action_snapshot)
+    if isinstance(state_obj, dict):
+      state_obj["_trackblazer_planner_hydration_failure"] = {
+        "reason": reason,
+        "turn_key": f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}",
+      }
+    return action
 
 
 def _skill_purchase_preview_key(current_action_count, context):
@@ -3752,7 +3882,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     if planned_clicks is not None else
     (
       planner_turn_plan.to_planned_clicks()
-      if planner_turn_plan is not None and planner_turn_plan.decision_path == "planner" else
+      if planner_turn_plan is not None else
       _planned_clicks_for_action(action)
     )
   )
@@ -4335,6 +4465,7 @@ def _trackblazer_planner_executor_hooks():
     wait_for_lobby_after_item_use=_wait_for_lobby_after_item_use,
     enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
     run_planner_race_preflight=_run_planner_race_preflight,
+    resolve_consecutive_race_warning=_resolve_consecutive_race_warning_for_executor,
     resolve_post_action_resolution=_resolve_post_action_resolution,
     trackblazer_action_failure_should_block_retry=_trackblazer_action_failure_should_block_retry,
     update_operator_snapshot=update_operator_snapshot,
@@ -4947,7 +5078,7 @@ def career_lobby(dry_run_turn=False):
             "context": "lobby_scan_trackblazer",
           })
 
-      if state_obj.get("trackblazer_climax_race_day"):
+      if state_obj.get("trackblazer_climax_race_day") and not _trackblazer_planner_mode_enabled():
         forced_reason = "Forced Climax race-day indicator detected on lobby screen"
         info("[TB_RACE] Taking early forced-race branch before training scan.")
         _push_flow_decision_debug(
@@ -5368,9 +5499,9 @@ def career_lobby(dry_run_turn=False):
         elif not race_decision.get("should_race") and action.func == "do_race" and not action.get("scheduled_race") and not action.get("is_race_day"):
           # Strategy wanted to race (e.g. rival fallback from evaluate_training_alternatives)
           # but the Trackblazer gate says train. Revert if fallback data is available.
-          fallback_func = action.get("_rival_fallback_func")
+          fallback_func = _effective_rival_fallback_func(action)
           if fallback_func:
-            fallback_payload = _capture_legacy_rival_fallback_payload(action)
+            fallback_payload = _effective_rival_fallback_payload(action)
             if _apply_legacy_rival_fallback_payload(action, fallback_payload):
               info(f"[TB_RACE] Race gate vetoed race, reverted to {fallback_func}: {race_decision['reason']}")
           update_operator_snapshot(
@@ -5518,28 +5649,12 @@ def career_lobby(dry_run_turn=False):
           if planner_runtime_status in {"previewed", "reassess", "blocked", "failed"}:
             continue
           if planner_runtime_status == "fallback_to_legacy":
-            planner_reason = planner_runtime_result.get("reason") or "planner_runtime_failed"
-            update_operator_snapshot(
+            planner_reason = _handoff_planner_runtime_fallback_to_legacy_same_turn(
               state_obj,
               action,
-              phase="recovering",
-              status="error",
-              message="Planner runtime failed after activation; recollecting the turn before retrying.",
-              sub_phase="evaluate_trackblazer_race",
-              reasoning_notes=planner_reason,
+              planner_runtime_result,
             )
-            _push_turn_retry_debug(
-              state_obj,
-              reason="Planner runtime fell back before execution; recollecting the turn instead of reusing planner-mutated state.",
-              reasons=[planner_reason],
-              before_phase="evaluating_strategy",
-              context="planner_runtime_fallback",
-              event="turn_retry",
-              result="planner_runtime_recollect",
-              sub_phase="evaluate_trackblazer_race",
-              phase="evaluating_strategy",
-            )
-            continue
+            planner_activation = {"status": "fallback", "reason": planner_reason}
 
         # Build a pre_run_hook that scouts the rival race list when the
         # user commits a rival-race action.  The scout opens the race list,
@@ -5565,7 +5680,7 @@ def career_lobby(dry_run_turn=False):
             scout_result = scout_rival_race()
             action["rival_scout"] = scout_result
             if not scout_result.get("rival_found"):
-              fallback_payload = _capture_legacy_rival_fallback_payload(action)
+              fallback_payload = _effective_rival_fallback_payload(action)
               fallback_func = fallback_payload.get("func") or "do_training"
               info(f"[RIVAL] No rival race found, reverting to {fallback_func}.")
               if _apply_legacy_rival_fallback_payload(action, fallback_payload):
@@ -5619,7 +5734,7 @@ def career_lobby(dry_run_turn=False):
                 "but no valid training fallback was available."
               )
           consecutive_warning_force_rest = (
-            bool(action.get("_consecutive_warning_force_rest"))
+            _consecutive_warning_force_rest(action)
             and not consecutive_warning_retry_training
           )
           if consecutive_warning_force_rest:
@@ -5627,7 +5742,7 @@ def career_lobby(dry_run_turn=False):
               "[FALLBACK] Consecutive-race warning blocked optional weak-training race. "
               "Prioritizing rest fallback."
             )
-            _set_legacy_rival_fallback_action(action, func="do_rest")
+            _set_rest_fallback_action(action)
             if "do_rest" in action.available_actions:
               action.available_actions = (
                 ["do_rest"] + [name for name in action.available_actions if name != "do_rest"]
@@ -5658,7 +5773,7 @@ def career_lobby(dry_run_turn=False):
             has_selected_race = False
           allow_rest_fallback_for_optional_rival = bool(
             action.get("prefer_rival_race")
-            and action.get("_rival_fallback_func") == "do_rest"
+            and _effective_rival_fallback_func(action) == "do_rest"
             and not action.get("scheduled_race")
             and not action.get("trackblazer_lobby_scheduled_race")
             and not action.get("is_race_day")

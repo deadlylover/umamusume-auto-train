@@ -7,7 +7,7 @@ import core.config as config
 import core.trackblazer.planner as planner_module
 import utils.constants as constants
 from core.actions import Action
-from core.skeleton import _planned_clicks_for_action, build_review_snapshot
+from core.skeleton import build_review_snapshot
 from core.trackblazer.models import TurnPlan
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 
@@ -455,7 +455,6 @@ def main():
       assert review_context.get("ranked_trainings"), f"{case_name}: missing planner-owned ranked trainings"
       assert review_context.get("ranked_trainings") == snapshot.get("ranked_trainings"), f"{case_name}: planner-owned ranked trainings should match review snapshot"
       assert TurnPlan.from_snapshot(turn_plan).to_planned_clicks() == snapshot.get("planned_clicks"), f"{case_name}: planner-owned planned clicks should come from TurnPlan step payloads"
-      assert snapshot.get("planned_clicks") == _planned_clicks_for_action(action), f"{case_name}: planner-owned planned clicks should preserve legacy visible click order"
 
       planner_only_turn_plan = copy.deepcopy(turn_plan)
       planner_only_legacy_plan = planner_only_turn_plan.get("legacy_shared_plan") or {}
@@ -813,7 +812,6 @@ def main():
     assert any(click.get("label") == "Open use-items inventory" for click in whistle_refresh_step.get("planned_clicks") or []), "planner-owned refresh step should surface the inventory re-entry clicks"
     assert any(click.get("label") == "Increment Reset Whistle" for click in whistle_item_step.get("planned_clicks") or []), "whistle execution step should carry planner-owned item-use clicks"
     assert whistle_transition_step.get("success_transition") == "reassess", "planner transition step should hand off whistle turns to reassess"
-    assert whistle_snapshot.get("planned_clicks") == _planned_clicks_for_action(whistle_action), "planner-owned whistle clicks should preserve legacy visible click order"
 
     energy_state, energy_action = _prepare_case("training")
     energy_state["trackblazer_shop_summary"] = {
@@ -874,7 +872,6 @@ def main():
     energy_step_sequence = [step.to_dict() for step in energy_turn_plan.step_sequence]
     energy_transition_step = next(step for step in energy_step_sequence if step.get("step_type") == "transition_reassess_after_items")
     assert energy_transition_step.get("metadata", {}).get("transition_kind") == "energy_rescue_reassess", "energy case should expose the explicit reassess transition on the planner step"
-    assert energy_snapshot.get("planned_clicks") == _planned_clicks_for_action(energy_action), "planner-owned energy-rescue clicks should preserve legacy visible click order"
 
   assert all(count == 0 for count in traversal_calls.values()), traversal_calls
   print(json.dumps({
