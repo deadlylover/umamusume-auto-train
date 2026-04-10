@@ -8,6 +8,7 @@ import utils.constants as constants
 from core.actions import Action
 from core.skeleton import _activate_trackblazer_planner_turn, build_review_snapshot
 from core.trackblazer.executor import PlannerExecutorHooks
+from core.trackblazer.planner import plan_once
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 
 
@@ -154,6 +155,7 @@ def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
   bot.set_trackblazer_use_new_planner_enabled(True)
+  original_policy = copy.deepcopy(getattr(config, "TRACKBLAZER_PLANNER_POLICY", {}) or {})
 
   try:
     pre_debut_state = _base_state()
@@ -287,10 +289,15 @@ def main():
       activation = _activate_trackblazer_planner_turn(scheduled_state, scheduled_action)
       assert activation.get("status") == "planner"
       scheduled_snapshot = _snapshot(scheduled_state, scheduled_action, "scheduled_race")
+    scheduled_plan = (scheduled_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
     scheduled_warning = (scheduled_snapshot.get("planned_actions") or {}).get("race_warning_policy") or {}
     assert (scheduled_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "scheduled_race"
     assert scheduled_warning.get("accept_warning") is True
     assert scheduled_warning.get("force_accept_warning") is True
+    assert not any(
+      entry.get("trigger") == "consecutive_warning_cancel"
+      for entry in ((scheduled_plan.get("fallback_policy") or {}).get("chain") or [])
+    )
 
     rival_state = _base_state()
     rival_state["rival_indicator_detected"] = True
@@ -316,7 +323,18 @@ def main():
     assert (rival_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "optional_rival_race"
     assert ((rival_plan.get("race_plan") or {}).get("race_scout") or {}).get("required") is True
     fallback_chain = ((rival_plan.get("fallback_policy") or {}).get("chain") or [])
-    assert any(entry.get("trigger") == "rival_scout_failed" for entry in fallback_chain)
+    ranked_non_race = [
+      entry
+      for entry in (rival_plan.get("candidate_ranking") or [])
+      if (
+        not str(entry.get("node_id") or "").startswith("race:")
+        and not str(entry.get("node_id") or "").startswith("compat:")
+      )
+    ]
+    scout_fallback = next((entry for entry in fallback_chain if entry.get("trigger") == "rival_scout_failed"), None)
+    assert scout_fallback is not None
+    assert scout_fallback.get("planner_ranked") is True
+    assert scout_fallback.get("source_node_id") == (ranked_non_race[0] or {}).get("node_id")
 
     fallback_race_state = _base_state()
     fallback_race_state["criteria"] = "Achieved"
@@ -338,9 +356,22 @@ def main():
       assert activation.get("status") == "planner"
       fallback_race_snapshot = _snapshot(fallback_race_state, fallback_race_action, "optional_fallback_race")
     fallback_warning = (fallback_race_snapshot.get("planned_actions") or {}).get("race_warning_policy") or {}
+    fallback_plan = (fallback_race_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
     assert (fallback_race_snapshot.get("planned_actions") or {}).get("race_check", {}).get("branch_kind") == "optional_fallback_race"
     assert fallback_warning.get("accept_warning") is False
     assert fallback_warning.get("cancel_target_label") == "rest"
+    assert fallback_warning.get("cancel_target_node_id") == "rest"
+    warning_cancel = next(
+      (
+        entry
+        for entry in ((fallback_plan.get("fallback_policy") or {}).get("chain") or [])
+        if entry.get("trigger") == "consecutive_warning_cancel"
+      ),
+      None,
+    )
+    assert warning_cancel is not None
+    assert warning_cancel.get("planner_ranked") is True
+    assert warning_cancel.get("source_node_id") == "rest"
 
     rest_rival_state = _base_state()
     rest_rival_state["rival_indicator_detected"] = True
@@ -380,8 +411,24 @@ def main():
     assert "Path: planner_fallback_legacy" in fallback_label_snapshot.get("turn_discussion_text", "")
     assert fallback_label_snapshot.get("trackblazer_runtime_path") == "planner_fallback_legacy"
 
+    bounded_state = _base_state()
+    bounded_state["current_mood"] = "BAD"
+    bounded_state["status_effect_names"] = ["Headache"]
+    bounded_action = _training_action()
+    config.TRACKBLAZER_PLANNER_POLICY = {
+      **original_policy,
+      "max_fallback_depth": 1,
+    }
+    bounded_plan_snapshot = plan_once(bounded_state, bounded_action).get("turn_plan") or {}
+    bounded_fallback = bounded_plan_snapshot.get("fallback_policy") or {}
+    assert bounded_fallback.get("max_fallback_depth") == 1
+    assert len(bounded_fallback.get("chain") or []) == 1
+    assert bounded_fallback.get("replan_required") is True
+    assert ((bounded_fallback.get("chain") or [])[0] or {}).get("planner_ranked") is True
+
     print("trackblazer planner milestone 5 checks: ok")
   finally:
+    config.TRACKBLAZER_PLANNER_POLICY = original_policy
     bot.set_trackblazer_use_new_planner_enabled(False)
 
 

@@ -930,7 +930,9 @@ def _planner_selected_action_payload(
 def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_check=False):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   base_action = _capture_action_payload(action, state_obj=state_obj)
-  base_fallback = _capture_effective_rival_fallback_payload(action)
+  # Transitional race-node probes should not pull planner intent from legacy
+  # fallback payloads; ranked selection rebuilds planner-owned fallback state.
+  base_fallback = {}
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
@@ -1408,6 +1410,309 @@ def _safe_float(value, default=0.0):
     return default
 
 
+def _ranked_non_race_candidates(ranked_native, exclude_node_id=None) -> List[Dict[str, Any]]:
+  """Return ranked planner-native non-race candidates with viable scores."""
+  result = []
+  exclude = str(exclude_node_id or "")
+  for entry in list(ranked_native or []):
+    if not isinstance(entry, dict):
+      continue
+    node_id = str(entry.get("node_id") or "")
+    if not node_id or node_id.startswith("race:"):
+      continue
+    if exclude and node_id == exclude:
+      continue
+    score = _safe_float(entry.get("priority_score"), float("-inf"))
+    if score == float("-inf"):
+      continue
+    result.append(entry)
+  return result
+
+
+def _candidate_to_fallback_payload(candidate, state_obj=None, action=None) -> Dict[str, Any]:
+  """Materialize an action payload for a non-race ranked candidate."""
+  candidate = candidate if isinstance(candidate, dict) else {}
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  node_id = str(candidate.get("node_id") or "")
+  if node_id.startswith("train:"):
+    training_name = _candidate_training_name(node_id)
+    training_data = copy.deepcopy(
+      (state_obj.get("training_results") or {}).get(training_name) or {}
+    )
+    if not training_data and hasattr(action, "get"):
+      training_data = copy.deepcopy(
+        (action.get("available_trainings") or {}).get(training_name) or {}
+      )
+    return {
+      "func": "do_training",
+      "training_name": training_name,
+      "training_data": training_data,
+    }
+  if node_id == "rest":
+    return {"func": "do_rest"}
+  if node_id == "recreation":
+    return {"func": "do_recreation"}
+  if node_id == "infirmary":
+    return {"func": "do_infirmary"}
+  return {}
+
+
+def _planner_owned_primary_fallback_payload(
+  selected_node_id,
+  ranked_native,
+  state_obj=None,
+  action=None,
+) -> Dict[str, Any]:
+  """Return the top-ranked non-race fallback payload for the selected node."""
+  non_race = _ranked_non_race_candidates(ranked_native, exclude_node_id=selected_node_id)
+  top_non_race = non_race[0] if non_race else {}
+  if not top_non_race:
+    return {}
+  return _candidate_to_fallback_payload(top_non_race, state_obj=state_obj, action=action)
+
+
+def _planner_owned_warning_policy_for_node(
+  branch_kind,
+  selected_node_id,
+  ranked_native,
+  state_obj=None,
+  action=None,
+) -> Dict[str, Any]:
+  """Build warning policy for the selected race node from ranked planner candidates.
+
+  Cancel targets are sourced from the highest-scoring viable non-race candidate at
+  rank time. The legacy `_rival_fallback_*` payload is no longer consulted.
+  """
+  selected_node_id = str(selected_node_id or "")
+  branch_kind = str(branch_kind or "")
+  non_race = _ranked_non_race_candidates(ranked_native, exclude_node_id=selected_node_id)
+  top_non_race = non_race[0] if non_race else {}
+  top_payload = _candidate_to_fallback_payload(top_non_race, state_obj=state_obj, action=action) if top_non_race else {}
+  top_label = _fallback_target_label(top_payload) if top_payload else ""
+  top_func = top_payload.get("func") if top_payload else None
+  top_node_id = top_non_race.get("node_id") if top_non_race else None
+
+  rest_candidate = next((entry for entry in non_race if str(entry.get("node_id") or "") == "rest"), None)
+  rest_present = bool(rest_candidate)
+
+  if branch_kind in {"forced_race_day", "forced_climax_race", "pre_debut_debut_race"}:
+    return {
+      "planner_owned": True,
+      "warning_expected": False,
+      "accept_warning": True,
+      "accept_reason": "Forced race branch bypasses the optional consecutive-race policy.",
+      "cancel_target": top_func,
+      "cancel_target_label": top_label,
+      "cancel_target_node_id": top_node_id,
+      "force_rest_on_cancel": False,
+    }
+
+  if (
+    selected_node_id == "race:race_day"
+    or selected_node_id.startswith("race:g1_today:")
+    or branch_kind in {"forced_race_day", "scheduled_race", "lobby_scheduled_race"}
+  ):
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": True,
+      "accept_reason": (
+        "Forced/required race branch keeps continuing through the consecutive-race warning."
+        if (
+          branch_kind == "forced_race_day"
+          or selected_node_id == "race:race_day"
+          or selected_node_id.startswith("race:g1_today:")
+        ) else
+        "Scheduled race branch forces continue through the consecutive-race warning."
+      ),
+      "cancel_target": top_func,
+      "cancel_target_label": top_label,
+      "cancel_target_node_id": top_node_id,
+      "force_rest_on_cancel": False,
+      "force_accept_warning": True,
+    }
+
+  if branch_kind == "optional_fallback_race":
+    # Weak-training fallback race: when blocked by the consecutive-race warning
+    # the planner prefers rest over the weak training that triggered the
+    # fallback in the first place. We still source rest from the ranked list.
+    cancel_candidate = rest_candidate or top_non_race
+    cancel_payload = _candidate_to_fallback_payload(cancel_candidate, state_obj=state_obj, action=action) if cancel_candidate else {"func": "do_rest"}
+    if not cancel_payload:
+      cancel_payload = {"func": "do_rest"}
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": False,
+      "cancel_reason": "Weak-training fallback race is not worth a third consecutive race.",
+      "cancel_target": cancel_payload.get("func") or "do_rest",
+      "cancel_target_label": _fallback_target_label(cancel_payload) or "rest",
+      "cancel_target_node_id": (cancel_candidate.get("node_id") if cancel_candidate else None) or "rest",
+      "force_rest_on_cancel": True,
+      "cancel_reason_key": "optional_fallback_non_rival_race",
+    }
+
+  if branch_kind == "optional_rival_race":
+    # The promoted-from-rest case is detected by checking whether the highest
+    # ranked non-race candidate is rest itself. The planner ranking captures
+    # exactly this signal without needing to consult the legacy action.func.
+    is_rest_promoted = bool(top_non_race and str(top_non_race.get("node_id") or "") == "rest")
+    if is_rest_promoted:
+      return {
+        "planner_owned": True,
+        "warning_expected": True,
+        "accept_warning": False,
+        "cancel_reason": "Optional rival race promoted from rest should preserve the rest fallback when blocked.",
+        "cancel_target": "do_rest",
+        "cancel_target_label": "rest",
+        "cancel_target_node_id": "rest",
+        "force_rest_on_cancel": True,
+        "cancel_reason_key": "optional_rival_promoted_from_rest",
+      }
+    accept_warning = not bool(getattr(config, "CANCEL_CONSECUTIVE_RACE", False))
+    if accept_warning:
+      return {
+        "planner_owned": True,
+        "warning_expected": True,
+        "accept_warning": True,
+        "accept_reason": "Config allows optional rival races through the consecutive-race warning.",
+        "cancel_reason": "",
+        "cancel_target": top_func,
+        "cancel_target_label": top_label,
+        "cancel_target_node_id": top_node_id,
+        "force_rest_on_cancel": False,
+        "cancel_reason_key": "",
+      }
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": False,
+      "accept_reason": "",
+      "cancel_reason": "Config cancels optional rival races at the consecutive-race warning.",
+      "cancel_target": "do_rest",
+      "cancel_target_label": "rest" if rest_present else (top_label or "rest"),
+      "cancel_target_node_id": "rest" if rest_present else top_node_id,
+      "force_rest_on_cancel": True,
+      "cancel_reason_key": "cancel_consecutive_race_setting",
+    }
+
+  if branch_kind in {"goal_race", "mission_race"}:
+    return {
+      "planner_owned": True,
+      "warning_expected": True,
+      "accept_warning": True,
+      "accept_reason": "Forced/required race branch keeps continuing through the consecutive-race warning.",
+      "cancel_target": top_func,
+      "cancel_target_label": top_label,
+      "cancel_target_node_id": top_node_id,
+      "force_rest_on_cancel": False,
+    }
+
+  return {
+    "planner_owned": True,
+    "warning_expected": True,
+    "accept_warning": not bool(getattr(config, "CANCEL_CONSECUTIVE_RACE", False)),
+    "accept_reason": "Race branch keeps the current consecutive-race policy.",
+    "cancel_target": top_func,
+    "cancel_target_label": top_label,
+    "cancel_target_node_id": top_node_id,
+    "force_rest_on_cancel": False,
+  }
+
+
+def _planner_owned_fallback_chain_from_ranked(
+  selected_node_id,
+  branch_kind,
+  ranked_native,
+  warning_policy,
+  policy,
+  state_obj=None,
+  action=None,
+) -> Dict[str, Any]:
+  """Build a planner-owned fallback chain bounded by `policy.max_fallback_depth`.
+
+  Chain entries are sourced from the ranked planner-native candidate list and
+  filtered for feasibility per failure mode. When more entries would be needed
+  than the bound allows, the chain is truncated and `replan_required` is set.
+  """
+  selected_node_id = str(selected_node_id or "")
+  branch_kind = str(branch_kind or "")
+  warning_policy = warning_policy if isinstance(warning_policy, dict) else {}
+  policy_dict = policy if isinstance(policy, dict) else {}
+  try:
+    max_depth = int(policy_dict.get("max_fallback_depth") or 3)
+  except (TypeError, ValueError):
+    max_depth = 3
+  if max_depth < 0:
+    max_depth = 0
+
+  non_race = _ranked_non_race_candidates(ranked_native, exclude_node_id=selected_node_id)
+
+  def _entry_from_candidate(trigger, candidate):
+    payload = _candidate_to_fallback_payload(candidate, state_obj=state_obj, action=action) if candidate else {}
+    return {
+      "trigger": trigger,
+      "target_func": payload.get("func"),
+      "target_payload": payload,
+      "target_label": _fallback_target_label(payload),
+      "source_node_id": candidate.get("node_id") if isinstance(candidate, dict) else None,
+      "planner_ranked": True,
+    }
+
+  def _entry_from_warning_policy(trigger):
+    cancel_node_id = warning_policy.get("cancel_target_node_id")
+    candidate = None
+    if cancel_node_id:
+      candidate = next(
+        (entry for entry in non_race if str(entry.get("node_id") or "") == str(cancel_node_id)),
+        None,
+      )
+    if candidate:
+      return _entry_from_candidate(trigger, candidate)
+    cancel_func = warning_policy.get("cancel_target") or "do_rest"
+    payload = {"func": cancel_func}
+    return {
+      "trigger": trigger,
+      "target_func": cancel_func,
+      "target_payload": payload,
+      "target_label": warning_policy.get("cancel_target_label") or _fallback_target_label(payload),
+      "source_node_id": cancel_node_id,
+      "planner_ranked": False,
+    }
+
+  raw_chain: List[Dict[str, Any]] = []
+
+  if not selected_node_id or not selected_node_id.startswith("race:"):
+    for candidate in non_race:
+      raw_chain.append(_entry_from_candidate("retry_next", candidate))
+  else:
+    if selected_node_id == "race:rival":
+      if non_race:
+        raw_chain.append(_entry_from_candidate("rival_scout_failed", non_race[0]))
+        raw_chain.append(_entry_from_candidate("race_gate_blocked", non_race[0]))
+    elif selected_node_id == "race:fallback":
+      if non_race:
+        raw_chain.append(_entry_from_candidate("race_gate_blocked", non_race[0]))
+    elif branch_kind in {"goal_race", "mission_race"}:
+      if non_race:
+        raw_chain.append(_entry_from_candidate("race_gate_blocked", non_race[0]))
+    # Forced races (race:race_day / race:climax_locked / race:scheduled:* /
+    # race:goal:* / race:g1_today:* / race:mission) have no inline fallback —
+    # they require a full replan rather than chaining to a non-race candidate.
+
+    if warning_policy.get("warning_expected") and not warning_policy.get("accept_warning"):
+      raw_chain.append(_entry_from_warning_policy("consecutive_warning_cancel"))
+
+  bounded = raw_chain[:max_depth] if max_depth > 0 else []
+  replan_required = len(raw_chain) > max_depth
+  return {
+    "planner_owned": True,
+    "max_fallback_depth": max_depth,
+    "chain": bounded,
+    "replan_required": replan_required,
+  }
+
+
 def _transitional_planner_native_candidates_from_race_plan(planner_race_plan) -> List[Dict[str, Any]]:
   planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
   branch_kind = str(planner_race_plan.get("branch_kind") or "")
@@ -1821,18 +2126,14 @@ def _candidate_branch_kind(node_id: str, selected_func: str) -> str:
   return "non_race"
 
 
-def _selected_payload_from_candidate(selected_candidate, state_obj, action, planner_race_plan):
+def _selected_payload_from_candidate(selected_candidate, state_obj, action, planner_race_plan, ranked_native_candidates):
   selected_candidate = selected_candidate if isinstance(selected_candidate, dict) else {}
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
+  ranked_native_candidates = list(ranked_native_candidates or [])
   selected_action = dict(planner_race_plan.get("selected_action") or {})
   race_decision = dict(selected_action.get("trackblazer_race_decision") or planner_race_plan.get("race_decision") or {})
   race_lookahead = copy.deepcopy(selected_action.get("trackblazer_race_lookahead") or {})
-  fallback_action = copy.deepcopy(
-    ((planner_race_plan.get("action_payload") or {}).get("fallback_action"))
-    or _capture_effective_rival_fallback_payload(action)
-    or {}
-  )
   node_id = str(selected_candidate.get("node_id") or "")
   item_key = _candidate_item_key(node_id)
   selected_score = _safe_float(selected_candidate.get("priority_score"), float("-inf"))
@@ -1910,12 +2211,22 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
     "branch_kind": branch_kind,
   }
 
-  warning_plan = dict(planner_race_plan.get("warning_plan") or {})
+  fallback_action = {}
+  warning_plan = {}
   if selected_func == "do_race":
-    if str(planner_race_plan.get("branch_kind") or "") != branch_kind or not warning_plan:
-      warning_plan = _warning_policy_for_race_branch(branch_kind, fallback_action)
-  else:
-    warning_plan = {}
+    fallback_action = _planner_owned_primary_fallback_payload(
+      node_id,
+      ranked_native_candidates,
+      state_obj=state_obj,
+      action=action,
+    )
+    warning_plan = _planner_owned_warning_policy_for_node(
+      branch_kind,
+      node_id,
+      ranked_native_candidates,
+      state_obj=state_obj,
+      action=action,
+    )
 
   selected_payload = _planner_selected_action_payload(
     action,
@@ -1942,7 +2253,15 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
   return selected_payload, branch_kind, warning_plan, fallback_action
 
 
-def _apply_ranked_selection_to_race_plan(state_obj, action, planner_race_plan, selected_candidate, selection_rationale):
+def _apply_ranked_selection_to_race_plan(
+  state_obj,
+  action,
+  planner_race_plan,
+  selected_candidate,
+  selection_rationale,
+  ranked_native_candidates,
+  policy,
+):
   planner_race_plan = copy.deepcopy(planner_race_plan if isinstance(planner_race_plan, dict) else {})
   selected_candidate = selected_candidate if isinstance(selected_candidate, dict) else {}
   if not selected_candidate:
@@ -1953,11 +2272,18 @@ def _apply_ranked_selection_to_race_plan(state_obj, action, planner_race_plan, s
     state_obj,
     action,
     planner_race_plan,
+    ranked_native_candidates,
   )
-  if selected_payload.get("func") == "do_race":
-    fallback_policy = _fallback_chain(branch_kind, fallback_action, warning_plan)
-  else:
-    fallback_policy = {"planner_owned": True, "chain": []}
+  fallback_policy = _planner_owned_fallback_chain_from_ranked(
+    str(selected_candidate.get("node_id") or ""),
+    branch_kind,
+    ranked_native_candidates,
+    warning_plan,
+    policy,
+    state_obj=state_obj,
+    action=action,
+  )
+  if selected_payload.get("func") != "do_race":
     warning_plan = {}
 
   action_payload = {
@@ -3247,6 +3573,8 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     planner_race_plan,
     selected_candidate,
     selection_rationale,
+    ranked_native_candidates,
+    policy,
   )
   ranked_trainings = build_ranked_training_snapshot(
     state_obj=state_obj,
