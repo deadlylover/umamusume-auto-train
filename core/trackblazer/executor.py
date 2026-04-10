@@ -25,6 +25,7 @@ class PlannerExecutorHooks:
   wait_for_lobby_after_shop_purchase: Callable[[], bool]
   refresh_trackblazer_pre_action_inventory: Callable[[Dict[str, Any], Any], Dict[str, Any]]
   execute_trackblazer_pre_action_items: Callable[[Dict[str, Any], Any, str], Dict[str, Any]]
+  recheck_selected_training_after_item_use: Callable[..., Dict[str, Any]]
   wait_for_lobby_after_item_use: Callable[..., bool]
   enforce_operator_race_gate_before_execute: Callable[..., Optional[str]]
   run_planner_race_preflight: Callable[..., Optional[str]]
@@ -85,6 +86,8 @@ def run_planner_action_with_review(
   planned_clicks=None,
 ):
   skill_plan = hooks.skill_purchase_plan(action)
+  execution_payload = turn_plan.to_execution_payload()
+  item_execution_payload = dict(execution_payload.get("item_execution") or {})
   reasoning_notes = _review_reasoning_notes(skill_plan)
   committed = False
 
@@ -402,28 +405,102 @@ def run_planner_action_with_review(
     _transition(state_obj, "await_lobby_after_items", "await_lobby_after_items", "completed", "lobby_restored")
 
   if _step_present(turn_plan, "transition_after_pre_action_items") and item_execute_result.get("status") == "reassess":
-    hooks.update_operator_snapshot(
-      state_obj,
-      action,
-      phase="collecting_main_state",
-      message="Trackblazer items applied. Rechecking turn state before committing an action.",
-      sub_phase="reassess_after_item_use",
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
-    _transition(
-      state_obj,
-      "transition_after_pre_action_items",
-      "transition_reassess_after_items",
-      "reassess",
-      item_execute_result.get("reason") or "trackblazer_item_use_reassess",
-    )
-    return {
-      "status": "reassess",
-      "step_id": "transition_after_pre_action_items",
-      "reason": item_execute_result.get("reason") or "trackblazer_item_use_reassess",
-      "committed": committed,
-    }
+    reassess_transition = dict(item_execution_payload.get("reassess_transition") or {})
+    transition_kind = str(reassess_transition.get("transition_kind") or "")
+    if (
+      getattr(action, "func", "") == "do_training"
+      and transition_kind in {"energy_item_reassess", "energy_rescue_reassess"}
+    ):
+      recheck_result = hooks.recheck_selected_training_after_item_use(
+        state_obj,
+        action,
+        sub_phase="reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      recheck_status = str(recheck_result.get("status") or "")
+      if recheck_status == "ready":
+        hooks.update_operator_snapshot(
+          state_obj,
+          action,
+          phase="executing_action",
+          message=recheck_result.get("reason") or f"Training {action.get('training_name') or ''} refreshed after item use. Continuing.",
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        _transition(
+          state_obj,
+          "transition_after_pre_action_items",
+          "transition_reassess_after_items",
+          "completed",
+          recheck_result.get("reason") or "selected_training_revalidated_after_item_use",
+          {
+            "transition_kind": transition_kind,
+            "training_name": action.get("training_name"),
+            "failure": (recheck_result.get("training_data") or {}).get("failure"),
+          },
+        )
+      elif recheck_status == "blocked":
+        _transition(
+          state_obj,
+          "transition_after_pre_action_items",
+          "transition_reassess_after_items",
+          "blocked",
+          recheck_result.get("reason") or "selected_training_recheck_blocked",
+        )
+        return {
+          "status": "blocked",
+          "step_id": "transition_after_pre_action_items",
+          "reason": recheck_result.get("reason") or "selected_training_recheck_blocked",
+          "committed": committed,
+        }
+      else:
+        hooks.update_operator_snapshot(
+          state_obj,
+          action,
+          phase="collecting_main_state",
+          message=recheck_result.get("reason") or "Selected training still needs a full reassess after item use.",
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        _transition(
+          state_obj,
+          "transition_after_pre_action_items",
+          "transition_reassess_after_items",
+          "reassess",
+          recheck_result.get("reason") or item_execute_result.get("reason") or "trackblazer_item_use_reassess",
+        )
+        return {
+          "status": "reassess",
+          "step_id": "transition_after_pre_action_items",
+          "reason": recheck_result.get("reason") or item_execute_result.get("reason") or "trackblazer_item_use_reassess",
+          "committed": committed,
+        }
+    else:
+      hooks.update_operator_snapshot(
+        state_obj,
+        action,
+        phase="collecting_main_state",
+        message="Trackblazer items applied. Rechecking turn state before committing an action.",
+        sub_phase="reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      _transition(
+        state_obj,
+        "transition_after_pre_action_items",
+        "transition_reassess_after_items",
+        "reassess",
+        item_execute_result.get("reason") or "trackblazer_item_use_reassess",
+      )
+      return {
+        "status": "reassess",
+        "step_id": "transition_after_pre_action_items",
+        "reason": item_execute_result.get("reason") or "trackblazer_item_use_reassess",
+        "committed": committed,
+      }
 
   if _step_present(turn_plan, "enforce_race_gate"):
     _transition(state_obj, "enforce_race_gate", "enforce_race_gate", "started")

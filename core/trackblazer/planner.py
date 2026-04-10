@@ -2026,8 +2026,27 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       training = dict(training_entries.get(training_name) or {})
       base_score = _safe_float(training.get("score"), 0.0)
       failure_pct = max(0.0, min(100.0, _safe_float(training.get("failure"), 0.0)))
+      failure_bypassed = bool(dict(training.get("usage_context") or {}).get("failure_bypassed_by_items"))
+      max_failure = max(0.0, _safe_float(getattr(config, "MAX_FAILURE", 5), 5.0))
+      if failure_pct > max_failure and not (item_key and failure_bypassed):
+        viable = False
+        candidate["priority_score"] = float("-inf")
+        candidate["rationale"] = (
+          f"{candidate.get('rationale') or ''}; dropped because fail {failure_pct:.0f}% "
+          f"exceeds hard limit {max_failure:.0f}% without an explicit bypass item"
+        ).strip("; ")
+        source_facts["hard_failure_gate"] = {
+          "failure": failure_pct,
+          "max_allowed_failure": max_failure,
+          "requires_item_bypass": True,
+          "item_key": item_key,
+          "failure_bypassed_by_items": failure_bypassed,
+        }
+        candidate["source_facts"] = source_facts
+        scored.append(candidate)
+        continue
       failure_penalty = max(0.0, 1.0 - (failure_pct / 100.0))
-      if item_key and dict(training.get("usage_context") or {}).get("failure_bypassed_by_items"):
+      if item_key and failure_bypassed:
         failure_penalty = 1.0
       rainbow_multiplier = 1.0 + (0.06 * min(3.0, _safe_float(training.get("rainbow_count"), 0.0)))
       support_count = _safe_float(training.get("support_count"), 0.0)
@@ -3024,7 +3043,17 @@ def _build_item_execute_step_planned_clicks(item_execution_payload):
 
 def _build_item_transition_step_planned_clicks(item_execution_payload):
   payload = item_execution_payload if isinstance(item_execution_payload, dict) else {}
-  if (payload.get("reassess_transition") or {}).get("required"):
+  reassess_transition = dict(payload.get("reassess_transition") or {})
+  if reassess_transition.get("required"):
+    transition_kind = str(reassess_transition.get("transition_kind") or "")
+    if transition_kind in {"energy_item_reassess", "energy_rescue_reassess"}:
+      return [
+        _planned_click(
+          "Refresh selected training after item use",
+          region_key="GAME_WINDOW_BBOX",
+          note="Re-open training and rescan the selected training's fail chance before committing the planned training.",
+        )
+      ]
     return [
       _planned_click(
         "Rescan trainings after item use",

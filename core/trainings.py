@@ -399,7 +399,8 @@ def calculate_risk_increase(training_data, risk_taking_set):
 def filter_safe_trainings(state, training_template, use_risk_taking=False, check_stat_caps=False):
   training_results = state['training_results']
   current_stats = state['current_stats']
-  risk_taking_set = training_template['risk_taking_set']
+  explicit_failure_bypass_only = constants.SCENARIO_NAME in ("mant", "trackblazer")
+  risk_taking_set = training_template['risk_taking_set'] if not explicit_failure_bypass_only else {}
   filtered_results = CleanDefaultDict()
 
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
@@ -465,7 +466,7 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
     max_allowed_failure = config.MAX_FAILURE
     # Calculate max allowed failure (with or without risk bonuses)
     risk_increase = 0
-    if use_risk_taking:
+    if use_risk_taking and not explicit_failure_bypass_only:
       risk_increase = calculate_risk_increase(training_data, risk_taking_set)
       max_allowed_failure += risk_increase
 

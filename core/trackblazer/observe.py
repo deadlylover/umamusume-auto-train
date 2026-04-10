@@ -49,7 +49,13 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
   skill_purchase_scan = copy.deepcopy(state_obj.get("skill_purchase_scan") or {})
   skill_purchase_plan = copy.deepcopy(state_obj.get("skill_purchase_plan") or {})
   training_results = copy.deepcopy(state_obj.get("training_results") or {})
-  available_trainings = copy.deepcopy(training_results)
+  available_trainings = copy.deepcopy(
+    (selected_action.get("available_trainings") or {})
+    if selected_action else
+    {}
+  )
+  if not available_trainings:
+    available_trainings = copy.deepcopy(training_results)
   planner_pre_action_items = copy.deepcopy(planner_state.get("pre_action_items") or [])
   planner_reassess_after_item_use = bool(planner_state.get("reassess_after_item_use"))
   inventory_snapshot = {

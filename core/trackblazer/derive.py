@@ -49,6 +49,25 @@ def _training_value_class(score, cutoffs):
   return "weak"
 
 
+def _merge_training_inputs(training_results, available_trainings):
+  merged = {}
+  raw_training_results = training_results if isinstance(training_results, dict) else {}
+  scored_available_trainings = available_trainings if isinstance(available_trainings, dict) else {}
+
+  for training_name in sorted(set(raw_training_results) | set(scored_available_trainings)):
+    raw_entry = raw_training_results.get(training_name)
+    scored_entry = scored_available_trainings.get(training_name)
+    merged_entry = {}
+    if isinstance(raw_entry, dict):
+      merged_entry.update(copy.deepcopy(raw_entry))
+    if isinstance(scored_entry, dict):
+      merged_entry.update(copy.deepcopy(scored_entry))
+    if merged_entry:
+      merged[training_name] = merged_entry
+
+  return merged
+
+
 def _energy_class(energy_ratio, cutoffs):
   if energy_ratio is None:
     return "ok"
@@ -239,7 +258,12 @@ def _training_value(training_results, state_obj, policy):
     elif any(int(held_quantities.get(key, 0) or 0) > 0 for key in _MEGAPHONE_KEYS) and usage_context.get("commit_training_after_items"):
       best_item_key = next((key for key in _MEGAPHONE_KEYS if int(held_quantities.get(key, 0) or 0) > 0), None)
     elif usage_context.get("failure_bypassed_by_items"):
-      for key in ("rich_hand_cream", "miracle_cure", "good_luck_charm", "vita_20", "vita_40", "vita_65", "royal_kale_juice"):
+      planned_failure_bypass_items = [
+        key
+        for key in list(training_data.get("trackblazer_failure_bypass_items") or [])
+        if key
+      ]
+      for key in planned_failure_bypass_items + ["rich_hand_cream", "miracle_cure", "vita_20", "vita_40", "vita_65", "royal_kale_juice", "good_luck_charm"]:
         if int(held_quantities.get(key, 0) or 0) > 0 or key in shop_items:
           best_item_key = key
           break
@@ -322,7 +346,11 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
   observation_status = copy.deepcopy(observed_data.get("observation_status") or {})
   missing_inputs = list(observed_data.get("missing_inputs") or [])
   energy_ratio = _safe_ratio(observed_data.get("energy_level"), observed_data.get("max_energy"))
-  training_value = _training_value(observed_data.get("training_results") or {}, state_obj, policy)
+  training_inputs = _merge_training_inputs(
+    observed_data.get("training_results") or {},
+    observed_data.get("available_trainings") or {},
+  )
+  training_value = _training_value(training_inputs, state_obj, policy)
   lookahead_summary = {}
   try:
     lookahead_summary = _lookahead_summary(state_obj, observed_data, policy)

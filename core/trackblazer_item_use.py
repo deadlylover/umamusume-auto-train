@@ -1059,6 +1059,8 @@ def _hammer_usage_state(held_quantities):
 
 
 def _usage_context(state_obj, action, policy=None):
+  import core.config as config
+
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   normalized_policy = normalize_item_use_policy(policy)
   inventory = state_obj.get("trackblazer_inventory") or {}
@@ -1110,10 +1112,15 @@ def _usage_context(state_obj, action, policy=None):
   rainbow_count = _safe_int(training_data.get("total_rainbow_friends"), 0)
   support_count = _safe_int(training_data.get("total_supports"), 0)
   failure_rate = _safe_int(training_data.get("failure"), 0)
+  max_failure = _safe_int(getattr(config, "MAX_FAILURE", 5), 5)
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
   energy_ratio = energy_level / max(max_energy, 1)
   safe_energy_target = max_energy * 0.60
+  failure_rescue_vita_override = bool(
+    action_func == "do_training"
+    and failure_rate > max_failure
+  )
   total_held_vita_restore = 0
   spendable_vita_restore_total = 0
   for item_key in _VITA_ITEM_KEYS:
@@ -1127,7 +1134,7 @@ def _usage_context(state_obj, action, policy=None):
       held_quantity,
       effective_items_by_key,
       summer_window=summer_window,
-      summer_conservation_bypass=summer_conservation_bypass,
+      summer_conservation_bypass=(summer_conservation_bypass or failure_rescue_vita_override),
       save_vita_for_summer=save_vita_for_summer,
     )
     spendable_vita_restore_total += restore_value * spendable_quantity
@@ -1301,6 +1308,7 @@ def _usage_context(state_obj, action, policy=None):
     "matching_stat_gain": matching_stat_gain,
     "total_stat_gain": total_stat_gain,
     "failure_rate": failure_rate,
+    "max_allowed_failure": max_failure,
     "rainbow_count": rainbow_count,
     "support_count": support_count,
     "climax_commit_score_threshold": climax_commit_thresholds["score"],
@@ -1339,6 +1347,7 @@ def _usage_context(state_obj, action, policy=None):
     "race_lookahead_reason": str(race_lookahead.get("reason") or ""),
     "held_recovery_cover_available": held_recovery_cover > 0,
     "save_vita_for_summer": save_vita_for_summer,
+    "failure_rescue_vita_override": failure_rescue_vita_override,
   }
 
 
@@ -2022,6 +2031,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       item_key.startswith("vita_")
       and not context["summer_window"]
       and not context.get("summer_conservation_bypass")
+      and not context.get("failure_rescue_vita_override")
       and context.get("save_vita_for_summer", True)
     ):
       return {

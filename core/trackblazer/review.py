@@ -15,7 +15,11 @@ def _get_training_filter_settings(training_function):
     "use_risk_taking": False,
     "check_stat_caps": False,
   }
-  if training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain", "stat_weight_training"):
+  explicit_failure_bypass_only = constants.SCENARIO_NAME in ("mant", "trackblazer")
+  if (
+    not explicit_failure_bypass_only
+    and training_function in ("rainbow_training", "most_support_cards", "meta_training", "most_stat_gain", "stat_weight_training")
+  ):
     settings["use_risk_taking"] = True
   if training_function in ("rainbow_training", "most_support_cards", "meta_training", "stat_weight_training"):
     settings["check_stat_caps"] = True

@@ -971,6 +971,92 @@ def collect_training_state(state_object, training_function_name):
   debug(f"State object: {state_object}")
   return state_object
 
+
+def refresh_selected_training_state(state_object, training_name, training_function_name=None):
+  if not training_name:
+    return {"success": False, "reason": "missing_training_name"}
+  if training_name not in constants.TRAINING_SCAN_POSITIONS:
+    return {"success": False, "reason": f"unknown_training_name:{training_name}"}
+
+  check_stat_gains = False
+  if (
+    training_function_name == "meta_training"
+    or training_function_name == "most_stat_gain"
+    or constants.SCENARIO_NAME in ("mant", "trackblazer")
+  ):
+    check_stat_gains = True
+
+  bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opening", "context": "training_recheck"})
+  if not device_action.locate_and_click(
+    "assets/buttons/training_btn.png",
+    min_search_time=get_secs(3),
+    region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+  ):
+    bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "not_found", "context": "training_recheck"})
+    return {"success": False, "reason": "failed_to_open_training_menu"}
+
+  bot.push_debug_history({"event": "click", "asset": "training_btn", "result": "opened", "context": "training_recheck"})
+  sleep(0.6)
+
+  mouse_pos = constants.TRAINING_SCAN_POSITIONS[training_name]
+  hold_active = False
+  refreshed_training = {}
+  try:
+    bot.push_debug_history({"event": "scan", "asset": training_name, "result": "rescanning", "context": "training_recheck"})
+    if bot.is_adb_input_active():
+      device_action.swipe(mouse_pos, (mouse_pos[0], mouse_pos[1] + 150), duration=0.15)
+    else:
+      pyautogui_actions.moveTo(constants.SAFE_SPACE_MOUSE_POS[0], constants.SAFE_SPACE_MOUSE_POS[1], duration=0.08)
+      pyautogui_actions.hold()
+      hold_active = True
+      pyautogui_actions.moveTo(mouse_pos[0], mouse_pos[1], duration=0.12)
+
+    sleep(0.5)
+    device_action.flush_screenshot_cache()
+
+    refreshed_training.update(
+      get_training_data(year=state_object.get("year"), check_stat_gains=check_stat_gains)
+    )
+    refreshed_training.update(get_support_card_data())
+  finally:
+    if hold_active:
+      pyautogui_actions.moveTo(constants.SAFE_SPACE_MOUSE_POS[0], constants.SAFE_SPACE_MOUSE_POS[1], duration=0.1)
+      pyautogui_actions.release()
+
+  if not refreshed_training:
+    device_action.locate_and_click(
+      "assets/buttons/back_btn.png",
+      min_search_time=get_secs(1),
+      region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+    )
+    return {"success": False, "reason": "selected_training_scan_empty"}
+
+  bot.push_debug_history({"event": "click", "asset": "back_btn", "result": "closing", "context": "training_recheck"})
+  if not device_action.locate_and_click(
+    "assets/buttons/back_btn.png",
+    min_search_time=get_secs(2),
+    region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+  ):
+    bot.push_debug_history({"event": "click", "asset": "back_btn", "result": "not_found", "context": "training_recheck"})
+    return {
+      "success": False,
+      "reason": "failed_to_close_training_menu",
+      "training_data": refreshed_training,
+    }
+  bot.push_debug_history({"event": "click", "asset": "back_btn", "result": "closed", "context": "training_recheck"})
+
+  training_results = state_object.get("training_results") or {}
+  existing_training = dict(training_results.get(training_name) or {})
+  existing_training.update(refreshed_training)
+  training_results[training_name] = existing_training
+  state_object["training_results"] = training_results
+  return {
+    "success": True,
+    "reason": "selected_training_rechecked",
+    "training_name": training_name,
+    "training_data": existing_training,
+  }
+
 def filter_training_lock(training_results):
   values = list(training_results.values())
   fingerprints = [training_fingerprint(v) for v in values]

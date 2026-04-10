@@ -8,7 +8,7 @@ import cv2
 from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
-from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache
+from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache, refresh_selected_training_state
 from utils.shared import CleanDefaultDict
 import core.config as config
 from PIL import ImageGrab
@@ -2863,6 +2863,93 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   return _execute_trackblazer_pre_action_items(state_obj, action, commit_mode=commit_mode)
 
 
+def _recheck_selected_training_after_item_use(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return {"status": "reassess", "reason": "selected_training_recheck_wrong_scenario"}
+  if not hasattr(action, "get") or getattr(action, "func", "") != "do_training":
+    return {"status": "reassess", "reason": "selected_training_recheck_not_training"}
+
+  training_name = action.get("training_name")
+  training_function = action.get("training_function") or "stat_weight_training"
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="collecting_training_state",
+    message=f"Refreshing {training_name or 'selected'} training after item use.",
+    sub_phase=sub_phase or "reassess_after_item_use",
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  refresh_result = refresh_selected_training_state(
+    state_obj,
+    training_name,
+    training_function_name=training_function,
+  )
+  if not refresh_result.get("success"):
+    reason = refresh_result.get("reason") or "selected_training_recheck_failed"
+    if reason == "failed_to_close_training_menu":
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text="Training recheck left the training menu open after item use.",
+        sub_phase=sub_phase or "reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return {"status": "blocked", "reason": reason}
+    return {"status": "reassess", "reason": reason}
+
+  refreshed_training = dict(refresh_result.get("training_data") or {})
+  merged_training = copy.deepcopy(action.get("training_data") or {})
+  merged_training.update(refreshed_training)
+  merged_training["max_allowed_failure"] = int(getattr(config, "MAX_FAILURE", 5) or 5)
+  merged_training["risk_increase"] = 0
+  merged_training.pop("failure_bypassed_by_items", None)
+  merged_training.pop("trackblazer_failure_bypass_items", None)
+  action["training_data"] = merged_training
+
+  available_trainings = copy.deepcopy(action.get("available_trainings") or {})
+  if training_name:
+    available_entry = copy.deepcopy(available_trainings.get(training_name) or {})
+    available_entry.update(refreshed_training)
+    available_entry["max_allowed_failure"] = merged_training["max_allowed_failure"]
+    available_entry["risk_increase"] = 0
+    available_entry.pop("failure_bypassed_by_items", None)
+    available_entry.pop("trackblazer_failure_bypass_items", None)
+    available_trainings[training_name] = available_entry
+    action["available_trainings"] = available_trainings
+
+  refreshed_failure = int(merged_training.get("failure") or 0)
+  max_failure = int(getattr(config, "MAX_FAILURE", 5) or 5)
+  state_obj["trackblazer_last_training_recheck"] = {
+    "training_name": training_name,
+    "failure": refreshed_failure,
+    "max_allowed_failure": max_failure,
+  }
+
+  if refreshed_failure > max_failure:
+    return {
+      "status": "reassess",
+      "reason": (
+        f"{training_name or 'selected training'} still shows {refreshed_failure}% fail "
+        f"after item use; full planner reassess required"
+      ),
+      "training_data": merged_training,
+    }
+
+  action["trackblazer_reassess_after_item_use"] = False
+  return {
+    "status": "ready",
+    "reason": (
+      f"{training_name or 'Selected training'} refreshed after item use: "
+      f"fail {refreshed_failure}% <= {max_failure}%"
+    ),
+    "training_data": merged_training,
+  }
+
+
 def _trackblazer_action_failure_should_block_retry(state_obj, action):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return False
@@ -4916,6 +5003,7 @@ def _trackblazer_planner_executor_hooks():
     wait_for_lobby_after_shop_purchase=_wait_for_lobby_after_shop_purchase,
     refresh_trackblazer_pre_action_inventory=_refresh_trackblazer_pre_action_inventory,
     execute_trackblazer_pre_action_items=_execute_trackblazer_pre_action_items,
+    recheck_selected_training_after_item_use=_recheck_selected_training_after_item_use,
     wait_for_lobby_after_item_use=_wait_for_lobby_after_item_use,
     enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
     run_planner_race_preflight=_run_planner_race_preflight,
