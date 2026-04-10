@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 import core.config as config
+import core.trackblazer.planner as planner_module
 import utils.constants as constants
 from core.actions import Action
 from core.skeleton import _planned_clicks_for_action, build_review_snapshot
@@ -638,6 +639,90 @@ def main():
     assert freshness_followup.get("ranked_trainings") == refreshed_ranked_trainings, "review snapshot should reuse refreshed planner-owned ranked trainings"
     assert freshness_initial.get("planner_dual_run_comparison", {}).get("match") is True, "initial freshness case should produce a valid planner comparison"
     assert freshness_followup.get("planner_dual_run_comparison", {}).get("match") is True, "refreshed freshness case should preserve planner comparison parity"
+
+    compute_once_state, compute_once_action = _prepare_case("training")
+    shop_compute_calls = 0
+    item_compute_calls = 0
+    original_shop_builder = planner_module._candidate_shop_buys
+    original_item_planner = planner_module.plan_item_usage
+
+    def _count_shop_builds(*args, **kwargs):
+      nonlocal shop_compute_calls
+      shop_compute_calls += 1
+      return original_shop_builder(*args, **kwargs)
+
+    def _count_item_builds(*args, **kwargs):
+      nonlocal item_compute_calls
+      item_compute_calls += 1
+      return original_item_planner(*args, **kwargs)
+
+    with patch("core.trackblazer.planner._candidate_shop_buys", side_effect=_count_shop_builds), patch(
+      "core.trackblazer.planner.plan_item_usage",
+      side_effect=_count_item_builds,
+    ):
+      planner_module.plan_once(compute_once_state, compute_once_action, limit=8)
+      planner_module.plan_once(compute_once_state, compute_once_action, limit=8)
+
+    assert shop_compute_calls == 1, "plan_once should compute shop candidates once per unchanged planner snapshot"
+    assert item_compute_calls == 1, "plan_once should compute item plan once per unchanged planner snapshot"
+
+    for field_name in (
+      "rival_indicator_detected",
+      "race_mission_available",
+      "trackblazer_lobby_scheduled_race",
+      "trackblazer_climax_race_day",
+    ):
+      race_freshness_state, race_freshness_action = _prepare_case("training")
+      baseline_snapshot = build_review_snapshot(
+        race_freshness_state,
+        race_freshness_action,
+        reasoning_notes=f"synthetic race freshness baseline: {field_name}",
+        ocr_debug=[],
+      )
+      baseline_turn_plan = (race_freshness_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+      baseline_freshness = dict(baseline_turn_plan.get("freshness") or {})
+
+      race_freshness_state[field_name] = not bool(race_freshness_state.get(field_name))
+      followup_snapshot = build_review_snapshot(
+        race_freshness_state,
+        race_freshness_action,
+        reasoning_notes=f"synthetic race freshness followup: {field_name}",
+        ocr_debug=[],
+      )
+      followup_turn_plan = (race_freshness_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+      followup_freshness = dict(followup_turn_plan.get("freshness") or {})
+      assert baseline_freshness.get("state_key") != followup_freshness.get("state_key"), (
+        f"planner freshness should invalidate when race-state field changes: {field_name}"
+      )
+      assert baseline_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, (
+        f"race freshness baseline should keep planner comparison parity: {field_name}"
+      )
+      assert followup_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, (
+        f"race freshness followup should keep planner comparison parity: {field_name}"
+      )
+
+    cached_only_state, cached_only_action = _prepare_case("training")
+    cached_only_state.pop("rival_indicator_detected", None)
+    with patch(
+      "core.trackblazer.planner.evaluate_trackblazer_race",
+      side_effect=AssertionError("read-only planner should not re-run race gate without cached rival indicator"),
+    ):
+      cached_only_snapshot = build_review_snapshot(
+        cached_only_state,
+        cached_only_action,
+        reasoning_notes="synthetic cached-only race gate case",
+        ocr_debug=[],
+      )
+    cached_only_turn_plan = TurnPlan.from_snapshot(
+      (cached_only_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    )
+    cached_only_race_plan = dict(cached_only_turn_plan.race_plan or {})
+    cached_only_decision = dict(cached_only_race_plan.get("race_decision") or {})
+    cached_only_race_check = dict(cached_only_race_plan.get("race_check") or {})
+    assert cached_only_decision.get("cached_only") is True, "read-only race gate should emit cached_only decision metadata when rival cache is missing"
+    assert "cached rival-indicator context is missing" in (cached_only_decision.get("reason") or ""), "cached_only race decision should expose explicit missing-cache reason"
+    assert cached_only_race_check.get("cached_only") is True, "read-only race check should flag cached-only mode when rival cache is missing"
+    assert cached_only_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, "cached-only race guard should preserve planner comparison parity"
 
     whistle_state, whistle_action = _prepare_case("training")
     whistle_state["trackblazer_shop_summary"] = {

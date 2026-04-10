@@ -169,8 +169,12 @@ def _state_signature(state_obj) -> Dict[str, Any]:
     "trackblazer_inventory_pre_shop_flow": (state_obj or {}).get("trackblazer_inventory_pre_shop_flow"),
     "training_results": (state_obj or {}).get("training_results"),
     "trackblazer_climax": (state_obj or {}).get("trackblazer_climax"),
+    "trackblazer_climax_race_day": (state_obj or {}).get("trackblazer_climax_race_day"),
     "trackblazer_climax_locked_race": (state_obj or {}).get("trackblazer_climax_locked_race"),
+    "trackblazer_lobby_scheduled_race": (state_obj or {}).get("trackblazer_lobby_scheduled_race"),
     "trackblazer_trainings_remaining_upper_bound": (state_obj or {}).get("trackblazer_trainings_remaining_upper_bound"),
+    "race_mission_available": (state_obj or {}).get("race_mission_available"),
+    "rival_indicator_detected": (state_obj or {}).get("rival_indicator_detected"),
   }
 
 
@@ -833,7 +837,7 @@ def _planner_selected_action_payload(
   return payload
 
 
-def _build_planner_race_plan(state_obj, action):
+def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_check=False):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   base_action = _capture_action_payload(action, state_obj=state_obj)
   base_fallback = _capture_legacy_rival_fallback_payload(action)
@@ -862,15 +866,36 @@ def _build_planner_race_plan(state_obj, action):
   existing_planner_branch = str(existing_planner_race.get("branch_kind") or "")
 
   race_decision = {}
+  race_decision_cached_only = False
+  optional_race_eval_requires_rival_indicator = not (
+    forced_climax_race_day
+    or forced_race_day
+    or scheduled_race_active
+    or mission_race_enabled
+    or goal_race_active
+  )
   if not pre_debut:
-    try:
-      race_decision = evaluate_trackblazer_race(state_obj, action) or {}
-    except Exception as exc:
+    missing_cached_rival_indicator = "rival_indicator_detected" not in state_obj
+    if (
+      optional_race_eval_requires_rival_indicator
+      and missing_cached_rival_indicator
+      and not allow_live_rival_indicator_check
+    ):
+      race_decision_cached_only = True
       race_decision = {
         "should_race": False,
-        "reason": f"planner_race_logic_error: {exc}",
-        "planner_error": True,
+        "reason": "race gate not re-run in read-only planner mode because cached rival-indicator context is missing",
+        "cached_only": True,
       }
+    else:
+      try:
+        race_decision = evaluate_trackblazer_race(state_obj, action) or {}
+      except Exception as exc:
+        race_decision = {
+          "should_race": False,
+          "reason": f"planner_race_logic_error: {exc}",
+          "planner_error": True,
+        }
 
   branch_kind = "non_race"
   selected_action_payload = copy.deepcopy(base_action)
@@ -883,6 +908,8 @@ def _build_planner_race_plan(state_obj, action):
     "forced_climax_race_day": forced_climax_race_day,
     "forced_race_day": forced_race_day,
     "pre_debut": pre_debut,
+    "cached_only": bool(race_decision_cached_only or race_decision.get("cached_only")),
+    "cached_only_reason": str(race_decision.get("reason") or "") if (race_decision_cached_only or race_decision.get("cached_only")) else "",
   }
   race_entry_gate = {}
   race_scout = {
@@ -2402,7 +2429,6 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
   runtime_state["latest_observation_id"] = observation_id
   runtime_state["pending_skill_scan"] = pending_skill_scan.to_dict()
   state_obj[PLANNER_RUNTIME_KEY] = runtime_state
-  planner_race_plan = _build_planner_race_plan(state_obj, action)
   forced_fallback = _planner_force_fallback(state_obj)
   runtime_path = get_trackblazer_runtime_path(state_obj, default=RUNTIME_PATH_LEGACY_RUNTIME)
   if forced_fallback:
@@ -2414,6 +2440,11 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       source="planner_force_fallback",
     )
   decision_path = decision_path_for_runtime_path(runtime_path)
+  planner_race_plan = _build_planner_race_plan(
+    state_obj,
+    action,
+    allow_live_rival_indicator_check=(runtime_path == RUNTIME_PATH_PLANNER_RUNTIME),
+  )
 
   observed = hydrate_observed_turn_state(state_obj, action=action, planner_state={
     "freshness": freshness.to_dict(),

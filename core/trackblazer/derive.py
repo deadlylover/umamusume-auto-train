@@ -10,6 +10,7 @@ from core.trackblazer_race_logic import (
   get_optional_race_low_energy_override,
   get_race_lookahead_energy_advice,
 )
+from utils.log import warning
 
 
 _SUMMER_TOKENS = ("early jul", "late jul", "early aug", "late aug")
@@ -44,6 +45,7 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
     if isinstance(value, (int, float))
   )
   usage_context = {}
+  derivation_warnings = []
   if hasattr(action, "get") and state_obj:
     try:
       usage_context = _usage_context(
@@ -51,7 +53,12 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
         action,
         policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
       ) or {}
-    except Exception:
+    except Exception as exc:
+      warning(f"[TB_PLANNER] derive_turn_state usage_context failed: {exc}")
+      derivation_warnings.append({
+        "source": "usage_context",
+        "error": str(exc),
+      })
       usage_context = {}
 
   race_low_energy_override = {}
@@ -59,14 +66,24 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
   if state_obj:
     try:
       race_low_energy_override = get_optional_race_low_energy_override(state_obj) or {}
-    except Exception:
+    except Exception as exc:
+      warning(f"[TB_PLANNER] derive_turn_state race_low_energy_override failed: {exc}")
+      derivation_warnings.append({
+        "source": "race_low_energy_override",
+        "error": str(exc),
+      })
       race_low_energy_override = {}
     try:
       race_lookahead = get_race_lookahead_energy_advice(
         state_obj,
         getattr(config, "OPERATOR_RACE_SELECTOR", None),
       ) or {}
-    except Exception:
+    except Exception as exc:
+      warning(f"[TB_PLANNER] derive_turn_state race_lookahead failed: {exc}")
+      derivation_warnings.append({
+        "source": "race_lookahead",
+        "error": str(exc),
+      })
       race_lookahead = {}
 
   observation_status = copy.deepcopy(observed_data.get("observation_status") or {})
@@ -173,5 +190,6 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
       "low_energy_override": race_low_energy_override,
       "lookahead": race_lookahead,
     },
+    "derivation_warnings": derivation_warnings,
   }
   return DerivedTurnState(data=data)
