@@ -473,6 +473,50 @@ def _resolve_pre_debut_non_race_payload(action, state_obj=None, fallback_payload
   return {"func": "do_rest"}
 
 
+def _resolve_planner_non_race_payload(action, state_obj=None, race_decision=None, fallback_payload=None) -> Dict[str, Any]:
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  race_decision = race_decision if isinstance(race_decision, dict) else {}
+  fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
+
+  action_payload = _capture_action_payload(action, state_obj=state_obj)
+  action_func = action_payload.get("func")
+  best_payload = _best_training_payload_from_state(action, state_obj=state_obj)
+  best_training_available = best_payload.get("func") == "do_training"
+  race_reason = str(race_decision.get("reason") or "").strip().lower()
+
+  # Planner mode should not inherit a provisional legacy rest when the rest
+  # only came from race gating. Prefer the best scanned training instead.
+  if (
+    action_func == "do_rest"
+    and best_training_available
+    and (
+      race_decision.get("prefer_rest_over_weak_training")
+      or "operator race gate disabled" in race_reason
+    )
+  ):
+    return best_payload
+
+  if action_func == "do_training":
+    training_name = action_payload.get("training_name")
+    training_data = action_payload.get("training_data") or {}
+    if training_name and isinstance(training_data, dict) and training_data:
+      return action_payload
+    if best_training_available:
+      return best_payload
+
+  if action_func and action_func != "do_race":
+    return action_payload
+
+  if best_payload.get("func"):
+    return best_payload
+
+  fallback_func = fallback_payload.get("func")
+  if fallback_func and fallback_func != "do_race":
+    return copy.deepcopy(fallback_payload)
+
+  return {"func": "do_rest"}
+
+
 def _warning_policy_for_race_branch(branch_kind, fallback_action=None) -> Dict[str, Any]:
   fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
   cancel_target_label = _fallback_target_label(fallback_action) if fallback_action else ""
@@ -1197,16 +1241,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
         branch_kind=branch_kind,
       )
     else:
-      if race_decision.get("prefer_rest_over_weak_training"):
-        branch_kind = "weak_training_rest"
-        selected_action_payload = _planner_selected_action_payload(
-          action,
-          func="do_rest",
-          race_decision={**dict(race_decision), "branch_kind": branch_kind},
-          race_lookahead=race_lookahead,
-          branch_kind=branch_kind,
-        )
-      elif race_decision.get("should_race"):
+      if race_decision.get("should_race"):
         branch_kind = "optional_fallback_race" if race_decision.get("fallback_non_rival_race") else "optional_rival_race"
         warning_plan = _warning_policy_for_race_branch(branch_kind, base_fallback)
         race_scout = {
@@ -1231,10 +1266,19 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
           branch_kind=branch_kind,
         )
       else:
-        branch_kind = "training"
+        non_race_payload = _resolve_planner_non_race_payload(
+          action,
+          state_obj=state_obj,
+          race_decision=race_decision,
+          fallback_payload=base_fallback,
+        )
+        branch_kind = "training" if non_race_payload.get("func") == "do_training" else "non_race"
         selected_action_payload = _planner_selected_action_payload(
           action,
-          func=_action_func(action),
+          func=non_race_payload.get("func"),
+          training_name=non_race_payload.get("training_name"),
+          training_function=non_race_payload.get("training_function"),
+          training_data=copy.deepcopy(non_race_payload.get("training_data") or {}),
           race_decision={**dict(race_decision), "branch_kind": branch_kind},
           race_lookahead=race_lookahead,
           branch_kind=branch_kind,

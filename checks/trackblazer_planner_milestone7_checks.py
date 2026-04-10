@@ -157,6 +157,35 @@ def _test_pre_debut_planner_still_prefers_training_over_stale_rest():
   assert (snapshot.get("selected_action") or {}).get("training_name") == "speed"
 
 
+def _test_planner_prefers_training_over_race_gate_rest_fallback():
+  bot.set_trackblazer_use_new_planner_enabled(True)
+  state_obj = _base_state()
+  state_obj["year"] = "Junior Year Late Nov"
+  state_obj["turn"] = 3
+  action = _rest_action()
+
+  planner_race_decision = {
+    "should_race": False,
+    "reason": "Operator race gate disabled racing on Junior Year Late Nov",
+    "training_total_stats": 18,
+    "training_score": 16.0,
+    "training_supports": 2,
+    "prefer_rest_over_weak_training": False,
+    "race_available": False,
+    "rival_indicator": True,
+  }
+
+  with patch("core.trackblazer.planner.evaluate_trackblazer_race", lambda *_args, **_kwargs: dict(planner_race_decision)):
+    activation = _activate_trackblazer_planner_turn(state_obj, action)
+
+  assert activation.get("status") == "planner", activation
+  snapshot = _assert_snapshot_path(state_obj, action, "planner_runtime", "race_gate_rest_fallback")
+  selected_action = snapshot.get("selected_action") or {}
+  assert selected_action.get("func") == "do_training", selected_action
+  assert selected_action.get("training_name") == "speed", selected_action
+  assert (selected_action.get("trackblazer_race_decision") or {}).get("reason") == planner_race_decision["reason"], selected_action
+
+
 def _test_planner_snapshot_and_boundary_history_are_copyable():
   bot.set_trackblazer_use_new_planner_enabled(True)
   bot.clear_debug_history()
@@ -348,6 +377,7 @@ def main():
   try:
     _test_path_provenance_distinguishes_runtime_modes()
     _test_pre_debut_planner_still_prefers_training_over_stale_rest()
+    _test_planner_prefers_training_over_race_gate_rest_fallback()
     _test_planner_snapshot_and_boundary_history_are_copyable()
     _test_forced_runtime_fallback_sets_explicit_path()
     _test_activation_failure_restores_action_payload()
