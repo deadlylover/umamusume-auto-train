@@ -78,7 +78,10 @@ from core.runtime_flow import (
   SUB_PHASE_RETURN_TO_LOBBY,
 )
 from core.trackblazer_shop import get_priority_preview, policy_context
-from core.trackblazer_item_use import get_training_behavior_strong_training_score_threshold
+from core.trackblazer_item_use import (
+  get_training_behavior_strong_training_score_threshold,
+  plan_item_usage,
+)
 from core.trackblazer_race_logic import (
   evaluate_trackblazer_race,
   get_race_lookahead_energy_advice,
@@ -2841,6 +2844,7 @@ def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
       "status": "reassess",
       "result": result,
       "reason": planner_reassess_transition.get("reason") or "trackblazer_item_use_requires_reassessment",
+      "transition_kind": planner_reassess_transition.get("transition_kind"),
     }
 
   return {
@@ -2861,6 +2865,57 @@ def _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   if refresh_result.get("status") != "ready":
     return refresh_result
   return _execute_trackblazer_pre_action_items(state_obj, action, commit_mode=commit_mode)
+
+
+def _trackblazer_item_requires_reassess(entry):
+  if not isinstance(entry, dict):
+    return False
+  if entry.get("key") == "reset_whistle":
+    return True
+  return entry.get("usage_group") == "energy"
+
+
+def _execute_trackblazer_explicit_item_keys(state_obj, item_keys, commit_mode="full", trigger="automatic_followup"):
+  item_keys = [str(item_key) for item_key in (item_keys or []) if item_key]
+  if not item_keys:
+    return {"status": "skipped", "reason": "no_pre_action_items"}
+
+  from scenarios.trackblazer import execute_training_items
+
+  result = execute_training_items(item_keys, trigger=trigger, commit_mode=commit_mode)
+  flow = result.get("trackblazer_inventory_flow") or {}
+  state_obj["trackblazer_inventory"] = result.get("trackblazer_inventory")
+  state_obj["trackblazer_inventory_summary"] = result.get("trackblazer_inventory_summary")
+  state_obj["trackblazer_inventory_controls"] = result.get("trackblazer_inventory_controls")
+  state_obj["trackblazer_inventory_flow"] = flow
+  if result.get("success") and _trackblazer_inventory_flow_cacheable(flow):
+    _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+  else:
+    _invalidate_trackblazer_inventory_cache()
+
+  if commit_mode == "dry_run":
+    return {
+      "status": "simulated",
+      "result": result,
+      "reason": flow.get("reason") or "trackblazer_pre_action_items_simulated",
+    }
+
+  if not result.get("success"):
+    return {
+      "status": "failed",
+      "result": result,
+      "reason": flow.get("reason") or "trackblazer_pre_action_items_failed",
+    }
+
+  if not flow.get("graceful_noop"):
+    _apply_trackblazer_used_items_to_state(state_obj, item_keys)
+    _cache_trackblazer_inventory(state_obj, turn_key=action_count)
+
+  return {
+    "status": "executed",
+    "result": result,
+    "reason": flow.get("reason") or "trackblazer_pre_action_items_applied",
+  }
 
 
 def _recheck_selected_training_after_item_use(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
@@ -2947,6 +3002,150 @@ def _recheck_selected_training_after_item_use(state_obj, action, sub_phase=None,
       f"fail {refreshed_failure}% <= {max_failure}%"
     ),
     "training_data": merged_training,
+  }
+
+
+def _run_post_energy_item_followup(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  recheck_result = _recheck_selected_training_after_item_use(
+    state_obj,
+    action,
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  if recheck_result.get("status") != "ready":
+    return recheck_result
+
+  item_plan = plan_item_usage(
+    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    state_obj=state_obj,
+    action=action,
+    limit=8,
+  )
+  followup_items = [
+    copy.deepcopy(entry)
+    for entry in list(item_plan.get("candidates") or [])
+    if not _trackblazer_item_requires_reassess(entry)
+  ]
+  action["trackblazer_item_use_context"] = copy.deepcopy(item_plan.get("context") or {})
+  action["trackblazer_reassess_after_item_use"] = False
+
+  if not followup_items:
+    action["trackblazer_pre_action_items"] = []
+    return {
+      "status": "ready",
+      "reason": recheck_result.get("reason") or "selected_training_revalidated_after_item_use",
+      "training_data": recheck_result.get("training_data"),
+      "followup_items": [],
+      "followup_result": {"status": "skipped", "reason": "no_post_energy_followup_items"},
+    }
+
+  action["trackblazer_pre_action_items"] = copy.deepcopy(followup_items)
+  followup_names = ", ".join(entry.get("name") or entry.get("key") or "item" for entry in followup_items)
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=(
+      f"{recheck_result.get('reason') or 'Selected training refreshed after item use.'} "
+      f"Applying follow-up items before training: {followup_names}."
+    ),
+    sub_phase=sub_phase or "reassess_after_item_use",
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  followup_result = _execute_trackblazer_explicit_item_keys(
+    state_obj,
+    [entry.get("key") for entry in followup_items if entry.get("key")],
+    commit_mode="full",
+  )
+  followup_status = str(followup_result.get("status") or "")
+  if followup_status == "executed":
+    lobby_confirmed = _wait_for_lobby_after_item_use(
+      state_obj,
+      action,
+      sub_phase=sub_phase or "reassess_after_item_use",
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    if not lobby_confirmed:
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="error",
+        error_text="Lobby not visible after follow-up item use; inventory overlay may still be up.",
+        sub_phase=sub_phase or "reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return {
+        "status": "blocked",
+        "reason": "lobby_return_failed_after_followup_items",
+        "training_data": recheck_result.get("training_data"),
+        "followup_items": followup_items,
+        "followup_result": followup_result,
+      }
+    action["trackblazer_pre_action_items"] = []
+    return {
+      "status": "ready",
+      "reason": (
+        f"{recheck_result.get('reason') or 'Selected training refreshed after item use.'} "
+        f"Applied follow-up items: {followup_names}."
+      ),
+      "training_data": recheck_result.get("training_data"),
+      "followup_items": followup_items,
+      "followup_result": followup_result,
+    }
+
+  flow = dict((followup_result.get("result") or {}).get("trackblazer_inventory_flow") or {})
+  blocking_reason = followup_result.get("reason") or "trackblazer_followup_items_failed"
+  inventory_left_open = bool(flow.get("opened") and not flow.get("closed") and not flow.get("already_open"))
+  if blocking_reason in {
+    "failed_to_open_inventory",
+    "failed_to_close_inventory",
+    "inventory_did_not_close_after_confirm",
+  } or inventory_left_open:
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Follow-up item use failed after the energy recheck: {blocking_reason}",
+      sub_phase=sub_phase or "reassess_after_item_use",
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return {
+      "status": "blocked",
+      "reason": blocking_reason,
+      "training_data": recheck_result.get("training_data"),
+      "followup_items": followup_items,
+      "followup_result": followup_result,
+    }
+
+  action["trackblazer_pre_action_items"] = []
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=(
+      f"{recheck_result.get('reason') or 'Selected training refreshed after item use.'} "
+      f"Follow-up items were not applied ({blocking_reason}); continuing with the selected training."
+    ),
+    sub_phase=sub_phase or "reassess_after_item_use",
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  return {
+    "status": "ready",
+    "reason": (
+      f"{recheck_result.get('reason') or 'Selected training refreshed after item use.'} "
+      f"Follow-up items skipped: {blocking_reason}."
+    ),
+    "training_data": recheck_result.get("training_data"),
+    "followup_items": followup_items,
+    "followup_result": followup_result,
   }
 
 
@@ -4846,27 +5045,98 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       return "blocked"
     return "failed"
   if pre_action_item_result.get("status") == "reassess":
-    update_operator_snapshot(
-      state_obj,
-      action,
-      phase="collecting_main_state",
-      message="Trackblazer items applied. Rechecking turn state before committing an action.",
-      sub_phase="reassess_after_item_use",
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
-    _push_turn_retry_debug(
-      state_obj,
-      reason="Trackblazer item use requested reassessment before committing the action.",
-      reasons=["trackblazer_item_use_reassess"],
-      before_phase="executing_action",
-      context="post_item_use_reassess",
-      event="turn_retry",
-      result="reassess",
-      sub_phase="reassess_after_item_use",
-      phase="executing_action",
-    )
-    return "reassess"
+    transition_kind = str(pre_action_item_result.get("transition_kind") or "")
+    if transition_kind in {"energy_item_reassess", "energy_rescue_reassess"} and getattr(action, "func", "") == "do_training":
+      with _timed_turn_step("Wait for lobby after item use", "wait", key="wait_for_lobby_after_item_use") as step:
+        lobby_confirmed = _wait_for_lobby_after_item_use(
+          state_obj,
+          action,
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        step["detail"] = f"ready={'yes' if lobby_confirmed else 'no'}"
+      if not lobby_confirmed:
+        update_operator_snapshot(
+          state_obj,
+          action,
+          phase="recovering",
+          status="error",
+          error_text="Lobby not visible after item use; inventory overlay may still be up.",
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        return "blocked"
+      with _timed_turn_step("Refresh selected training after item use", "scan", key="recheck_selected_training_after_item_use") as step:
+        recheck_result = _run_post_energy_item_followup(
+          state_obj,
+          action,
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        step["detail"] = _turn_metric_detail(
+          f"status={recheck_result.get('status')}",
+          f"reason={recheck_result.get('reason')}" if recheck_result.get("reason") else None,
+        )
+      recheck_status = str(recheck_result.get("status") or "")
+      if recheck_status == "ready":
+        update_operator_snapshot(
+          state_obj,
+          action,
+          phase="executing_action",
+          message=recheck_result.get("reason") or f"Training {action.get('training_name') or ''} refreshed after item use. Continuing.",
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+      elif recheck_status == "blocked":
+        return "blocked"
+      else:
+        update_operator_snapshot(
+          state_obj,
+          action,
+          phase="collecting_main_state",
+          message=recheck_result.get("reason") or "Selected training still needs a full reassess after item use.",
+          sub_phase="reassess_after_item_use",
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
+        _push_turn_retry_debug(
+          state_obj,
+          reason="Trackblazer item use requested reassessment before committing the action.",
+          reasons=["trackblazer_item_use_reassess"],
+          before_phase="executing_action",
+          context="post_item_use_reassess",
+          event="turn_retry",
+          result="reassess",
+          sub_phase="reassess_after_item_use",
+          phase="executing_action",
+        )
+        return "reassess"
+    else:
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="collecting_main_state",
+        message="Trackblazer items applied. Rechecking turn state before committing an action.",
+        sub_phase="reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      _push_turn_retry_debug(
+        state_obj,
+        reason="Trackblazer item use requested reassessment before committing the action.",
+        reasons=["trackblazer_item_use_reassess"],
+        before_phase="executing_action",
+        context="post_item_use_reassess",
+        event="turn_retry",
+        result="reassess",
+        sub_phase="reassess_after_item_use",
+        phase="executing_action",
+      )
+      return "reassess"
   if pre_action_item_result.get("status") == "executed":
     # After item use the inventory should be closed and we should be back
     # on the career lobby.  If the close was slow or the game lingered on
@@ -5004,6 +5274,7 @@ def _trackblazer_planner_executor_hooks():
     refresh_trackblazer_pre_action_inventory=_refresh_trackblazer_pre_action_inventory,
     execute_trackblazer_pre_action_items=_execute_trackblazer_pre_action_items,
     recheck_selected_training_after_item_use=_recheck_selected_training_after_item_use,
+    run_post_energy_item_followup=_run_post_energy_item_followup,
     wait_for_lobby_after_item_use=_wait_for_lobby_after_item_use,
     enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
     run_planner_race_preflight=_run_planner_race_preflight,

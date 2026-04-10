@@ -26,6 +26,7 @@ class PlannerExecutorHooks:
   refresh_trackblazer_pre_action_inventory: Callable[[Dict[str, Any], Any], Dict[str, Any]]
   execute_trackblazer_pre_action_items: Callable[[Dict[str, Any], Any, str], Dict[str, Any]]
   recheck_selected_training_after_item_use: Callable[..., Dict[str, Any]]
+  run_post_energy_item_followup: Callable[..., Dict[str, Any]]
   wait_for_lobby_after_item_use: Callable[..., bool]
   enforce_operator_race_gate_before_execute: Callable[..., Optional[str]]
   run_planner_race_preflight: Callable[..., Optional[str]]
@@ -411,7 +412,7 @@ def run_planner_action_with_review(
       getattr(action, "func", "") == "do_training"
       and transition_kind in {"energy_item_reassess", "energy_rescue_reassess"}
     ):
-      recheck_result = hooks.recheck_selected_training_after_item_use(
+      recheck_result = hooks.run_post_energy_item_followup(
         state_obj,
         action,
         sub_phase="reassess_after_item_use",
