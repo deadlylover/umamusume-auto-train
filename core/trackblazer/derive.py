@@ -342,16 +342,8 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
     }
   timeline_window = _timeline_window(observed_data, policy)
   skill_purchase_check = copy.deepcopy(observed_data.get("skill_purchase_check") or {})
-  skill_cadence_open = False
-  # TODO: wire this to planner runtime action-count tracking once the runtime owns skill cadence.
-  if skill_purchase_check and skill_purchase_check.get("should_check"):
-    last_purchase = skill_purchase_check.get("last_skill_purchase_action_count")
-    min_turns = int(policy.get("skill_cadence_min_turns", 5))
-    try:
-      last_purchase = int(last_purchase)
-    except (TypeError, ValueError):
-      last_purchase = None
-    skill_cadence_open = bool(last_purchase is not None and last_purchase >= min_turns)
+  skill_cadence_open = bool(skill_purchase_check.get("should_check"))
+  skill_cadence_reason = str(skill_purchase_check.get("reason") or "")
   data: Dict[str, Any] = {
     "turn_key": f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}",
     "timeline_label": observed_data.get("turn"),
@@ -378,6 +370,7 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
     "timeline_window": timeline_window,
     "lookahead_summary": lookahead_summary,
     "skill_cadence_open": skill_cadence_open,
+    "skill_cadence_reason": skill_cadence_reason,
     "race_logic_summary": {
       "low_energy_override": race_low_energy_override,
       "lookahead": copy.deepcopy(lookahead_summary.get("source") or {}),

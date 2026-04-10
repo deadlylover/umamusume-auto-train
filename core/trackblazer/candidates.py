@@ -294,6 +294,22 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       source_facts={"status_effect_names": list(observed_data.get("status_effect_names") or [])},
     )
 
+  if derived_data.get("skill_cadence_open"):
+    _append_candidate(
+      candidates,
+      node_id="skill_purchase",
+      kind="skill_purchase",
+      rationale="skill cadence gate is open for this turn",
+      requirements=["skills"],
+      source_facts={
+        "skill_cadence_open": True,
+        "reason": derived_data.get("skill_cadence_reason") or observed_data.get("skill_purchase_check", {}).get("reason"),
+        "current_sp": observed_data.get("current_stats", {}).get("sp"),
+        "threshold_sp": observed_data.get("skill_purchase_check", {}).get("threshold_sp"),
+        "scheduled_g1_race": bool(observed_data.get("skill_purchase_check", {}).get("scheduled_g1_race")),
+      },
+    )
+
   energy_ratio = derived_data.get("energy_ratio")
   rival_min_energy = float((policy or {}).get("rival_race_min_energy_ratio", 0.02) or 0.02)
   if race_opportunity.get("rival_visible") and isinstance(energy_ratio, (int, float)) and energy_ratio > rival_min_energy:

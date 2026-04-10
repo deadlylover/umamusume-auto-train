@@ -697,6 +697,20 @@ def _format_shop_lines(planned, state_summary):
     preview_names = [item.get("name") for item in priority_preview if item.get("name")]
     if preview_names:
       lines.append(f"  Priorities: {', '.join(preview_names)}")
+
+  deviations = planned.get("shop_deviations") or []
+  for deviation in deviations:
+    if not isinstance(deviation, dict):
+      continue
+    item_name = deviation.get("item_name") or deviation.get("item_key") or "item"
+    reason = deviation.get("reason") or ""
+    line = f"  Deviation: {item_name}"
+    if reason:
+      line += f" — {reason}"
+    displaced = [name for name in list(deviation.get("displaced_items") or []) if name]
+    if displaced:
+      line += f" Replaced: {', '.join(displaced)}"
+    lines.append(line)
   return lines
 
 
@@ -1089,6 +1103,7 @@ class TurnPlan:
       planned["shop_scan"] = shop_scan
 
     planned["would_buy"] = copy.deepcopy(list((self.shop_plan or {}).get("would_buy") or []))
+    planned["shop_deviations"] = copy.deepcopy(list((self.shop_plan or {}).get("deviations") or []))
     planned["would_use"] = copy.deepcopy(list((self.item_plan or {}).get("pre_action_items") or []))
     planned["deferred_use"] = copy.deepcopy(list((self.item_plan or {}).get("deferred_use") or []))
 
@@ -1200,7 +1215,7 @@ class TurnPlan:
     snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
     merged_context = dict(snapshot_context)
     review_context = dict(self.review_context or {})
-    for key in ("selected_action", "ranked_trainings", "reasoning_notes", "planned_clicks"):
+    for key in ("selected_action", "ranked_trainings", "reasoning_notes", "planned_clicks", "shop_deviations"):
       value = review_context.get(key)
       if value in (None, {}, []):
         continue

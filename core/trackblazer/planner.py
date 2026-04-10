@@ -728,6 +728,238 @@ def _candidate_shop_buys(effective_shop_items, shop_items=None, shop_summary=Non
   return would_buy[: max(0, int(limit))]
 
 
+_ENERGY_SHOP_ITEM_KEYS = ("vita_65", "royal_kale_juice", "vita_40", "vita_20")
+_SUMMER_RESERVE_ITEM_KEYS = ("vita_65", "royal_kale_juice", "vita_40")
+
+
+def _shop_buy_plan_total_cost(entries):
+  total_cost = 0
+  for entry in list(entries or []):
+    if not isinstance(entry, dict):
+      continue
+    total_cost += int(entry.get("cost") or 0)
+  return total_cost
+
+
+def _shop_effective_item_lookup(effective_shop_items):
+  lookup = {}
+  for entry in list(effective_shop_items or []):
+    if not isinstance(entry, dict):
+      continue
+    item_key = str(entry.get("key") or "")
+    if item_key:
+      lookup[item_key] = entry
+  return lookup
+
+
+def _shop_detected_item_keys(shop_items=None, shop_summary=None):
+  return set(shop_items or (shop_summary or {}).get("items_detected") or [])
+
+
+def _shop_promotion_candidate(
+  item_key,
+  *,
+  effective_lookup=None,
+  detected_keys=None,
+  held_quantities=None,
+  shop_summary=None,
+):
+  effective_lookup = effective_lookup if isinstance(effective_lookup, dict) else {}
+  detected_keys = set(detected_keys or [])
+  held_quantities = held_quantities if isinstance(held_quantities, dict) else {}
+  shop_summary = shop_summary if isinstance(shop_summary, dict) else {}
+  item_entry = dict(effective_lookup.get(item_key) or {})
+  if not item_entry:
+    return {}
+  if item_key not in detected_keys:
+    return {}
+  if item_entry.get("effective_priority") == "NEVER":
+    return {}
+
+  held_quantity = int(held_quantities.get(item_key) or 0)
+  max_quantity = int(item_entry.get("max_quantity") or 0)
+  dynamic_limit = get_dynamic_shop_limits(
+    held_quantities=held_quantities,
+    year=shop_summary.get("year"),
+    turn=shop_summary.get("turn"),
+  ).get(item_key) or {}
+  if dynamic_limit.get("block_purchase"):
+    return {}
+  dynamic_max_total = dynamic_limit.get("max_total")
+  if dynamic_max_total is not None and held_quantity >= int(dynamic_max_total):
+    return {}
+  if max_quantity > 0 and held_quantity >= max_quantity:
+    return {}
+  return {
+    "key": item_key,
+    "name": item_entry.get("display_name") or str(item_key).replace("_", " ").title(),
+    "priority": item_entry.get("effective_priority"),
+    "cost": int(item_entry.get("cost") or 0),
+    "held_quantity": held_quantity,
+    "max_quantity": max_quantity,
+    "reason": str(item_entry.get("policy_notes") or item_entry.get("notes") or ""),
+  }
+
+
+def _promote_shop_buy_entry(would_buy, promoted_entry, *, shop_coins, reason, trigger):
+  promoted_entry = dict(promoted_entry or {})
+  if not promoted_entry.get("key"):
+    return list(would_buy or []), {}
+
+  adjusted = [
+    copy.deepcopy(entry)
+    for entry in list(would_buy or [])
+    if isinstance(entry, dict)
+  ]
+  existing_index = next(
+    (
+      index
+      for index, entry in enumerate(adjusted)
+      if str(entry.get("key") or "") == str(promoted_entry.get("key") or "")
+    ),
+    None,
+  )
+  displaced = []
+  if existing_index is not None:
+    promoted = adjusted.pop(existing_index)
+    adjusted.insert(0, promoted)
+    if existing_index == 0:
+      return adjusted, {}
+  else:
+    remaining_coins = int(shop_coins or 0) - _shop_buy_plan_total_cost(adjusted)
+    while adjusted and remaining_coins < int(promoted_entry.get("cost") or 0):
+      removed = adjusted.pop()
+      displaced.append(removed.get("name") or removed.get("key") or "unknown")
+      remaining_coins += int(removed.get("cost") or 0)
+    if remaining_coins < int(promoted_entry.get("cost") or 0):
+      return list(would_buy or []), {}
+    adjusted.insert(0, copy.deepcopy(promoted_entry))
+
+  deviation = {
+    "trigger": str(trigger or "shop_deviation"),
+    "item_key": promoted_entry.get("key"),
+    "item_name": promoted_entry.get("name") or promoted_entry.get("key"),
+    "reason": str(reason or ""),
+    "displaced_items": displaced,
+  }
+  return adjusted, deviation
+
+
+def _apply_shop_deviation_rules(
+  would_buy,
+  *,
+  selected_candidate=None,
+  derived_data=None,
+  effective_shop_items=None,
+  shop_items=None,
+  shop_summary=None,
+  held_quantities=None,
+):
+  adjusted = [
+    copy.deepcopy(entry)
+    for entry in list(would_buy or [])
+    if isinstance(entry, dict)
+  ]
+  deviations = []
+  selected_candidate = selected_candidate if isinstance(selected_candidate, dict) else {}
+  derived_data = derived_data if isinstance(derived_data, dict) else {}
+  shop_summary = shop_summary if isinstance(shop_summary, dict) else {}
+  held_quantities = held_quantities if isinstance(held_quantities, dict) else {}
+  effective_lookup = _shop_effective_item_lookup(effective_shop_items)
+  detected_keys = _shop_detected_item_keys(shop_items=shop_items, shop_summary=shop_summary)
+  shop_coins = int(shop_summary.get("shop_coins") or 0)
+
+  required_item_key = _candidate_item_key(selected_candidate.get("node_id"))
+  if required_item_key and not int(held_quantities.get(required_item_key) or 0):
+    required_item = _shop_promotion_candidate(
+      required_item_key,
+      effective_lookup=effective_lookup,
+      detected_keys=detected_keys,
+      held_quantities=held_quantities,
+      shop_summary=shop_summary,
+    )
+    adjusted, deviation = _promote_shop_buy_entry(
+      adjusted,
+      required_item,
+      shop_coins=shop_coins,
+      trigger="item_assist_requirement",
+      reason=(
+        f"selected {selected_candidate.get('node_id') or 'item-assisted training'} "
+        f"requires {required_item.get('name') or required_item_key} and it is affordable in the current shop."
+      ),
+    )
+    if deviation:
+      deviations.append(deviation)
+
+  lookahead = dict(derived_data.get("lookahead_summary") or {})
+  if lookahead.get("projected_energy_deficit"):
+    energy_candidate = next(
+      (
+        _shop_promotion_candidate(
+          item_key,
+          effective_lookup=effective_lookup,
+          detected_keys=detected_keys,
+          held_quantities=held_quantities,
+          shop_summary=shop_summary,
+        )
+        for item_key in _ENERGY_SHOP_ITEM_KEYS
+        if _shop_promotion_candidate(
+          item_key,
+          effective_lookup=effective_lookup,
+          detected_keys=detected_keys,
+          held_quantities=held_quantities,
+          shop_summary=shop_summary,
+        )
+      ),
+      {},
+    )
+    adjusted, deviation = _promote_shop_buy_entry(
+      adjusted,
+      energy_candidate,
+      shop_coins=shop_coins,
+      trigger="energy_deficit",
+      reason="lookahead projects an energy deficit before the upcoming race cadence.",
+    )
+    if deviation:
+      deviations.append(deviation)
+
+  timeline_window = dict(derived_data.get("timeline_window") or {})
+  summer_distance = _safe_float(timeline_window.get("summer_distance"), 99.0)
+  summer_reserve = sum(int(held_quantities.get(item_key) or 0) for item_key in _SUMMER_RESERVE_ITEM_KEYS)
+  if summer_distance <= 1.0 and summer_reserve < 1:
+    summer_candidate = next(
+      (
+        _shop_promotion_candidate(
+          item_key,
+          effective_lookup=effective_lookup,
+          detected_keys=detected_keys,
+          held_quantities=held_quantities,
+          shop_summary=shop_summary,
+        )
+        for item_key in _SUMMER_RESERVE_ITEM_KEYS
+        if _shop_promotion_candidate(
+          item_key,
+          effective_lookup=effective_lookup,
+          detected_keys=detected_keys,
+          held_quantities=held_quantities,
+          shop_summary=shop_summary,
+        )
+      ),
+      {},
+    )
+    adjusted, deviation = _promote_shop_buy_entry(
+      adjusted,
+      summer_candidate,
+      shop_coins=shop_coins,
+      trigger="summer_reservation",
+      reason="summer is within one turn and the Vita reserve is below the planner reservation threshold.",
+    )
+    if deviation:
+      deviations.append(deviation)
+
+  return adjusted, deviations
+
+
 def _project_inventory(state_obj, planned_buys):
   projected_state = dict(state_obj or {})
   inventory = copy.deepcopy(projected_state.get("trackblazer_inventory") or {})
@@ -2023,10 +2255,20 @@ def _rank_candidates_for_selection(candidates, observed_data, derived_data, poli
     policy,
     planner_native_candidates,
   )
+  top_parallel_candidate = next(
+    (
+      dict(candidate)
+      for candidate in ranked_native
+      if str(candidate.get("node_id") or "") == "skill_purchase"
+      and _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
+    ),
+    {},
+  )
   selected_candidate = next(
     (
       dict(candidate)
       for candidate in ranked_native
+      if str(candidate.get("node_id") or "") != "skill_purchase"
       if _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
     ),
     {},
@@ -2036,6 +2278,11 @@ def _rank_candidates_for_selection(candidates, observed_data, derived_data, poli
       f"selected {selected_candidate.get('node_id')} via planner scoring "
       f"(score={_safe_float(selected_candidate.get('priority_score'), 0.0):.3f})"
     )
+    if top_parallel_candidate:
+      selection_rationale += (
+        f"; kept skill_purchase as a parallel gate candidate "
+        f"(score={_safe_float(top_parallel_candidate.get('priority_score'), 0.0):.3f})"
+      )
   else:
     selection_rationale = "no viable planner-native candidate after scoring; retaining compatibility payload"
 
@@ -3026,6 +3273,7 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
       "deferred_use": deferred_use,
       "shop_scan": shop_plan,
       "would_buy": would_buy,
+      "shop_deviations": copy.deepcopy((turn_plan.shop_plan or {}).get("deviations") or []),
     }
 
   race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
@@ -3480,6 +3728,34 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     policy,
     planner_race_plan,
   )
+  baseline_shop_buy_plan = copy.deepcopy(shop_buy_plan)
+  shop_buy_plan, shop_deviations = _apply_shop_deviation_rules(
+    shop_buy_plan,
+    selected_candidate=selected_candidate,
+    derived_data=derived.to_dict(),
+    effective_shop_items=effective_shop_items,
+    shop_items=shop_items,
+    shop_summary=shop_summary,
+    held_quantities=held_quantities,
+  )
+  if shop_buy_plan != baseline_shop_buy_plan:
+    projected_state = _project_inventory(plan_state, shop_buy_plan) if shop_buy_plan else plan_state
+    item_use_plan = plan_item_usage(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=projected_state,
+      action=action,
+      limit=limit,
+    )
+    execution_items, deferred_use, reassess_after_item_use = _attach_execution_item_plan(item_use_plan)
+    item_execution_payload = _build_item_execution_payload(
+      action,
+      shop_buy_plan,
+      execution_items,
+      deferred_use,
+      reassess_after_item_use,
+      item_use_plan.get("context") or {},
+    )
+    reobserve_boundaries = _build_reobserve_boundaries(item_execution_payload)
   selected_race_plan = _apply_ranked_selection_to_race_plan(
     state_obj,
     action,
@@ -3504,6 +3780,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     candidate_ranking=copy.deepcopy(candidate_ranking),
     shop_plan={
       "would_buy": shop_buy_plan,
+      "deviations": copy.deepcopy(shop_deviations),
       "shop_summary": copy.deepcopy(shop_summary),
       "effective_shop_items": copy.deepcopy(effective_shop_items),
       "scan": {
@@ -3561,6 +3838,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     },
     debug_summary={
       "shop_item_count": len(shop_buy_plan),
+      "shop_deviation_count": len(shop_deviations),
       "item_candidate_count": len(list(item_use_plan.get("candidates") or [])),
       "execution_item_count": len(execution_items),
       "ranked_training_count": len(ranked_trainings),
@@ -3583,6 +3861,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
         reassess_after_item_use=reassess_after_item_use,
       ),
       "ranked_trainings": copy.deepcopy(ranked_trainings),
+      "shop_deviations": copy.deepcopy(shop_deviations),
     },
     step_sequence=_build_step_sequence(
       state_obj,

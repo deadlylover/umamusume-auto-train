@@ -230,6 +230,65 @@ def _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback():
   assert action.get("training_name") == "speed", action
 
 
+def _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback():
+  action = _race_action()
+  action["trackblazer_planner_race"] = {
+    "branch_kind": "ranked_selection",
+    "fallback_action": {
+      "func": "do_training",
+      "training_name": "speed",
+      "training_function": "stat_weight_training",
+      "training_data": copy.deepcopy(action["training_data"]),
+    },
+  }
+  action["planner_race_warning_policy"] = {"warning_expected": True}
+  action["planner_warning_outcome"] = {"cancelled": False, "resolved": True}
+
+  with patch(
+    "core.skeleton._apply_legacy_rival_fallback_payload",
+    side_effect=AssertionError("legacy fallback applier should not run on planner-owned gate revert"),
+  ):
+    reverted = skeleton._revert_optional_race_to_fallback(action)
+
+  assert reverted is True, reverted
+  assert action.func == "do_training", action
+  assert action.get("training_name") == "speed", action
+
+
+def _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fallback():
+  action = _race_action()
+  action["trackblazer_planner_race"] = {
+    "branch_kind": "ranked_selection",
+    "fallback_action": {
+      "func": "do_training",
+      "training_name": "speed",
+      "training_function": "stat_weight_training",
+      "training_data": copy.deepcopy(action["training_data"]),
+    },
+  }
+  action["planner_race_warning_policy"] = {
+    "warning_expected": True,
+    "cancel_target": "do_training",
+  }
+  action["planner_warning_outcome"] = {
+    "cancelled": True,
+    "force_rest": False,
+    "reason": "optional_rival_promoted_from_rest",
+  }
+
+  with patch(
+    "core.skeleton._apply_legacy_rival_fallback_payload",
+    side_effect=AssertionError("legacy fallback applier should not run on planner-owned warning retry"),
+  ):
+    prepared = skeleton._prepare_training_fallback_after_consecutive_warning(action)
+
+  assert prepared is True, prepared
+  assert action.func == "do_training", action
+  assert action.get("training_name") == "speed", action
+  assert (action.get("trackblazer_planner_race") or {}).get("fallback_action", {}).get("func") == "do_training", action
+  assert "planner_warning_outcome" not in action.options, action
+
+
 def _test_same_turn_handoff_is_the_legacy_hydration_point():
   state_obj = _base_state()
   action = _race_action()
@@ -266,6 +325,8 @@ def main():
   _test_turn_plan_builds_execution_action_without_mutating_caller()
   _test_runtime_retry_preserves_caller_action()
   _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback()
+  _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback()
+  _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fallback()
   _test_same_turn_handoff_is_the_legacy_hydration_point()
   print("trackblazer planner milestone 8 checks: ok")
 

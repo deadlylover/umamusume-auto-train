@@ -1387,6 +1387,28 @@ def _effective_rival_fallback_func(action):
   return str((_effective_rival_fallback_payload(action) or {}).get("func") or "")
 
 
+def _planner_runtime_owns_race_payload(action):
+  return bool(
+    _action_value(action, "trackblazer_planner_race")
+    or _action_value(action, "planner_race_warning_policy")
+    or _action_value(action, "planner_warning_outcome")
+  )
+
+
+def _apply_effective_rival_fallback_payload(action, fallback_payload=None):
+  fallback_payload = (
+    dict(fallback_payload or {})
+    if isinstance(fallback_payload, dict) else
+    _effective_rival_fallback_payload(action)
+  )
+  if not fallback_payload.get("func"):
+    return False
+  if _planner_runtime_owns_race_payload(action):
+    apply_selected_action_payload(action, fallback_payload)
+    return True
+  return _apply_legacy_rival_fallback_payload(action, fallback_payload)
+
+
 def _set_rest_fallback_action(action):
   planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
   if isinstance(planner_race_payload, dict) and planner_race_payload:
@@ -1536,7 +1558,7 @@ def _revert_optional_race_to_fallback(action):
   fallback_payload = _effective_rival_fallback_payload(action)
   if fallback_payload.get("func") in ("", None, "do_race"):
     return False
-  return _apply_legacy_rival_fallback_payload(action, fallback_payload)
+  return _apply_effective_rival_fallback_payload(action, fallback_payload)
 
 
 def _should_retry_training_after_consecutive_warning(action):
@@ -1559,11 +1581,13 @@ def _prepare_training_fallback_after_consecutive_warning(action):
   fallback_payload = _effective_rival_fallback_payload(action)
   training_name = fallback_payload.get("training_name")
   training_data = fallback_payload.get("training_data")
+  planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
+  planner_owned = isinstance(planner_race_payload, dict) and bool(planner_race_payload)
 
   if not training_name or not isinstance(training_data, dict) or not training_data:
     return False
 
-  if not _apply_legacy_rival_fallback_payload(
+  if not _apply_effective_rival_fallback_payload(
     action,
     {
       "func": "do_training",
@@ -1572,8 +1596,7 @@ def _prepare_training_fallback_after_consecutive_warning(action):
     },
   ):
     return False
-  planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
-  if isinstance(planner_race_payload, dict) and planner_race_payload:
+  if planner_owned:
     planner_race_payload["fallback_action"] = {
       "func": "do_training",
       "training_name": training_name,
