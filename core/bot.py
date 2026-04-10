@@ -1,6 +1,7 @@
 # core/bot.py - Global bot state
 # Shared state variables for the bot, accessible across modules
 
+import copy
 import datetime
 import os
 import threading
@@ -82,6 +83,9 @@ turn_trace_session_started = False
 turn_trace_current_turn_label = ""
 turn_trace_snapshot_count = 0
 turn_trace_event_count = 0
+current_turn_metrics = {}
+last_completed_turn_metrics = {}
+turn_metrics_sequence = 0
 
 
 def _coerce_debug_turn_label(value):
@@ -113,6 +117,217 @@ def _extract_debug_context_from_snapshot(snapshot):
     context["action"] = action_name
 
   return context
+
+
+def _clone_turn_metrics(metrics):
+  if not isinstance(metrics, dict):
+    return {}
+  return copy.deepcopy(metrics)
+
+
+def _turn_metrics_summary(summary):
+  if not isinstance(summary, dict):
+    return {}
+  payload = {}
+  for key in ("energy_level", "max_energy", "current_mood", "criteria"):
+    if summary.get(key) is not None:
+      payload[key] = copy.deepcopy(summary.get(key))
+  return payload
+
+
+def _selected_action_summary(selected_action):
+  if not isinstance(selected_action, dict):
+    return {}
+  payload = {}
+  for key in (
+    "func",
+    "training_name",
+    "training_function",
+    "race_name",
+    "prefer_rival_race",
+    "reassess_after_item_use",
+  ):
+    if selected_action.get(key) is not None:
+      payload[key] = copy.deepcopy(selected_action.get(key))
+  training_data = selected_action.get("training_data") or {}
+  if isinstance(training_data, dict):
+    summary = {}
+    for key in ("score_tuple", "failure", "total_supports", "total_rainbow_friends", "stat_gains"):
+      if training_data.get(key) is not None:
+        summary[key] = copy.deepcopy(training_data.get(key))
+    if summary:
+      payload["training_data"] = summary
+  return payload
+
+
+def _default_turn_metrics(now, trigger="", context=None):
+  return {
+    "sequence": 0,
+    "status": "in_progress",
+    "trigger": str(trigger or ""),
+    "started_at": float(now),
+    "updated_at": float(now),
+    "completed_at": None,
+    "total_duration": None,
+    "completion_reason": "",
+    "turn_label": "",
+    "year": "",
+    "turn": "",
+    "scenario_name": "",
+    "state_summary": {},
+    "selected_action": {},
+    "steps": [],
+    "category_totals": {},
+    "lobby_detect": copy.deepcopy(context or {}),
+  }
+
+
+def _record_turn_timing_step_unlocked(metrics, *, label, category="", key="", status="completed", started_at=None, finished_at=None, duration=None, detail="", data=None):
+  if not isinstance(metrics, dict):
+    return
+  now = time.time()
+  started = float(started_at if started_at is not None else now)
+  finished = float(finished_at if finished_at is not None else now)
+  normalized_duration = duration
+  if normalized_duration is None and finished_at is not None and started_at is not None:
+    normalized_duration = max(0.0, finished - started)
+  if normalized_duration is not None:
+    normalized_duration = round(float(normalized_duration), 4)
+  step = {
+    "key": str(key or ""),
+    "label": str(label or "step"),
+    "category": str(category or ""),
+    "status": str(status or "completed"),
+    "started_at": round(started, 4),
+    "finished_at": round(finished, 4),
+    "duration": normalized_duration,
+    "detail": str(detail or ""),
+    "data": copy.deepcopy(data) if data is not None else {},
+  }
+  metrics["steps"].append(step)
+  if category and normalized_duration is not None:
+    metrics["category_totals"][category] = round(
+      float(metrics["category_totals"].get(category, 0.0)) + normalized_duration,
+      4,
+    )
+  metrics["updated_at"] = now
+
+
+def _complete_turn_metrics_unlocked(now, reason="", detail="", data=None):
+  global current_turn_metrics, last_completed_turn_metrics
+  metrics = current_turn_metrics if isinstance(current_turn_metrics, dict) else {}
+  if not metrics or metrics.get("status") == "completed":
+    return {}
+  metrics["status"] = "completed"
+  metrics["completed_at"] = float(now)
+  metrics["updated_at"] = float(now)
+  metrics["completion_reason"] = str(reason or "")
+  metrics["total_duration"] = round(max(0.0, float(now) - float(metrics.get("started_at") or now)), 4)
+  if detail or data:
+    _record_turn_timing_step_unlocked(
+      metrics,
+      label="Turn completion",
+      category="wait",
+      key="turn_completion",
+      status="completed",
+      started_at=now,
+      finished_at=now,
+      duration=0.0,
+      detail=detail,
+      data=data,
+    )
+  last_completed_turn_metrics = _clone_turn_metrics(metrics)
+  current_turn_metrics = {}
+  return _clone_turn_metrics(last_completed_turn_metrics)
+
+
+def reset_turn_metrics():
+  global current_turn_metrics, last_completed_turn_metrics, turn_metrics_sequence
+  with runtime_lock:
+    current_turn_metrics = {}
+    last_completed_turn_metrics = {}
+    turn_metrics_sequence = 0
+
+
+def start_turn_metrics(trigger="", context=None):
+  global current_turn_metrics, turn_metrics_sequence
+  now = time.time()
+  with runtime_lock:
+    if current_turn_metrics and current_turn_metrics.get("status") != "completed":
+      _complete_turn_metrics_unlocked(
+        now,
+        reason="superseded_by_new_lobby_detect",
+        detail="A new stable lobby detect started before the previous cycle completed.",
+      )
+    turn_metrics_sequence += 1
+    current_turn_metrics = _default_turn_metrics(now, trigger=trigger, context=context)
+    current_turn_metrics["sequence"] = int(turn_metrics_sequence)
+    _record_turn_timing_step_unlocked(
+      current_turn_metrics,
+      label="Lobby detect",
+      category="detection",
+      key="lobby_detect",
+      status="completed",
+      started_at=now,
+      finished_at=now,
+      duration=0.0,
+      detail=str((context or {}).get("detail") or "Stable career lobby detected."),
+      data=context,
+    )
+
+
+def update_turn_metrics_context(turn_label="", year="", turn="", scenario_name="", state_summary=None, selected_action=None):
+  with runtime_lock:
+    if not current_turn_metrics or current_turn_metrics.get("status") == "completed":
+      return
+    if turn_label:
+      current_turn_metrics["turn_label"] = str(turn_label)
+    if year:
+      current_turn_metrics["year"] = str(year)
+    if turn:
+      current_turn_metrics["turn"] = str(turn)
+    if scenario_name:
+      current_turn_metrics["scenario_name"] = str(scenario_name)
+    summary_payload = _turn_metrics_summary(state_summary)
+    if summary_payload:
+      current_turn_metrics["state_summary"].update(summary_payload)
+    action_payload = _selected_action_summary(selected_action)
+    if action_payload:
+      current_turn_metrics["selected_action"] = action_payload
+    current_turn_metrics["updated_at"] = time.time()
+
+
+def record_turn_timing_step(label, category="", key="", status="completed", started_at=None, finished_at=None, duration=None, detail="", data=None):
+  now = time.time()
+  with runtime_lock:
+    if not current_turn_metrics or current_turn_metrics.get("status") == "completed":
+      current_turn_metrics.update(_default_turn_metrics(now, trigger="implicit"))
+    _record_turn_timing_step_unlocked(
+      current_turn_metrics,
+      label=label,
+      category=category,
+      key=key,
+      status=status,
+      started_at=started_at,
+      finished_at=finished_at,
+      duration=duration,
+      detail=detail,
+      data=data,
+    )
+
+
+def complete_turn_metrics(reason="", detail="", data=None):
+  now = time.time()
+  with runtime_lock:
+    return _complete_turn_metrics_unlocked(now, reason=reason, detail=detail, data=data)
+
+
+def get_turn_metrics():
+  with runtime_lock:
+    return {
+      "current": _clone_turn_metrics(current_turn_metrics),
+      "last_completed": _clone_turn_metrics(last_completed_turn_metrics),
+    }
 
 
 def _turn_trace_settings():
@@ -457,6 +672,10 @@ def get_runtime_state():
       "is_bot_running": is_bot_running,
       "post_action_resolution": dict(post_action_resolution or {}),
       "backend_state": get_backend_state(),
+      "turn_metrics": {
+        "current": _clone_turn_metrics(current_turn_metrics),
+        "last_completed": _clone_turn_metrics(last_completed_turn_metrics),
+      },
       "snapshot": latest_snapshot.copy() if isinstance(latest_snapshot, dict) else latest_snapshot,
     }
 

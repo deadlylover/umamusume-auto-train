@@ -1,7 +1,9 @@
 import copy
 from collections import Counter
+from contextlib import contextmanager
 import pyautogui
 import os
+import time
 import cv2
 from pathlib import Path
 
@@ -1159,6 +1161,169 @@ def _action_func(action):
   if isinstance(action, dict):
     return action.get("func")
   return getattr(action, "func", None)
+
+
+def _format_turn_metric_value(value, digits=3):
+  if value is None:
+    return "?"
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return str(value)
+  text = f"{number:.{digits}f}"
+  return text.rstrip("0").rstrip(".")
+
+
+def _turn_metric_detail(*parts):
+  rendered = [str(part).strip() for part in parts if part not in (None, "", [], {}, ())]
+  return " | ".join(rendered)
+
+
+def _turn_metric_action_label(action):
+  func_name = _action_func(action) or "unknown"
+  training_name = _action_value(action, "training_name")
+  race_name = _action_value(action, "race_name")
+  if func_name == "do_training" and training_name:
+    return f"{func_name}({training_name})"
+  if func_name == "do_race" and race_name:
+    return f"{func_name}({race_name})"
+  return func_name
+
+
+def _turn_metric_action_payload(action):
+  if action is None:
+    return {}
+  payload = {
+    "func": _action_func(action),
+    "training_name": _action_value(action, "training_name"),
+    "training_function": _action_value(action, "training_function"),
+    "race_name": _action_value(action, "race_name"),
+    "reassess_after_item_use": _action_value(action, "trackblazer_reassess_after_item_use"),
+  }
+  training_data = _action_value(action, "training_data") or {}
+  if isinstance(training_data, dict):
+    payload["training_data"] = {
+      "score_tuple": training_data.get("score_tuple"),
+      "failure": training_data.get("failure"),
+      "total_supports": training_data.get("total_supports"),
+      "total_rainbow_friends": training_data.get("total_rainbow_friends"),
+      "stat_gains": copy.deepcopy(training_data.get("stat_gains")),
+    }
+  return payload
+
+
+def _sync_turn_metrics_context(state_obj=None, action=None):
+  if not isinstance(state_obj, dict):
+    return
+  bot.update_turn_metrics_context(
+    turn_label=f"{state_obj.get('year', '?')} / {state_obj.get('turn', '?')}",
+    year=state_obj.get("year"),
+    turn=state_obj.get("turn"),
+    scenario_name=constants.SCENARIO_NAME or "default",
+    state_summary={
+      "energy_level": state_obj.get("energy_level"),
+      "max_energy": state_obj.get("max_energy"),
+      "current_mood": state_obj.get("current_mood"),
+      "criteria": state_obj.get("criteria"),
+    },
+    selected_action=_turn_metric_action_payload(action),
+  )
+
+
+def _flow_timing_total(flow):
+  if not isinstance(flow, dict):
+    return None
+  total = flow.get("timing_total")
+  if total is not None:
+    return total
+  timing = flow.get("timing") or {}
+  if isinstance(timing, dict):
+    return timing.get("total")
+  return None
+
+
+def _inventory_step_detail(state_obj):
+  summary = (state_obj or {}).get("trackblazer_inventory_summary") or {}
+  flow = (state_obj or {}).get("trackblazer_inventory_flow") or {}
+  item_count = len(summary.get("items_detected") or [])
+  detail = [
+    f"items={item_count}",
+    f"source={'cached' if flow.get('cached') else 'scanned'}",
+  ]
+  if flow.get("trigger"):
+    detail.append(f"trigger={flow.get('trigger')}")
+  if flow.get("reason"):
+    detail.append(f"reason={flow.get('reason')}")
+  return _turn_metric_detail(*detail)
+
+
+def _shop_step_detail(result):
+  result = result or {}
+  flow = result.get("trackblazer_shop_flow") or {}
+  summary = result.get("trackblazer_shop_summary") or {}
+  detail = [
+    f"items={len(summary.get('items_detected') or [])}",
+    f"buyable={len(summary.get('purchasable_items') or result.get('trackblazer_shop_items') or [])}",
+  ]
+  shop_coins = summary.get("shop_coins")
+  if shop_coins is not None and shop_coins != -1:
+    detail.append(f"coins={shop_coins}")
+  if flow.get("trigger"):
+    detail.append(f"trigger={flow.get('trigger')}")
+  if flow.get("scan_source"):
+    detail.append(f"scan_source={flow.get('scan_source')}")
+  if flow.get("reason"):
+    detail.append(f"reason={flow.get('reason')}")
+  return _turn_metric_detail(*detail)
+
+
+def _strategy_step_detail(action):
+  func_name = _action_func(action) or "none"
+  if func_name == "do_training":
+    training_data = _action_value(action, "training_data") or {}
+    score_tuple = training_data.get("score_tuple") or []
+    score_value = score_tuple[0] if score_tuple else None
+    return _turn_metric_detail(
+      f"selected={_turn_metric_action_label(action)}",
+      f"score={_format_turn_metric_value(score_value, digits=1)}" if score_value is not None else None,
+      f"failure={training_data.get('failure')}%" if training_data.get("failure") is not None else None,
+      f"supports={training_data.get('total_supports')}" if training_data.get("total_supports") is not None else None,
+    )
+  if func_name == "do_race":
+    race_decision = _action_value(action, "trackblazer_race_decision") or {}
+    return _turn_metric_detail(
+      f"selected={_turn_metric_action_label(action)}",
+      f"reason={race_decision.get('reason')}" if race_decision.get("reason") else None,
+    )
+  return _turn_metric_detail(f"selected={func_name}")
+
+
+@contextmanager
+def _timed_turn_step(label, category, key=None, detail=None, data=None):
+  step = {
+    "detail": detail or "",
+    "data": copy.deepcopy(data) if data is not None else {},
+    "status": "completed",
+  }
+  started_at = time.time()
+  try:
+    yield step
+  except Exception as exc:
+    step["status"] = "failed"
+    if not step.get("detail"):
+      step["detail"] = str(exc)
+    raise
+  finally:
+    bot.record_turn_timing_step(
+      label=label,
+      category=category,
+      key=key or label.lower().replace(" ", "_"),
+      status=step.get("status") or "completed",
+      started_at=started_at,
+      finished_at=time.time(),
+      detail=step.get("detail") or "",
+      data=step.get("data") or {},
+    )
 
 
 def _action_option_pop(action, key):
@@ -3166,6 +3331,14 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
     screenshot = device_action.screenshot()
     stable_lobby, anchor_counts = _is_stable_career_lobby_screen(screenshot=screenshot)
     if stable_lobby:
+      bot.complete_turn_metrics(
+        reason="stable_lobby_confirmed",
+        detail=_turn_metric_detail(
+          f"action={action_name}",
+          "Stable lobby confirmed after action.",
+        ),
+        data={"anchor_counts": dict(anchor_counts or {})},
+      )
       _update_post_action_resolution_snapshot(
         state_obj,
         action,
@@ -4106,6 +4279,7 @@ def update_operator_snapshot(
     current = bot.get_runtime_state()
     bot.set_phase(current["phase"], status=status, message=message, error=error_text, sub_phase=sub_phase or current.get("sub_phase"))
   if state_obj is not None and action is not None:
+    _sync_turn_metrics_context(state_obj, action)
     bot.set_snapshot(
       build_review_snapshot(
         state_obj,
@@ -4207,9 +4381,16 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   if execution_intent != "execute":
     # Run a non-destructive dry_run simulation so check_only exercises
     # the same open→scan→control-detect→close flow as execute mode.
-    _run_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
+    with _timed_turn_step("Pre-action items (dry run)", "execution", key="pre_action_items_dry_run") as step:
+      _run_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
+      step["detail"] = f"action={_turn_metric_action_label(action)}"
     return "previewed"
-  skill_purchase_result = _run_skill_purchase_plan(state_obj, action, action_count)
+  with _timed_turn_step("Skill purchase", "execution", key="skill_purchase") as step:
+    skill_purchase_result = _run_skill_purchase_plan(state_obj, action, action_count)
+    step["detail"] = _turn_metric_detail(
+      f"status={skill_purchase_result.get('status')}",
+      f"reason={skill_purchase_result.get('reason')}" if skill_purchase_result.get("reason") else None,
+    )
   if skill_purchase_result.get("status") == "failed":
     skill_result = skill_purchase_result.get("result") or {}
     skill_flow = (skill_result.get("skill_purchase_flow") or {})
@@ -4252,7 +4433,12 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   # Pre-action items (energy rescue, whistle, etc.) must run before the
   # pre_run_hook (rival scout) because they may trigger a reassess that
   # re-evaluates the action entirely.  Defer the hook until after items.
-  shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
+  with _timed_turn_step("Shop purchase", "execution", key="shop_purchase") as step:
+    shop_purchase_result = _run_trackblazer_shop_purchases(state_obj, action)
+    step["detail"] = _turn_metric_detail(
+      f"status={shop_purchase_result.get('status')}",
+      f"reason={shop_purchase_result.get('reason')}" if shop_purchase_result.get("reason") else None,
+    )
   if shop_purchase_result.get("status") == "failed":
     shop_result = shop_purchase_result.get("result") or {}
     shop_flow = (shop_result.get("trackblazer_shop_flow") or {})
@@ -4285,7 +4471,9 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       planned_clicks=planned_clicks,
     )
   if shop_purchase_result.get("status") == "executed":
-    lobby_after_shop = _wait_for_lobby_after_shop_purchase()
+    with _timed_turn_step("Wait for lobby after shop", "wait", key="wait_for_lobby_after_shop") as step:
+      lobby_after_shop = _wait_for_lobby_after_shop_purchase()
+      step["detail"] = f"ready={'yes' if lobby_after_shop else 'no'}"
     if not lobby_after_shop:
       update_operator_snapshot(
         state_obj,
@@ -4298,7 +4486,12 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         planned_clicks=planned_clicks,
       )
       return "blocked"
-  pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
+  with _timed_turn_step("Pre-action items", "execution", key="pre_action_items") as step:
+    pre_action_item_result = _run_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
+    step["detail"] = _turn_metric_detail(
+      f"status={pre_action_item_result.get('status')}",
+      f"reason={pre_action_item_result.get('reason')}" if pre_action_item_result.get("reason") else None,
+    )
   if pre_action_item_result.get("status") == "failed":
     failure_reason = pre_action_item_result.get("reason") or "trackblazer_pre_action_items_failed"
     if failure_reason in {
@@ -4367,7 +4560,9 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     # on the career lobby.  If the close was slow or the game lingered on
     # an overlay, the next action.run() would fail to find lobby buttons.
     # Poll briefly for a lobby anchor before proceeding.
-    lobby_confirmed = _wait_for_lobby_after_item_use(state_obj, action, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks)
+    with _timed_turn_step("Wait for lobby after item use", "wait", key="wait_for_lobby_after_item_use") as step:
+      lobby_confirmed = _wait_for_lobby_after_item_use(state_obj, action, sub_phase=sub_phase, ocr_debug=ocr_debug, planned_clicks=planned_clicks)
+      step["detail"] = f"ready={'yes' if lobby_confirmed else 'no'}"
     if not lobby_confirmed:
       update_operator_snapshot(
         state_obj,
@@ -4383,26 +4578,32 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
   # Run pre_run_hook (e.g. rival scout) now — after items are consumed and
   # any reassess has already returned.  This ensures energy rescue → reassess
   # completes before we open the race list.
-  gate_result = _enforce_operator_race_gate_before_execute(
-    state_obj,
-    action,
-    sub_phase=sub_phase,
-    ocr_debug=ocr_debug,
-    planned_clicks=planned_clicks,
-  )
+  with _timed_turn_step("Operator race gate", "decision", key="operator_race_gate") as step:
+    gate_result = _enforce_operator_race_gate_before_execute(
+      state_obj,
+      action,
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    step["detail"] = f"result={gate_result}"
   if gate_result == "blocked":
     return "blocked"
-  planner_preflight_result = _run_planner_race_preflight(
-    state_obj,
-    action,
-    sub_phase=sub_phase,
-    ocr_debug=ocr_debug,
-    planned_clicks=planned_clicks,
-  )
+  with _timed_turn_step("Planner race preflight", "decision", key="planner_race_preflight") as step:
+    planner_preflight_result = _run_planner_race_preflight(
+      state_obj,
+      action,
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    step["detail"] = f"result={planner_preflight_result}"
   if planner_preflight_result in {"failed", "blocked", "reassess", "previewed", "executed"}:
     return planner_preflight_result
   if gate_result != "reverted" and pre_run_hook is not None:
-    hook_result = pre_run_hook()
+    with _timed_turn_step("Pre-run hook", "decision", key="pre_run_hook") as step:
+      hook_result = pre_run_hook()
+      step["detail"] = f"result={hook_result}" if hook_result is not None else "completed"
     if isinstance(hook_result, str) and hook_result in {"failed", "blocked", "reassess", "previewed", "executed"}:
       return hook_result
   update_operator_snapshot(
@@ -4414,7 +4615,12 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
   )
-  result = action.run()
+  with _timed_turn_step("Action run", "execution", key="action_run") as step:
+    result = action.run()
+    step["detail"] = _turn_metric_detail(
+      f"action={_turn_metric_action_label(action)}",
+      f"success={'yes' if result else 'no'}",
+    )
   if not result:
     update_operator_snapshot(
       state_obj,
@@ -4427,7 +4633,12 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
       planned_clicks=planned_clicks,
     )
     return "failed"
-  post_action_result = _resolve_post_action_resolution(state_obj, action)
+  with _timed_turn_step("Post-action resolution", "wait", key="post_action_resolution") as step:
+    post_action_result = _resolve_post_action_resolution(state_obj, action)
+    step["detail"] = _turn_metric_detail(
+      f"action={_turn_metric_action_label(action)}",
+      f"resolved={'yes' if post_action_result else 'no'}",
+    )
   if not post_action_result:
     update_operator_snapshot(
       state_obj,
@@ -4563,6 +4774,7 @@ def career_lobby(dry_run_turn=False):
   last_trackblazer_shop_refresh_turn = None
   _cached_trackblazer_inventory = None
   _cached_trackblazer_inventory_turn = None
+  bot.reset_turn_metrics()
   bot.clear_trackblazer_shop_check_request()
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
@@ -4738,6 +4950,14 @@ def career_lobby(dry_run_turn=False):
         continue
       else:
         bot.push_debug_history({"event": "state", "asset": "stable_career_screen", "result": "matched", "context": "lobby_scan"})
+        bot.start_turn_metrics(
+          trigger="stable_career_screen",
+          context={
+            "detail": "Stable career lobby detected.",
+            "anchor_counts": dict(stable_anchor_counts or {}),
+            "action_count": action_count,
+          },
+        )
         info(f"Stable career screen matched, moving to state collection. anchor_counts={stable_anchor_counts}")
         if constants.SCENARIO_NAME == "":
           if config.SKIP_SCENARIO_DETECTION:
@@ -4765,8 +4985,15 @@ def career_lobby(dry_run_turn=False):
 
       action = Action()
       update_operator_snapshot(phase="collecting_main_state", message="Collecting main state.")
-      state_obj = collect_main_state()
+      with _timed_turn_step("Collect main state", "state", key="collect_main_state") as step:
+        state_obj = collect_main_state()
+        step["detail"] = _turn_metric_detail(
+          f"energy={state_obj.get('energy_level')}/{state_obj.get('max_energy')}",
+          f"mood={state_obj.get('current_mood')}",
+          f"date={state_obj.get('year')} / {state_obj.get('turn')}",
+        )
       _restore_turn_from_last_state(state_obj)
+      _sync_turn_metrics_context(state_obj, action)
 
       state_validation = strategy.validate_state_details(state_obj)
       if not state_validation.get("valid"):
@@ -4837,6 +5064,14 @@ def career_lobby(dry_run_turn=False):
             "skipped": True,
             "reason": "using_cached_inventory",
           }
+          bot.record_turn_timing_step(
+            label="Trackblazer inventory",
+            category="scan",
+            key="trackblazer_inventory",
+            duration=0.0,
+            detail=_inventory_step_detail(state_obj),
+            data={"cached": True},
+          )
           _push_flow_decision_debug(
             state_obj,
             asset="trackblazer_inventory",
@@ -4857,10 +5092,16 @@ def career_lobby(dry_run_turn=False):
             sub_phase="scan_items",
           )
           update_operator_snapshot(phase="checking_inventory", message="Scanning Trackblazer inventory.", sub_phase="scan_items")
-          state_obj = collect_trackblazer_inventory(
-            state_obj,
-            allow_open_non_execute=execution_intent != "execute",
-          )
+          with _timed_turn_step("Trackblazer inventory", "scan", key="trackblazer_inventory") as step:
+            state_obj = collect_trackblazer_inventory(
+              state_obj,
+              allow_open_non_execute=execution_intent != "execute",
+            )
+            step["detail"] = _inventory_step_detail(state_obj)
+            step["data"] = {
+              "timing_total": _flow_timing_total(state_obj.get("trackblazer_inventory_flow") or {}),
+              "cached": bool((state_obj.get("trackblazer_inventory_flow") or {}).get("cached")),
+            }
           if _trackblazer_inventory_flow_cacheable(state_obj.get("trackblazer_inventory_flow")):
             _cache_trackblazer_inventory(state_obj, turn_key=action_count)
           else:
@@ -4895,10 +5136,16 @@ def career_lobby(dry_run_turn=False):
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
           trigger = pending_shop_reason or ("first_scan" if never_scanned else "automatic" if automatic_turn_scan else "pending_shop_check")
-          shop_result = check_trackblazer_shop_inventory(
-            trigger=trigger,
-            year=state_obj.get("year"),
-          )
+          with _timed_turn_step("Trackblazer shop", "scan", key="trackblazer_shop") as step:
+            shop_result = check_trackblazer_shop_inventory(
+              trigger=trigger,
+              year=state_obj.get("year"),
+            )
+            step["detail"] = _shop_step_detail(shop_result)
+            step["data"] = {
+              "timing_total": _flow_timing_total((shop_result or {}).get("trackblazer_shop_flow") or {}),
+              "trigger": trigger,
+            }
           shop_flow = (shop_result or {}).get("trackblazer_shop_flow") or {}
           shop_entry_result = shop_flow.get("entry_result") or {}
           shop_entry_check = (shop_entry_result.get("shop_check") or {})
@@ -5012,6 +5259,14 @@ def career_lobby(dry_run_turn=False):
             "[TB_SHOP] Skipping automatic shop recheck for this turn; "
             f"already refreshed inventory after shop for {current_trackblazer_turn}."
           )
+          bot.record_turn_timing_step(
+            label="Trackblazer shop",
+            category="decision",
+            key="trackblazer_shop",
+            duration=0.0,
+            detail="Skipped automatic shop recheck for this turn.",
+            data={"skipped": True, "reason": "already_refreshed_this_turn"},
+          )
         else:
           _push_flow_decision_debug(
             state_obj,
@@ -5026,10 +5281,29 @@ def career_lobby(dry_run_turn=False):
             phase="checking_shop",
             sub_phase="scan_shop",
           )
+          bot.record_turn_timing_step(
+            label="Trackblazer shop",
+            category="decision",
+            key="trackblazer_shop",
+            duration=0.0,
+            detail=_turn_metric_detail(
+              "Shop scan skipped.",
+              f"pending={bool(pending_shop_check)}",
+              f"automatic={bool(automatic_turn_scan)}",
+              f"intent={execution_intent}",
+            ),
+            data={"skipped": True, "execution_intent": execution_intent},
+          )
 
         from scenarios.trackblazer import inspect_climax_race_day_detection
 
-        climax_detection = inspect_climax_race_day_detection(log_result=True)
+        with _timed_turn_step("Climax race-day check", "decision", key="climax_race_day_check") as step:
+          climax_detection = inspect_climax_race_day_detection(log_result=True)
+          step["detail"] = _turn_metric_detail(
+            f"detected={bool(climax_detection.get('detected'))}",
+            f"banner={bool((climax_detection.get('banner') or {}).get('passed_threshold'))}",
+            f"button={bool((climax_detection.get('button') or {}).get('passed_threshold'))}",
+          )
         state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected"))
         state_obj["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
         state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
@@ -5060,11 +5334,17 @@ def career_lobby(dry_run_turn=False):
               message="Refreshing Trackblazer inventory after shop.",
               sub_phase="scan_items_post_shop",
             )
-            state_obj = collect_trackblazer_inventory(
-              state_obj,
-              allow_open_non_execute=True,
-              trigger="post_shop_refresh",
-            )
+            with _timed_turn_step("Post-shop inventory refresh", "scan", key="post_shop_inventory_refresh") as step:
+              state_obj = collect_trackblazer_inventory(
+                state_obj,
+                allow_open_non_execute=True,
+                trigger="post_shop_refresh",
+              )
+              step["detail"] = _inventory_step_detail(state_obj)
+              step["data"] = {
+                "timing_total": _flow_timing_total(state_obj.get("trackblazer_inventory_flow") or {}),
+                "trigger": "post_shop_refresh",
+              }
             _cache_trackblazer_inventory(state_obj, turn_key=action_count)
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
             bot.clear_trackblazer_shop_check_request()
@@ -5362,7 +5642,12 @@ def career_lobby(dry_run_turn=False):
         phase="collecting_training_state",
       )
       update_operator_snapshot(phase="collecting_training_state", message="Scanning all trainings.")
-      state_obj = collect_training_state(state_obj, training_function_name)
+      with _timed_turn_step("Training scan", "scan", key="training_scan") as step:
+        state_obj = collect_training_state(state_obj, training_function_name)
+        step["detail"] = _turn_metric_detail(
+          f"training_function={training_function_name}",
+          f"options={len(state_obj.get('training_results') or {})}",
+        )
       update_pre_action_phase(
         state_obj,
         action,
@@ -5377,7 +5662,9 @@ def career_lobby(dry_run_turn=False):
       if constants.SCENARIO_NAME in ("mant", "trackblazer"):
         update_operator_snapshot(phase="collecting_race_state", message="Checking race indicators.")
         from scenarios.trackblazer import check_rival_race_indicator
-        rival_indicator = check_rival_race_indicator(state_obj)
+        with _timed_turn_step("Race indicator check", "decision", key="race_indicator_check") as step:
+          rival_indicator = check_rival_race_indicator(state_obj)
+          step["detail"] = f"rival_indicator={'detected' if rival_indicator else 'not_detected'}"
         state_obj["rival_indicator_detected"] = rival_indicator
         update_operator_snapshot(
           state_obj, action,
@@ -5390,8 +5677,11 @@ def career_lobby(dry_run_turn=False):
       info(f"State: {state_obj}")
 
       update_operator_snapshot(phase="evaluating_strategy", message="Evaluating strategy.")
-      action = strategy.decide(state_obj, action)
+      with _timed_turn_step("Strategy decision", "decision", key="strategy_decision") as step:
+        action = strategy.decide(state_obj, action)
+        step["detail"] = _strategy_step_detail(action)
       update_operator_snapshot(state_obj, action, phase="evaluating_strategy", message="Strategy decision ready.")
+      _sync_turn_metrics_context(state_obj, action)
       _push_flow_decision_debug(
         state_obj,
         asset="strategy_decision",

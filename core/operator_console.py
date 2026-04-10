@@ -3,6 +3,7 @@ import queue
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -958,6 +959,7 @@ class OperatorConsole:
       "execution_intent": snapshot.get("execution_intent") or runtime_state.get("execution_intent"),
       "post_action_resolution": runtime_state.get("post_action_resolution") or {},
       "backend_state": backend_state,
+      "turn_metrics": runtime_state.get("turn_metrics") or {},
       "adb_health": {
         "available": adb_state.get("adb_available"),
         "connected": adb_state.get("adb_connected"),
@@ -969,7 +971,7 @@ class OperatorConsole:
     }
     self._summary_raw_value = json.dumps(summary_payload, indent=2, ensure_ascii=True, default=str)
     planned_text = self._format_planned_actions(snapshot)
-    timing_text = self._format_timing(snapshot)
+    timing_text = self._format_timing(snapshot, runtime_state=runtime_state)
     self._update_history_on_render(snapshot, planned_text, timing_text)
     if self._history_selected == "live":
       self._set_text(self._planned_actions_text, planned_text)
@@ -1031,7 +1033,30 @@ class OperatorConsole:
     widget.insert("1.0", value)
     widget.configure(state=tk.DISABLED)
 
-  def _format_timing(self, snapshot):
+  def _format_timing(self, snapshot, runtime_state=None):
+    runtime_state = runtime_state or {}
+    sub_phase = snapshot.get("sub_phase") or ""
+    if sub_phase in {
+      "manual_skill_purchase_check",
+      "manual_shop_check",
+      "manual_inventory_check",
+      "manual_inventory_selection_test",
+    }:
+      return self._format_flow_timing(snapshot)
+    turn_metrics = runtime_state.get("turn_metrics") or {}
+    current_metrics = turn_metrics.get("current") or {}
+    last_completed_metrics = turn_metrics.get("last_completed") or {}
+    sections = []
+    if current_metrics:
+      sections.append(self._format_turn_metrics_section(current_metrics, title="Current Turn"))
+    if last_completed_metrics:
+      sections.append(self._format_turn_metrics_section(last_completed_metrics, title="Last Completed Turn"))
+    sections = [section for section in sections if section]
+    if sections:
+      return "\n\n".join(sections)
+    return self._format_flow_timing(snapshot)
+
+  def _format_flow_timing(self, snapshot):
     state_summary = snapshot.get("state_summary") or {}
     sub_phase = snapshot.get("sub_phase") or ""
     if sub_phase == "manual_skill_purchase_check":
@@ -1088,6 +1113,76 @@ class OperatorConsole:
       lines.append("=== Close Breakdown ===")
       lines.extend(self._format_timing_mapping(close_timing))
     return "\n".join(lines)
+
+  def _format_turn_metrics_section(self, metrics, title):
+    if not isinstance(metrics, dict) or not metrics:
+      return ""
+    lines = [f"=== {title} ==="]
+    turn_label = metrics.get("turn_label") or "Pending main state"
+    lines.append(f"  turn          {turn_label}")
+    status = metrics.get("status") or "in_progress"
+    completion_reason = metrics.get("completion_reason") or ""
+    status_text = f"{status} ({completion_reason})" if completion_reason else status
+    lines.append(f"  status        {status_text}")
+    elapsed = metrics.get("total_duration")
+    if elapsed is None:
+      started_at = metrics.get("started_at")
+      if started_at is not None:
+        elapsed = max(0.0, time.time() - float(started_at))
+    if elapsed is not None:
+      lines.append(f"  elapsed       {float(elapsed):.3f}s")
+    selected_action = metrics.get("selected_action") or {}
+    action_label = self._format_turn_metrics_action_label(selected_action)
+    if action_label:
+      lines.append(f"  action        {action_label}")
+    summary = metrics.get("state_summary") or {}
+    energy = summary.get("energy_level")
+    max_energy = summary.get("max_energy")
+    if energy is not None or max_energy is not None:
+      lines.append(f"  energy        {self._format_number(energy, digits=0)}/{self._format_number(max_energy, digits=0)}")
+    mood = summary.get("current_mood")
+    if mood:
+      lines.append(f"  mood          {mood}")
+    category_totals = metrics.get("category_totals") or {}
+    if category_totals:
+      lines.append("")
+      lines.append("Category Totals:")
+      for key, value in category_totals.items():
+        lines.append(f"  {key:13s} {float(value):.3f}s")
+    steps = metrics.get("steps") or []
+    if steps:
+      lines.append("")
+      lines.append("Timeline:")
+      for index, step in enumerate(steps, start=1):
+        lines.append(self._format_turn_metrics_step(step, index))
+    return "\n".join(lines)
+
+  def _format_turn_metrics_action_label(self, selected_action):
+    if not isinstance(selected_action, dict):
+      return ""
+    func_name = selected_action.get("func") or ""
+    training_name = selected_action.get("training_name") or ""
+    race_name = selected_action.get("race_name") or ""
+    if func_name == "do_training" and training_name:
+      return f"{func_name}({training_name})"
+    if func_name == "do_race" and race_name:
+      return f"{func_name}({race_name})"
+    return func_name
+
+  def _format_turn_metrics_step(self, step, index):
+    if not isinstance(step, dict):
+      return f"  {index}. {step}"
+    label = step.get("label") or step.get("key") or f"step_{index}"
+    duration = step.get("duration")
+    duration_text = f"{float(duration):.3f}s" if duration is not None else "-"
+    status = step.get("status") or "completed"
+    prefix = f"  {index}. {label} [{duration_text}]"
+    if status != "completed":
+      prefix += f" ({status})"
+    detail = step.get("detail") or ""
+    if detail:
+      prefix += f"  {detail}"
+    return prefix
 
   def _format_planned_actions(self, snapshot):
     turn_discussion_text = snapshot.get("turn_discussion_text")
