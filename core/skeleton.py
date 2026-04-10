@@ -5379,85 +5379,152 @@ def career_lobby(dry_run_turn=False):
           if shop_entry_result.get("clicked") and not shop_flow.get("entered"):
             warning(
               "[TB_SHOP] Shop entry clicked but was not verified; "
-              "retrying the same turn from lobby before opening training."
+              "waiting for lobby recovery before deciding whether to continue or retry."
             )
             _wait_for_lobby_after_shop_purchase(max_wait=4.0)
-            update_operator_snapshot(
-              state_obj,
-              action,
-              phase="recovering",
-              status="error",
-              message="Shop entry was clicked but not verified; retrying turn before training scan.",
-              error_text="Trackblazer shop entry verification failed after click.",
-              reasoning_notes=(
-                "Skipped training scan for safety after a shop-entry misfire. "
-                "Retrying the same turn from the lobby."
-              ),
-              sub_phase="scan_shop",
-            )
-            _push_turn_retry_debug(
-              state_obj,
-              reason="Trackblazer shop entry clicked but was not verified.",
-              reasons=[shop_flow.get("reason") or "shop_verification_failed"],
-              before_phase="checking_shop",
-              context="scan_shop",
-              event="trackblazer_shop_entry",
-              result="invalid_retry",
-              sub_phase="scan_shop",
-              phase="checking_shop",
-            )
-            continue
+            if _trackblazer_planner_mode_enabled():
+              shop_flow["planner_retry_suppressed"] = True
+              state_obj["trackblazer_shop_flow"] = shop_flow
+              warning(
+                "[TB_SHOP] Planner mode suppresses whole-turn retry after shop-entry verification failure; "
+                "continuing without refreshed shop data."
+              )
+              update_operator_snapshot(
+                state_obj,
+                action,
+                phase="checking_shop",
+                status="warning",
+                message="Shop entry was clicked but not verified; continuing without refreshed shop state.",
+                reasoning_notes=(
+                  "Planner mode keeps the current turn alive after a shop-entry misfire. "
+                  "The turn continues without a refreshed shop scan instead of restarting."
+                ),
+                sub_phase="scan_shop",
+              )
+              _push_flow_decision_debug(
+                state_obj,
+                asset="trackblazer_shop_gate",
+                result="continue_without_retry",
+                note=(
+                  f"planner_mode=True; reason={shop_flow.get('reason') or 'shop_verification_failed'}; "
+                  "shop entry click was not verified"
+                ),
+                context="pre_training_gate",
+                phase="checking_shop",
+                sub_phase="scan_shop",
+              )
+            else:
+              update_operator_snapshot(
+                state_obj,
+                action,
+                phase="recovering",
+                status="error",
+                message="Shop entry was clicked but not verified; retrying turn before training scan.",
+                error_text="Trackblazer shop entry verification failed after click.",
+                reasoning_notes=(
+                  "Skipped training scan for safety after a shop-entry misfire. "
+                  "Retrying the same turn from the lobby."
+                ),
+                sub_phase="scan_shop",
+              )
+              _push_turn_retry_debug(
+                state_obj,
+                reason="Trackblazer shop entry clicked but was not verified.",
+                reasons=[shop_flow.get("reason") or "shop_verification_failed"],
+                before_phase="checking_shop",
+                context="scan_shop",
+                event="trackblazer_shop_entry",
+                result="invalid_retry",
+                sub_phase="scan_shop",
+                phase="checking_shop",
+              )
+              continue
           if pending_shop_check and not shop_flow.get("entered"):
-            _push_flow_decision_debug(
-              state_obj,
-              asset="trackblazer_shop_gate",
-              result="retry_before_training",
-              note=(
-                f"pending shop check failed; reason={shop_entry_reason}; "
-                f"best_method={shop_best_method_name}; "
-                f"missing_required={','.join(shop_missing_required) or 'none'}"
-              ),
-              context="pre_training_gate",
-              phase="checking_shop",
-              sub_phase="scan_shop",
-            )
-            warning(
-              "[TB_SHOP] Pending shop check did not enter the shop; "
-              "retrying the same turn before training scan. "
-              f"reason={shop_entry_reason}; best_method={shop_best_method_name}; "
-              f"missing_required={shop_missing_required or ['unknown']}."
-            )
-            update_operator_snapshot(
-              state_obj,
-              action,
-              phase="recovering",
-              status="error",
-              message="Pending Trackblazer shop check failed; retrying before training scan.",
-              error_text="Trackblazer pending shop check could not enter the shop.",
-              reasoning_notes=(
-                "A pending Trackblazer shop refresh was queued, but the shop entry "
-                "flow did not verify a shop screen. Retrying the same turn instead "
-                "of scanning trainings with stale/empty shop state."
-              ),
-              sub_phase="scan_shop",
-            )
-            _push_turn_retry_debug(
-              state_obj,
-              reason="Pending Trackblazer shop check could not enter the shop.",
-              reasons=[
-                shop_entry_reason,
-                f"best_method={shop_best_method_name}",
-                f"missing_required={','.join(shop_missing_required) or 'none'}",
-                f"pending_reason={pending_shop_reason or 'pending_shop_check'}",
-              ],
-              before_phase="checking_shop",
-              context="scan_shop",
-              event="trackblazer_shop_entry",
-              result="invalid_retry",
-              sub_phase="scan_shop",
-              phase="checking_shop",
-            )
-            continue
+            if _trackblazer_planner_mode_enabled():
+              shop_flow["planner_retry_suppressed"] = True
+              state_obj["trackblazer_shop_flow"] = shop_flow
+              warning(
+                "[TB_SHOP] Pending shop check did not enter the shop; "
+                "planner mode will continue the turn without retrying. "
+                f"reason={shop_entry_reason}; best_method={shop_best_method_name}; "
+                f"missing_required={shop_missing_required or ['unknown']}."
+              )
+              update_operator_snapshot(
+                state_obj,
+                action,
+                phase="checking_shop",
+                status="warning",
+                message="Pending Trackblazer shop check failed; continuing without refreshed shop state.",
+                reasoning_notes=(
+                  "Planner mode does not restart the whole turn when a queued shop refresh "
+                  "fails to enter the shop. The turn continues with the best available state."
+                ),
+                sub_phase="scan_shop",
+              )
+              _push_flow_decision_debug(
+                state_obj,
+                asset="trackblazer_shop_gate",
+                result="continue_without_retry",
+                note=(
+                  f"planner_mode=True; pending shop check failed; reason={shop_entry_reason}; "
+                  f"best_method={shop_best_method_name}; "
+                  f"missing_required={','.join(shop_missing_required) or 'none'}"
+                ),
+                context="pre_training_gate",
+                phase="checking_shop",
+                sub_phase="scan_shop",
+              )
+            else:
+              _push_flow_decision_debug(
+                state_obj,
+                asset="trackblazer_shop_gate",
+                result="retry_before_training",
+                note=(
+                  f"pending shop check failed; reason={shop_entry_reason}; "
+                  f"best_method={shop_best_method_name}; "
+                  f"missing_required={','.join(shop_missing_required) or 'none'}"
+                ),
+                context="pre_training_gate",
+                phase="checking_shop",
+                sub_phase="scan_shop",
+              )
+              warning(
+                "[TB_SHOP] Pending shop check did not enter the shop; "
+                "retrying the same turn before training scan. "
+                f"reason={shop_entry_reason}; best_method={shop_best_method_name}; "
+                f"missing_required={shop_missing_required or ['unknown']}."
+              )
+              update_operator_snapshot(
+                state_obj,
+                action,
+                phase="recovering",
+                status="error",
+                message="Pending Trackblazer shop check failed; retrying before training scan.",
+                error_text="Trackblazer pending shop check could not enter the shop.",
+                reasoning_notes=(
+                  "A pending Trackblazer shop refresh was queued, but the shop entry "
+                  "flow did not verify a shop screen. Retrying the same turn instead "
+                  "of scanning trainings with stale/empty shop state."
+                ),
+                sub_phase="scan_shop",
+              )
+              _push_turn_retry_debug(
+                state_obj,
+                reason="Pending Trackblazer shop check could not enter the shop.",
+                reasons=[
+                  shop_entry_reason,
+                  f"best_method={shop_best_method_name}",
+                  f"missing_required={','.join(shop_missing_required) or 'none'}",
+                  f"pending_reason={pending_shop_reason or 'pending_shop_check'}",
+                ],
+                before_phase="checking_shop",
+                context="scan_shop",
+                event="trackblazer_shop_entry",
+                result="invalid_retry",
+                sub_phase="scan_shop",
+                phase="checking_shop",
+              )
+              continue
           if shop_flow.get("entered") and shop_flow.get("closed"):
             ready_after_shop_scan = _wait_for_lobby_after_shop_purchase()
             if not ready_after_shop_scan:
