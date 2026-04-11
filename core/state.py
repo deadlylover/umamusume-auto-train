@@ -458,7 +458,7 @@ def _collect_lobby_status_effects(state_object):
       f"(severity={total_severity}, closed={closed})"
     )
 
-def collect_main_state():
+def collect_main_state(*, use_last_known_turn=True):
   global aptitudes_cache
   clear_runtime_ocr_debug()
   debug("Start state collection. Collecting stats.")
@@ -502,7 +502,7 @@ def collect_main_state():
   state_object["mood_difference"] = mood_index - minimum_mood_index
   state_object["mood_difference_junior_year"] = mood_index - minimum_mood_junior_year_index
   debug("Before turn collection.")
-  state_object["turn"] = get_turn()
+  state_object["turn"] = get_turn(use_last_known=use_last_known_turn)
   debug("Before year collection.")
   state_object["year"] = get_current_year()
   if constants.SCENARIO_NAME in ("mant", "trackblazer") and state_object["year"] == "Finale Underway":
@@ -1504,7 +1504,7 @@ def get_mood(attempts=0):
   return get_mood(attempts + 1)
 
 # Check turn
-def get_turn():
+def get_turn(*, use_last_known=True):
   global _last_turn
   if device_action.locate("assets/buttons/race_day_btn.png", region_ltrb=constants.SCREEN_BOTTOM_BBOX):
     return "Race Day"
@@ -1554,7 +1554,7 @@ def get_turn():
       _last_turn = 1
       return _last_turn
 
-  if _last_turn is not None:
+  if use_last_known and _last_turn is not None:
     warning(f"[STATE] Turn OCR failed; using last known turn {_last_turn}.")
     return _last_turn
 

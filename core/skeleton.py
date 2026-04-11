@@ -8,7 +8,7 @@ import cv2
 from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
-from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache, refresh_selected_training_state
+from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache, refresh_selected_training_state, get_current_year, get_energy_level, get_turn
 from utils.shared import CleanDefaultDict
 import core.config as config
 from PIL import ImageGrab
@@ -1796,17 +1796,15 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
       "policy_source": "preflight_skip",
     }
     if cancel_fallback.get("func"):
-      _apply_effective_rival_fallback_payload(action, cancel_fallback)
-      update_operator_snapshot(
+      return _run_planner_warning_cancel_fallback_subroutine(
         state_obj,
         action,
-        phase="executing_action",
-        message=f"Skipping rival scout. {warning_reason}",
+        cancel_fallback=cancel_fallback,
+        warning_reason=warning_reason,
         sub_phase=sub_phase,
         ocr_debug=ocr_debug,
         planned_clicks=planned_clicks,
       )
-      return None
     return "failed"
 
   from scenarios.trackblazer import scout_rival_race
@@ -1859,6 +1857,172 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     )
     return None
   return "failed"
+
+
+def _wait_for_lobby_departure_after_action(action_name, baseline_screenshot=None, max_wait=4.0):
+  from utils.screenshot import are_screenshots_same
+
+  deadline = time.time() + max_wait
+  baseline = baseline_screenshot if baseline_screenshot is not None else device_action.screenshot()
+  while time.time() < deadline:
+    device_action.flush_screenshot_cache()
+    screenshot = device_action.screenshot()
+    stable_lobby, _ = _is_stable_career_lobby_screen(screenshot=screenshot)
+    if (not stable_lobby) or (not are_screenshots_same(baseline, screenshot, diff_threshold=12)):
+      return True
+    sleep(0.25)
+  warning(f"[TB_PLANNER] {action_name} fallback did not visibly depart the lobby after the click.")
+  return False
+
+
+def _wait_for_turn_progress_after_rest(previous_year, previous_turn, max_wait=12.0):
+  deadline = time.time() + max_wait
+  observations = []
+  while time.time() < deadline:
+    device_action.flush_screenshot_cache()
+    current_turn = get_turn(use_last_known=False)
+    current_year = get_current_year()
+    energy_level, max_energy = get_energy_level()
+    observation = {
+      "year": current_year,
+      "turn": current_turn,
+      "energy_level": energy_level,
+      "max_energy": max_energy,
+    }
+    observations.append(observation)
+    if current_year and previous_year and current_year != previous_year:
+      return {"progressed": True, **observation, "reason": "year_changed"}
+    if (
+      isinstance(previous_turn, int)
+      and isinstance(current_turn, int)
+      and current_turn >= 0
+      and current_turn != previous_turn
+    ):
+      return {"progressed": True, **observation, "reason": "turn_changed"}
+    sleep(0.5)
+  last_observation = observations[-1] if observations else {}
+  return {"progressed": False, **last_observation, "reason": "turn_not_advanced"}
+
+
+def _run_planner_warning_cancel_fallback_subroutine(
+  state_obj,
+  action,
+  *,
+  cancel_fallback,
+  warning_reason="",
+  sub_phase=None,
+  ocr_debug=None,
+  planned_clicks=None,
+):
+  cancel_fallback = dict(cancel_fallback or {})
+  if not cancel_fallback.get("func"):
+    return "failed"
+
+  previous_year = state_obj.get("year")
+  previous_turn = state_obj.get("turn")
+  _apply_effective_rival_fallback_payload(action, cancel_fallback)
+  updated_planned_clicks = _planned_clicks_for_action(action)
+
+  device_action.flush_screenshot_cache()
+  baseline_screenshot = device_action.screenshot()
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=f"Skipping rival scout. {warning_reason}",
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=updated_planned_clicks,
+  )
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=f"Executing planner fallback subroutine: {_action_func(action)}.",
+    sub_phase="action_run",
+    ocr_debug=ocr_debug,
+    planned_clicks=updated_planned_clicks,
+  )
+
+  if not action.run():
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Planner fallback subroutine failed to execute {_action_func(action)}.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=updated_planned_clicks,
+    )
+    return "failed"
+
+  if not _wait_for_lobby_departure_after_action(_action_func(action), baseline_screenshot=baseline_screenshot):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text="Planner fallback rest did not visibly leave the lobby; click may not have registered.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=updated_planned_clicks,
+    )
+    return "failed"
+
+  if not _resolve_post_action_resolution(state_obj, action):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Post-action resolution failed after planner fallback {_action_func(action)}.",
+      sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
+      ocr_debug=ocr_debug,
+      planned_clicks=updated_planned_clicks,
+    )
+    return "failed"
+
+  progress_result = _wait_for_turn_progress_after_rest(previous_year, previous_turn)
+  if not progress_result.get("progressed"):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=(
+        "Planner fallback rest returned to lobby, but turn progression could not be confirmed. "
+        "Stopping before reusing stale turn state."
+      ),
+      sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
+      reasoning_notes=(
+        f"previous={previous_year}/{previous_turn}; "
+        f"current={progress_result.get('year')}/{progress_result.get('turn')}; "
+        f"energy={progress_result.get('energy_level')}/{progress_result.get('max_energy')}"
+      ),
+      ocr_debug=ocr_debug,
+      planned_clicks=updated_planned_clicks,
+    )
+    return "failed"
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="post_action_resolution",
+    message=(
+      "Planner fallback subroutine confirmed fresh post-rest state: "
+      f"{progress_result.get('year')} / {progress_result.get('turn')}."
+    ),
+    sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
+    reasoning_notes=(
+      f"energy={progress_result.get('energy_level')}/{progress_result.get('max_energy')} "
+      f"via {progress_result.get('reason')}"
+    ),
+    ocr_debug=ocr_debug,
+    planned_clicks=updated_planned_clicks,
+  )
+  return "executed"
 
 
 def _resolve_consecutive_race_warning_for_executor(
