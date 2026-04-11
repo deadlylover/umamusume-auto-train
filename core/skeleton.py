@@ -3066,6 +3066,8 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
   planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {"status": "skipped", "reason": "no_pre_action_items"}
 
   # Re-scan inventory immediately before item use so execute/dry-run flows do
@@ -3085,7 +3087,11 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
   planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {"status": "skipped", "reason": "trackblazer_pre_action_items_cleared_after_refresh"}
+  if hasattr(action, "__setitem__"):
+    action["_trackblazer_planner_item_execution_override"] = copy.deepcopy(planner_item_execution)
   return {
     "status": "ready",
     "reason": "trackblazer_pre_action_items_ready",
@@ -3097,11 +3103,17 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
 
 def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full"):
   """Execute already-refreshed Trackblazer pre-action items with the given commit_mode."""
-  turn_plan = get_turn_plan(state_obj, action, limit=8)
-  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planner_item_execution = {}
+  if hasattr(action, "get"):
+    planner_item_execution = dict(action.get("_trackblazer_planner_item_execution_override") or {})
+  if not planner_item_execution:
+    turn_plan = get_turn_plan(state_obj, action, limit=8)
+    planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   item_keys = [entry.get("key") for entry in planned_items if entry.get("key")]
   if not item_keys:
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {"status": "skipped", "reason": "no_pre_action_items"}
 
   from scenarios.trackblazer import execute_training_items
@@ -3118,6 +3130,8 @@ def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
     _invalidate_trackblazer_inventory_cache()
 
   if commit_mode == "dry_run":
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {
       "status": "simulated",
       "result": result,
@@ -3125,6 +3139,8 @@ def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
     }
 
   if not result.get("success"):
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {
       "status": "failed",
       "result": result,
@@ -3137,6 +3153,8 @@ def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
 
   planner_reassess_transition = dict(planner_item_execution.get("reassess_transition") or {})
   if planner_reassess_transition.get("required"):
+    if hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
     return {
       "status": "reassess",
       "result": result,
@@ -3144,6 +3162,8 @@ def _execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
       "transition_kind": planner_reassess_transition.get("transition_kind"),
     }
 
+  if hasattr(action, "options"):
+    action.options.pop("_trackblazer_planner_item_execution_override", None)
   return {
     "status": "executed",
     "result": result,

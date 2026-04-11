@@ -10,6 +10,7 @@ from core.trackblazer.models import TurnPlan
 from core.trackblazer.planner import (
   RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
   RUNTIME_PATH_PLANNER_RUNTIME,
+  apply_turn_plan_action_payload,
   apply_selected_action_payload,
   append_planner_runtime_transition,
   build_turn_plan_execution_action,
@@ -193,6 +194,8 @@ def run_trackblazer_planner_turn(
       resumed_turn_plan = outcome.get("turn_plan")
       if isinstance(resumed_turn_plan, TurnPlan):
         turn_plan = resumed_turn_plan
+        apply_turn_plan_action_payload(execution_action, turn_plan)
+        _set_disable_skip_turn_fallback(execution_action, enabled=(execution_action.func == "do_rest"))
       resume_context = dict(outcome.get("resume_context") or {})
       planned_clicks = outcome.get("planned_clicks") or planned_clicks
       continue

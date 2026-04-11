@@ -1,3 +1,4 @@
+import copy
 import inspect
 from unittest.mock import patch
 
@@ -166,6 +167,7 @@ def _runtime_hooks(recorder):
     update_operator_snapshot=lambda *args, **kwargs: recorder.append(("runtime_snapshot", kwargs.get("phase"))),
     should_retry_training_after_consecutive_warning=lambda action: False,
     prepare_training_fallback_after_consecutive_warning=lambda action: False,
+    should_force_rest_after_consecutive_warning=lambda action: False,
   )
 
 
@@ -279,12 +281,28 @@ def _test_executor_reset_whistle_replans_in_place():
 def _test_runtime_replanned_turn_resumes_without_review():
   state_obj = _base_state()
   action = _training_action()
+  action.func = "do_rest"
   recorder = []
   resume_contexts = []
+  attempt_actions = []
   initial_turn_plan = _turn_plan("await_operator_review", "transition_after_pre_action_items")
   resumed_turn_plan = _turn_plan("execute_main_action", "resolve_post_action")
+  resumed_turn_plan.race_plan = {
+    "action_payload": {
+      "func": "do_training",
+      "options": {
+        "func": "do_training",
+        "training_name": "speed",
+        "training_function": "stat_weight_training",
+        "training_data": dict(action["training_data"]),
+      },
+      "available_actions": ["do_training", "do_rest", "do_race"],
+    }
+  }
 
   def _fake_executor(*args, **kwargs):
+    action_obj = args[1]
+    attempt_actions.append((action_obj.func, action_obj.get("training_name")))
     resume_contexts.append(dict(kwargs.get("resume_context") or {}))
     if len(resume_contexts) == 1:
       return {
@@ -318,6 +336,8 @@ def _test_runtime_replanned_turn_resumes_without_review():
   assert result.get("status") == "executed", result
   assert resume_contexts[0] == {}, resume_contexts
   assert resume_contexts[1].get("skip_review") is True, resume_contexts
+  assert attempt_actions[0][0] == "do_rest", attempt_actions
+  assert attempt_actions[1] == ("do_training", "speed"), attempt_actions
 
 
 def _test_executor_skill_emergency_close_matches_legacy():
@@ -535,6 +555,70 @@ def _test_skeleton_delegates_planner_runtime():
   assert 'result="planner_runtime_same_turn_legacy_handoff"' in helper_source
 
 
+def _test_refresh_execution_preserves_whistle_reassess_override():
+  state_obj = _base_state()
+  action = _training_action()
+  action.func = "do_rest"
+  action["trackblazer_pre_action_items"] = [{"key": "reset_whistle", "name": "Reset Whistle"}]
+
+  refreshed_turn_plan = _turn_plan(
+    "refresh_inventory_for_items",
+    "replan_pre_action_items",
+    "execute_pre_action_items",
+    "await_lobby_after_items",
+    "transition_after_pre_action_items",
+  )
+  refreshed_turn_plan.item_plan = {
+    "execution_payload": {
+      "execution_items": [{"key": "reset_whistle", "name": "Reset Whistle"}],
+      "reassess_transition": {
+        "required": True,
+        "transition_kind": "reset_whistle_reroll",
+        "reason": "Reset Whistle rerolls the board",
+      },
+    },
+  }
+
+  initial_turn_plan = _turn_plan("refresh_inventory_for_items")
+  initial_turn_plan.item_plan = copy.deepcopy(refreshed_turn_plan.item_plan)
+
+  stale_turn_plan = _turn_plan("execute_main_action", "resolve_post_action")
+  stale_turn_plan.item_plan = {
+    "execution_payload": {
+      "execution_items": [{"key": "reset_whistle", "name": "Reset Whistle"}],
+      "reassess_transition": {
+        "required": False,
+      },
+    },
+  }
+
+  fake_result = {
+    "success": True,
+    "trackblazer_inventory_flow": {"graceful_noop": False, "reason": "items_applied"},
+    "trackblazer_inventory": {},
+    "trackblazer_inventory_summary": {"held_quantities": {}},
+    "trackblazer_inventory_controls": {},
+  }
+
+  with patch("core.skeleton.get_turn_plan", side_effect=[initial_turn_plan, refreshed_turn_plan, stale_turn_plan]), patch(
+    "core.skeleton.collect_trackblazer_inventory",
+    return_value=state_obj,
+  ), patch("scenarios.trackblazer.execute_training_items", return_value=fake_result), patch(
+    "core.skeleton._attach_trackblazer_pre_action_item_plan"
+  ), patch("core.skeleton._apply_trackblazer_used_items_to_state"), patch(
+    "core.skeleton._cache_trackblazer_inventory"
+  ), patch("core.skeleton._trackblazer_inventory_flow_cacheable", return_value=False), patch(
+    "core.skeleton._invalidate_trackblazer_inventory_cache"
+  ):
+    refresh_result = skeleton._refresh_trackblazer_pre_action_inventory(state_obj, action)
+    assert refresh_result.get("status") == "ready", refresh_result
+    execute_result = skeleton._execute_trackblazer_pre_action_items(state_obj, action, commit_mode="full")
+
+  assert execute_result.get("status") == "reassess", execute_result
+  assert execute_result.get("transition_kind") == "reset_whistle_reroll", execute_result
+  assert action.get("_trackblazer_planner_item_execution_override") is None
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -550,6 +634,7 @@ def main():
   _test_runtime_safe_legacy_fallback()
   _test_same_turn_fallback_handoff_control_flow()
   _test_skeleton_delegates_planner_runtime()
+  _test_refresh_execution_preserves_whistle_reassess_override()
   print("trackblazer planner milestone 6 checks: ok")
 
 
