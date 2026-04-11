@@ -478,7 +478,7 @@ def _test_runtime_retry_owned_by_planner_runtime():
   assert attempt_funcs == ["do_race", "do_training"], attempt_funcs
 
 
-def _test_runtime_empty_planner_retry_chain_falls_back_to_legacy():
+def _test_runtime_empty_planner_retry_chain_blocks_instead_of_legacy():
   state_obj = _base_state()
   action = _race_action()
   action.available_actions = ["do_race", "do_training", "do_rest"]
@@ -497,11 +497,12 @@ def _test_runtime_empty_planner_retry_chain_falls_back_to_legacy():
       runtime_hooks=_runtime_hooks(recorder),
     )
 
-  assert result.get("status") == "fallback_to_legacy", result
-  assert state_obj.get("_trackblazer_planner_force_fallback"), state_obj
+  assert result.get("status") == "blocked", result
+  assert "synthetic_failure" in str(result.get("reason") or ""), result
+  assert not state_obj.get("_trackblazer_planner_force_fallback"), state_obj
 
 
-def _test_runtime_safe_legacy_fallback():
+def _test_runtime_setup_failure_blocks_instead_of_legacy():
   state_obj = _base_state()
   action = _race_action()
   recorder = []
@@ -516,43 +517,18 @@ def _test_runtime_safe_legacy_fallback():
       runtime_hooks=_runtime_hooks(recorder),
     )
 
-  assert result.get("status") == "fallback_to_legacy"
-  assert state_obj.get("_trackblazer_planner_force_fallback"), result
+  assert result.get("status") == "blocked", result
+  assert "planner_runtime_setup_failed" in str(result.get("reason") or ""), result
 
 
-def _test_same_turn_fallback_handoff_control_flow():
-  state_obj = _base_state()
-  action = _race_action()
-  planner_runtime_result = {
-    "status": "fallback_to_legacy",
-    "reason": "synthetic runtime fallback",
-  }
-
-  with patch("core.skeleton.update_operator_snapshot") as update_snapshot_mock, patch(
-    "core.skeleton._push_turn_retry_debug"
-  ) as retry_debug_mock:
-    reason = skeleton._handoff_planner_runtime_fallback_to_legacy_same_turn(
-      state_obj,
-      action,
-      planner_runtime_result,
-    )
-
-  assert reason == "synthetic runtime fallback"
-  update_snapshot_mock.assert_called_once()
-  retry_debug_mock.assert_called_once()
-  retry_kwargs = retry_debug_mock.call_args.kwargs
-  assert retry_kwargs.get("result") == "planner_runtime_same_turn_legacy_handoff", retry_kwargs
-  assert retry_kwargs.get("same_turn_retry") is True, retry_kwargs
-
-
-def _test_skeleton_delegates_planner_runtime():
+def _test_skeleton_has_no_planner_legacy_handoff():
+  # Planner runtime is the sole authority in Trackblazer planner mode. The
+  # legacy handoff helper and its call path in career_lobby must be gone.
+  assert not hasattr(skeleton, "_handoff_planner_runtime_fallback_to_legacy_same_turn"), skeleton
   source = inspect.getsource(skeleton.career_lobby)
   assert "run_trackblazer_planner_turn(" in source
-  assert "_handoff_planner_runtime_fallback_to_legacy_same_turn(" in source
-  assert "planner_activation = {\"status\": \"fallback\"" in source
-  assert 'result="planner_runtime_recollect"' not in source
-  helper_source = inspect.getsource(skeleton._handoff_planner_runtime_fallback_to_legacy_same_turn)
-  assert 'result="planner_runtime_same_turn_legacy_handoff"' in helper_source
+  assert "_handoff_planner_runtime_fallback_to_legacy_same_turn" not in source
+  assert "fallback_to_legacy" not in source
 
 
 def _test_refresh_execution_preserves_whistle_reassess_override():
@@ -630,10 +606,9 @@ def main():
   _test_executor_resolve_consecutive_warning_step_owned()
   _test_runtime_replanned_turn_resumes_without_review()
   _test_runtime_retry_owned_by_planner_runtime()
-  _test_runtime_empty_planner_retry_chain_falls_back_to_legacy()
-  _test_runtime_safe_legacy_fallback()
-  _test_same_turn_fallback_handoff_control_flow()
-  _test_skeleton_delegates_planner_runtime()
+  _test_runtime_empty_planner_retry_chain_blocks_instead_of_legacy()
+  _test_runtime_setup_failure_blocks_instead_of_legacy()
+  _test_skeleton_has_no_planner_legacy_handoff()
   _test_refresh_execution_preserves_whistle_reassess_override()
   print("trackblazer planner milestone 6 checks: ok")
 

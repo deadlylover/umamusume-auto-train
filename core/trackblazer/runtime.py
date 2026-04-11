@@ -8,14 +8,12 @@ import utils.constants as constants
 from core.trackblazer.executor import PlannerExecutorHooks, run_planner_action_with_review
 from core.trackblazer.models import TurnPlan
 from core.trackblazer.planner import (
-  RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
   RUNTIME_PATH_PLANNER_RUNTIME,
   apply_turn_plan_action_payload,
   apply_selected_action_payload,
   append_planner_runtime_transition,
   build_turn_plan_execution_action,
   get_turn_plan,
-  mark_planner_fallback,
   set_planner_forced_action,
   set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
@@ -124,32 +122,13 @@ def _refresh_planner_turn(state_obj, action):
   return planner_state, turn_plan
 
 
-def _should_suppress_legacy_fallback(reason: str) -> bool:
-  return str(reason or "").startswith("consecutive_warning_cancelled:")
-
-
-def _planner_runtime_fallback_to_legacy(state_obj, action, reason):
-  if _should_suppress_legacy_fallback(reason):
-    warning(
-      "[TB_PLANNER] Suppressing legacy handoff after consecutive-race warning cancel; "
-      "staying in planner runtime."
-    )
-    _transition(state_obj, "planner_runtime", "planner_runtime", "failed", reason)
-    return {"status": "failed", "reason": reason}
-  warning(f"[TB_PLANNER] Falling back to legacy for this turn: {reason}")
-  mark_planner_fallback(state_obj, reason)
-  try:
-    set_turn_plan_decision_path(state_obj, action, "planner→legacy (fallback)", reason=reason)
-  except Exception:
-    pass
-  set_trackblazer_runtime_path(
-    state_obj,
-    RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
-    reason=reason,
-    source="planner_runtime_fallback",
-  )
-  _transition(state_obj, "planner_runtime", "planner_runtime", "fallback_to_legacy", reason)
-  return {"status": "fallback_to_legacy", "reason": reason}
+def _planner_runtime_blocked(state_obj, action, reason):
+  # Planner runtime is the sole authority in Trackblazer planner mode.
+  # Unresolved states must pause/block with a precise reason so the operator
+  # can intervene — legacy handoff is no longer supported.
+  warning(f"[TB_PLANNER] Planner runtime blocked: {reason}")
+  _transition(state_obj, "planner_runtime", "planner_runtime", "blocked", reason)
+  return {"status": "blocked", "reason": reason, "step_id": "planner_runtime"}
 
 
 def run_trackblazer_planner_turn(
@@ -180,7 +159,7 @@ def run_trackblazer_planner_turn(
     _, turn_plan = _refresh_planner_turn(state_obj, action)
     execution_action = build_turn_plan_execution_action(action, turn_plan)
   except Exception as exc:
-    return _planner_runtime_fallback_to_legacy(state_obj, action, f"planner_runtime_setup_failed: {exc}")
+    return _planner_runtime_blocked(state_obj, action, f"planner_runtime_setup_failed: {exc}")
 
   attempted_retry_keys = []
   exhausted_reason = "planner_runtime_exhausted"
@@ -322,7 +301,7 @@ def run_trackblazer_planner_turn(
         if outcome.get("committed"):
           warning(f"[TB_PLANNER] Retry replan failed after committed planner steps: {exc}")
           return {"status": "failed", "reason": f"planner_retry_replan_failed: {exc}", "committed": True}
-        return _planner_runtime_fallback_to_legacy(state_obj, action, f"planner_retry_replan_failed: {exc}")
+        return _planner_runtime_blocked(state_obj, action, f"planner_retry_replan_failed: {exc}")
       retried = True
       break
 
@@ -332,4 +311,4 @@ def run_trackblazer_planner_turn(
     if outcome.get("committed"):
       _transition(state_obj, "planner_runtime", "planner_runtime", "failed", exhausted_reason, {"committed": True})
       return {"status": "failed", "reason": exhausted_reason, "committed": True}
-    return _planner_runtime_fallback_to_legacy(state_obj, action, exhausted_reason)
+    return _planner_runtime_blocked(state_obj, action, exhausted_reason)

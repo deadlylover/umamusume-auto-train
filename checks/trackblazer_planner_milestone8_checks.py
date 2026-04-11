@@ -191,10 +191,17 @@ def _test_runtime_retry_preserves_caller_action():
   assert caller_action.get("race_name") == "any", caller_action
 
 
-def _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback():
+def _test_planner_race_preflight_no_rival_returns_failed_without_mutating_action():
+  # Regression for the race-warning divergence bug: if preview shows
+  # "Open race menu → Check consecutive-race warning → Scan/select race
+  # entry", execution must not short-circuit into a stored fallback
+  # before race entry. Instead, preflight returns "failed" so the planner
+  # runtime retry loop replans into a new TurnPlan and refreshes the
+  # review surface before execution continues.
   bot.set_trackblazer_use_new_planner_enabled(True)
   state_obj = _base_state()
   action = _race_action()
+  original_func = action.func
   state_obj[PLANNER_STATE_KEY] = {
     "turn_plan": _turn_plan_for_payload(
       {
@@ -227,12 +234,18 @@ def _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback():
   ), patch(
     "core.skeleton._apply_legacy_rival_fallback_payload",
     side_effect=AssertionError("legacy fallback applier should not run on planner path"),
+  ), patch(
+    "core.skeleton._apply_planner_owned_fallback_payload",
+    side_effect=AssertionError("preflight must not silently swap the action into a stored fallback"),
   ):
     result = skeleton._run_planner_race_preflight(state_obj, action)
 
-  assert result is None, result
-  assert action.func == "do_training", action
-  assert action.get("training_name") == "speed", action
+  assert result == "failed", result
+  # The action must not be mutated inside preflight. Path changes are
+  # owned by run_trackblazer_planner_turn's retry loop, which rebuilds
+  # the TurnPlan and re-reviews before executing anything.
+  assert action.func == original_func, action
+  assert action.get("race_name") == "any", action
 
 
 def _test_planner_race_preflight_defers_warning_cancel_until_race_entry():
@@ -347,34 +360,61 @@ def _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fal
   assert "planner_warning_outcome" not in action.options, action
 
 
-def _test_same_turn_handoff_is_the_legacy_hydration_point():
+def _test_no_legacy_handoff_symbol_remains_on_skeleton():
+  # Planner runtime is the sole authority in Trackblazer planner mode.
+  # The same-turn legacy hydration helper must be fully removed — its
+  # presence was the previous handoff seam that let legacy execution
+  # override planner decisions mid-turn.
+  assert not hasattr(skeleton, "_handoff_planner_runtime_fallback_to_legacy_same_turn"), skeleton
+
+
+def _test_planner_runtime_returns_blocked_not_fallback_to_legacy():
   state_obj = _base_state()
   action = _race_action()
-  state_obj[PLANNER_STATE_KEY] = {
-    "turn_plan": _turn_plan_for_payload(
-      {
-        "func": "do_training",
-        "training_name": "speed",
-        "training_function": "stat_weight_training",
-        "training_data": copy.deepcopy(action["training_data"]),
-      }
-    ).to_snapshot(),
-  }
 
-  with patch("core.skeleton.update_operator_snapshot") as update_snapshot_mock, patch(
-    "core.skeleton._push_turn_retry_debug"
-  ) as retry_debug_mock:
-    reason = skeleton._handoff_planner_runtime_fallback_to_legacy_same_turn(
+  with patch("core.trackblazer.runtime.set_turn_plan_decision_path", return_value=({}, _turn_plan_for_payload({"func": "do_training"}))), patch(
+    "core.trackblazer.runtime.run_planner_action_with_review",
+    return_value={"status": "failed", "reason": "synthetic_failure", "committed": False},
+  ):
+    result = run_trackblazer_planner_turn(
       state_obj,
       action,
-      {"status": "fallback_to_legacy", "reason": "synthetic runtime fallback"},
+      0,
+      "review",
+      executor_hooks=_executor_hooks(),
+      runtime_hooks=_runtime_hooks(),
     )
 
-  assert reason == "synthetic runtime fallback", reason
-  assert action.func == "do_training", action
-  assert action.get("training_name") == "speed", action
-  update_snapshot_mock.assert_called_once()
-  retry_debug_mock.assert_called_once()
+  assert result.get("status") == "blocked", result
+  assert result.get("status") != "fallback_to_legacy", result
+
+
+def _test_turn_plan_planned_clicks_drive_review_surface():
+  # The operator review surface must derive planned clicks from the
+  # TurnPlan's step_sequence — not from the legacy descriptive helper.
+  turn_plan = TurnPlan(
+    version=3,
+    decision_path="planner",
+    freshness=PlannerFreshness(turn_key="Senior Year Early Jul|12"),
+    step_sequence=[
+      ExecutionStep(
+        step_id="execute_main_action",
+        step_type="execute_main_action",
+        intent="do_race",
+        planned_clicks=[
+          {"label": "Open race menu"},
+          {"label": "Check consecutive-race warning"},
+          {"label": "Back out from warning (Cancel)"},
+          {"label": "Scan/select race entry"},
+        ],
+      ),
+    ],
+  )
+
+  clicks = turn_plan.to_planned_clicks()
+  labels = [c.get("label") for c in clicks]
+  assert labels[0] == "Open race menu", labels
+  assert "Scan/select race entry" in labels, labels
 
 
 def _test_legacy_compat_payload_does_not_invent_rest_without_explicit_fallback():
@@ -466,11 +506,13 @@ def main():
   constants.SCENARIO_NAME = "trackblazer"
   _test_turn_plan_builds_execution_action_without_mutating_caller()
   _test_runtime_retry_preserves_caller_action()
-  _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback()
+  _test_planner_race_preflight_no_rival_returns_failed_without_mutating_action()
   _test_planner_race_preflight_defers_warning_cancel_until_race_entry()
   _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback()
   _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fallback()
-  _test_same_turn_handoff_is_the_legacy_hydration_point()
+  _test_no_legacy_handoff_symbol_remains_on_skeleton()
+  _test_planner_runtime_returns_blocked_not_fallback_to_legacy()
+  _test_turn_plan_planned_clicks_drive_review_surface()
   _test_legacy_compat_payload_does_not_invent_rest_without_explicit_fallback()
   _test_planner_activation_does_not_preserve_provisional_rest_on_strong_training_turn()
   _test_warning_cancel_can_still_resolve_to_rest_when_policy_targets_rest()

@@ -1575,41 +1575,6 @@ def _activate_trackblazer_planner_turn(state_obj, action):
     }
 
 
-def _handoff_planner_runtime_fallback_to_legacy_same_turn(state_obj, action, planner_runtime_result):
-  planner_reason = (planner_runtime_result or {}).get("reason") or "planner_runtime_failed"
-  action_snapshot = _snapshot_action_payload_for_restore(action)
-  planner_state = state_obj.get(PLANNER_STATE_KEY) or {}
-  turn_plan_snapshot = dict(planner_state.get("turn_plan") or {})
-  if turn_plan_snapshot:
-    try:
-      apply_turn_plan_action_payload(action, TurnPlan.from_snapshot(turn_plan_snapshot))
-    except Exception as exc:
-      warning(f"[TB_PLANNER] planner_runtime_handoff_hydration_failed: {exc}")
-      _restore_action_payload_from_snapshot(action, action_snapshot)
-  update_operator_snapshot(
-    state_obj,
-    action,
-    phase="recovering",
-    status="warning",
-    message="Planner runtime failed after activation; handing off to legacy execution in the same turn.",
-    sub_phase="evaluate_trackblazer_race",
-    reasoning_notes=planner_reason,
-  )
-  _push_turn_retry_debug(
-    state_obj,
-    reason="Planner runtime fell back before execution; handing off to legacy execution in the same turn.",
-    reasons=[planner_reason],
-    before_phase="evaluating_strategy",
-    context="planner_runtime_fallback",
-    event="turn_retry",
-    result="planner_runtime_same_turn_legacy_handoff",
-    same_turn_retry=True,
-    sub_phase="evaluate_trackblazer_race",
-    phase="evaluating_strategy",
-  )
-  return planner_reason
-
-
 def _operator_race_gate_for_state(state_obj):
   return get_race_gate_for_turn_label(
     state_obj.get("year") if isinstance(state_obj, dict) else "",
@@ -1822,30 +1787,25 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     )
     return None
 
-  fallback_policy = dict(turn_plan.fallback_policy or {})
-  fallback_chain = list(fallback_policy.get("chain") or [])
-  scout_fallback = next(
-    (
-      dict(entry.get("target_payload") or {})
-      for entry in fallback_chain
-      if isinstance(entry, dict) and entry.get("trigger") == "rival_scout_failed"
+  # Do not silently swap the action into a stored fallback here. Any path
+  # change must be routed through the planner runtime retry loop so the
+  # operator review surface is regenerated from the refreshed TurnPlan
+  # before execution continues. Returning "failed" lets
+  # run_trackblazer_planner_turn pick the rival_scout_failed entry from
+  # fallback_policy.chain, apply it as a retry, and refresh the review.
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="recovering",
+    status="warning",
+    message=(
+      "Planner rival scout found no suitable race. "
+      "Routing back to the planner runtime for a replanned review."
     ),
-    {},
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
   )
-  if not scout_fallback:
-    scout_fallback = _effective_rival_fallback_payload(action)
-  if scout_fallback.get("func"):
-    _apply_planner_owned_fallback_payload(action, scout_fallback)
-    update_operator_snapshot(
-      state_obj,
-      action,
-      phase="executing_action",
-      message="Planner rival scout found no suitable race. Falling back to the stored alternative.",
-      sub_phase=sub_phase,
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
-    return None
   return "failed"
 
 
@@ -1918,7 +1878,17 @@ def _run_planner_warning_cancel_fallback_subroutine(
     _apply_planner_owned_fallback_payload(action, cancel_fallback)
   else:
     _apply_effective_rival_fallback_payload(action, cancel_fallback)
-  updated_planned_clicks = _planned_clicks_for_action(action)
+  # In planner mode, rebuild the turn plan so the refreshed step_sequence
+  # drives the review surface. Legacy mode still uses the descriptive
+  # click preview.
+  if planner_owned_fallback:
+    try:
+      _, refreshed_turn_plan = set_turn_plan_decision_path(state_obj, action, "planner")
+      updated_planned_clicks = refreshed_turn_plan.to_planned_clicks() if refreshed_turn_plan else []
+    except Exception:
+      updated_planned_clicks = turn_plan.to_planned_clicks() if turn_plan else []
+  else:
+    updated_planned_clicks = _planned_clicks_for_action(action)
 
   device_action.flush_screenshot_cache()
   baseline_screenshot = device_action.screenshot()
@@ -4976,15 +4946,17 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       }
       planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
       state_obj[PLANNER_STATE_KEY] = planner_state
-  resolved_planned_clicks = (
-    planned_clicks
-    if planned_clicks is not None else
-    (
-      planner_turn_plan.to_planned_clicks()
-      if planner_turn_plan is not None else
-      _planned_clicks_for_action(action)
-    )
-  )
+  # In planner mode the TurnPlan's step_sequence is the SINGLE source of
+  # truth for planned clicks. Caller-supplied clicks are ignored so that
+  # the operator review surface can never diverge from what the planner
+  # runtime will actually execute. Only legacy mode falls through to the
+  # descriptive _planned_clicks_for_action preview.
+  if planner_turn_plan is not None:
+    resolved_planned_clicks = planner_turn_plan.to_planned_clicks()
+  elif planned_clicks is not None:
+    resolved_planned_clicks = planned_clicks
+  else:
+    resolved_planned_clicks = _planned_clicks_for_action(action)
   resolved_reasoning_notes = reasoning_notes or ""
   if planner_turn_plan is not None:
     planner_turn_plan.review_context = {
@@ -7009,14 +6981,10 @@ def career_lobby(dry_run_turn=False):
             record_and_finalize_turn(state_obj, action)
             continue
           if planner_runtime_status in {"previewed", "reassess", "blocked", "failed"}:
+            # Planner runtime is the sole authority in Trackblazer planner
+            # mode. Unresolved states pause/block for operator intervention
+            # instead of handing off to legacy execution.
             continue
-          if planner_runtime_status == "fallback_to_legacy":
-            planner_reason = _handoff_planner_runtime_fallback_to_legacy_same_turn(
-              state_obj,
-              action,
-              planner_runtime_result,
-            )
-            planner_activation = {"status": "fallback", "reason": planner_reason}
 
         # Build a pre_run_hook that scouts the rival race list when the
         # user commits a rival-race action.  The scout opens the race list,
