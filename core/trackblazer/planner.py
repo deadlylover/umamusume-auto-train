@@ -443,6 +443,21 @@ def build_turn_plan_execution_action(action, turn_plan: TurnPlan):
   return execution_action
 
 
+def _planner_bound_action(action, planner_race_plan):
+  planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
+  selected_action = dict(planner_race_plan.get("selected_action") or {})
+  if not selected_action:
+    return _clone_action(action)
+
+  bound_action = _clone_action(action)
+  apply_selected_action_payload(
+    bound_action,
+    selected_action,
+    available_actions=list((planner_race_plan.get("action_payload") or {}).get("available_actions") or []),
+  )
+  return bound_action
+
+
 def _fallback_target_label(payload):
   if not isinstance(payload, dict):
     return "unknown"
@@ -659,7 +674,11 @@ def append_planner_runtime_transition(state_obj, *, step_id="", step_type="", st
 
 
 def _candidate_shop_buys(effective_shop_items, shop_items=None, shop_summary=None, held_quantities=None, limit=8):
-  detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
+  purchasable_shop_keys = (shop_summary or {}).get("purchasable_items")
+  if purchasable_shop_keys is not None:
+    detected_shop_keys = set(purchasable_shop_keys or [])
+  else:
+    detected_shop_keys = set(shop_items or (shop_summary or {}).get("items_detected") or [])
   held_quantities = held_quantities or {}
   shop_coins = int((shop_summary or {}).get("shop_coins") or 0)
   if shop_coins == 0:
@@ -3831,10 +3850,30 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     ranked_native_candidates,
     policy,
   )
+  planner_action = _planner_bound_action(action, selected_race_plan)
+  projected_state = _project_inventory(plan_state, shop_buy_plan) if shop_buy_plan else plan_state
+  item_use_plan = plan_item_usage(
+    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    state_obj=projected_state,
+    action=planner_action,
+    limit=limit,
+  )
+  execution_items, deferred_use, reassess_after_item_use = _attach_execution_item_plan(item_use_plan)
+  item_execution_payload = _build_item_execution_payload(
+    planner_action,
+    shop_buy_plan,
+    execution_items,
+    deferred_use,
+    reassess_after_item_use,
+    item_use_plan.get("context") or {},
+  )
+  reobserve_boundaries = _build_reobserve_boundaries(item_execution_payload)
+  projected_summary = copy.deepcopy(projected_state.get("trackblazer_inventory_summary") or {})
+  item_context = dict(item_use_plan.get("context") or {})
   ranked_trainings = build_ranked_training_snapshot(
     state_obj=state_obj,
-    available_trainings=copy.deepcopy(action.get("available_trainings") or {}) if hasattr(action, "get") else {},
-    training_function=action.get("training_function") if hasattr(action, "get") else None,
+    available_trainings=copy.deepcopy(planner_action.get("available_trainings") or {}) if hasattr(planner_action, "get") else {},
+    training_function=planner_action.get("training_function") if hasattr(planner_action, "get") else None,
   )
 
   turn_plan = TurnPlan(
@@ -3922,7 +3961,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     },
     review_context={
       "selected_action": _build_selected_action_review_context(
-        action,
+        planner_action,
         pre_action_items=execution_items,
         reassess_after_item_use=reassess_after_item_use,
       ),

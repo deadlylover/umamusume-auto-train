@@ -20,6 +20,49 @@ def _entry(key, passed=False, score=0.0):
 
 
 class TrackblazerShopRecoveryChecks(unittest.TestCase):
+    def test_execute_shop_purchase_failure_preserves_live_scan_state(self):
+        shared_scan = {
+            "all_items": ["stamina_manual"],
+            "purchasable_items": [],
+            "pages": [{"rows": [], "visible_items": ["stamina_manual"]}],
+            "flow": {"stop_reason": "bottom_reached", "timing": {}},
+        }
+
+        with patch.object(
+            trackblazer,
+            "enter_shop",
+            return_value={"entered": True, "shop_coins": 18},
+        ), patch.object(
+            trackblazer,
+            "close_trackblazer_shop",
+            return_value={"closed": True},
+        ), patch.object(
+            trackblazer,
+            "get_shop_catalog",
+            return_value=[{"key": "stamina_manual", "display_name": "Stamina Manual"}],
+        ):
+            result = trackblazer.execute_trackblazer_shop_purchases(
+                ["stamina_manual"],
+                cached_shop_scan=shared_scan,
+            )
+
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result.get("trackblazer_shop_items"), [])
+        self.assertEqual(
+            result.get("trackblazer_shop_summary"),
+            {
+                "items_detected": ["stamina_manual"],
+                "purchasable_items": [],
+                "page_count": 1,
+                "stop_reason": "bottom_reached",
+                "shop_coins": 18,
+            },
+        )
+        self.assertEqual(
+            (result.get("trackblazer_shop_flow") or {}).get("reason"),
+            "shop_items_not_purchasable_in_scan",
+        )
+
     def test_inventory_detection_rejects_shop_screen_overlap(self):
         with patch.object(trackblazer, "_trackblazer_ui_region", return_value=(1, 2, 3, 4)), patch.object(
             trackblazer.device_action,
@@ -151,6 +194,70 @@ class TrackblazerShopRecoveryChecks(unittest.TestCase):
         self.assertEqual(run_result.get("status"), "blocked")
         self.assertEqual(run_result.get("reason"), "shop_verification_failed")
         self.assertEqual(state_obj.get("trackblazer_shop_flow"), flow)
+
+    def test_run_action_refreshes_planner_payload_after_shop_failure(self):
+        state_obj = {"trackblazer_shop_items": [], "trackblazer_shop_summary": {"purchasable_items": []}}
+        action = type("ActionStub", (), {})()
+        action.func = "do_training"
+        action.run = lambda: "executed"
+
+        with patch.object(skeleton, "review_action_before_execution", return_value=True), patch.object(
+            skeleton,
+            "_wait_for_execute_intent",
+            return_value="execute",
+        ), patch.object(
+            skeleton,
+            "_run_skill_purchase_plan",
+            return_value={"status": "skipped"},
+        ), patch.object(
+            skeleton,
+            "_run_trackblazer_shop_purchases",
+            return_value={
+                "status": "failed",
+                "reason": "shop_items_not_purchasable_in_scan",
+                "result": {"trackblazer_shop_flow": {"entered": True, "closed": True}},
+            },
+        ), patch.object(
+            skeleton,
+            "_attach_trackblazer_pre_action_item_plan",
+        ) as attach_mock, patch.object(
+            skeleton,
+            "_ocr_debug_for_action",
+            return_value=["fresh-debug"],
+        ), patch.object(
+            skeleton,
+            "_planned_clicks_for_action",
+            return_value=["fresh-clicks"],
+        ), patch.object(
+            skeleton,
+            "_run_trackblazer_pre_action_items",
+            return_value={"status": "skipped"},
+        ), patch.object(
+            skeleton,
+            "_enforce_operator_race_gate_before_execute",
+            return_value="ok",
+        ), patch.object(
+            skeleton,
+            "_run_planner_race_preflight",
+            return_value="continue",
+        ), patch.object(
+            skeleton,
+            "_resolve_post_action_resolution",
+            return_value="executed",
+        ), patch.object(
+            skeleton,
+            "update_operator_snapshot",
+        ):
+            result = skeleton.run_action_with_review(
+                state_obj,
+                action,
+                review_message="test",
+                ocr_debug=["stale-debug"],
+                planned_clicks=["stale-clicks"],
+            )
+
+        self.assertEqual(result, "executed")
+        attach_mock.assert_called_once_with(state_obj, action)
 
 
 if __name__ == "__main__":

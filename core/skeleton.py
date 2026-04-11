@@ -2812,6 +2812,7 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
     state_obj,
     allow_open_non_execute=True,
     trigger="pre_action_refresh",
+    keep_open=True,
   )
   if _trackblazer_inventory_flow_cacheable(state_obj.get("trackblazer_inventory_flow")):
     _cache_trackblazer_inventory(state_obj, turn_key=action_count)
@@ -4999,6 +5000,9 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
         planned_clicks=planned_clicks,
       )
       return "blocked"
+    _attach_trackblazer_pre_action_item_plan(state_obj, action)
+    ocr_debug = _ocr_debug_for_action(state_obj, action)
+    planned_clicks = _planned_clicks_for_action(action)
     # Shop purchase failure is non-fatal — log it and continue with the
     # main action.  The shop close is handled by the finally block in
     # execute_trackblazer_shop_purchases so we should be back at the lobby.

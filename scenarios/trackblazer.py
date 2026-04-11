@@ -3625,9 +3625,10 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_sh
         "close_result": None,
     }
     result = {
-        "trackblazer_shop_items": list(requested_keys),
+        "trackblazer_shop_items": [],
         "trackblazer_shop_summary": {
-            "items_detected": list(requested_keys),
+            "items_detected": [],
+            "purchasable_items": [],
             "page_count": 0,
             "stop_reason": "",
             "shop_coins": -1,
@@ -3681,6 +3682,17 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_sh
             )
             flow["scan_source"] = "live"
         flow["scan_timing"] = (shared_scan.get("flow") or {}).get("timing") or {}
+        flow["all_items"] = list(shared_scan.get("all_items") or [])
+        flow["purchasable_items"] = list(shared_scan.get("purchasable_items") or [])
+        flow["stop_reason"] = (shared_scan.get("flow") or {}).get("stop_reason") or ""
+        result["trackblazer_shop_items"] = list(flow["purchasable_items"])
+        result["trackblazer_shop_summary"] = {
+            "items_detected": list(flow["all_items"]),
+            "purchasable_items": list(flow["purchasable_items"]),
+            "page_count": len(shared_scan.get("pages") or []),
+            "stop_reason": flow["stop_reason"],
+            "shop_coins": result["trackblazer_shop_summary"].get("shop_coins", -1),
+        }
         scanned_purchasable = set(shared_scan.get("purchasable_items") or [])
         requested_but_not_purchasable = [
             item_key for item_key in requested_keys

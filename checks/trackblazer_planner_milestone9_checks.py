@@ -13,6 +13,7 @@ from core.trackblazer.observe import hydrate_observed_turn_state
 from core.trackblazer.planner import (
   PLANNER_STATE_KEY,
   RUNTIME_PATH_PLANNER_RUNTIME,
+  _candidate_shop_buys,
   _apply_shop_deviation_rules,
   plan_once,
   set_trackblazer_runtime_path,
@@ -229,6 +230,99 @@ def _test_build_review_snapshot_does_not_mutate_live_action():
   assert (snapshot.get("selected_action") or {}).get("training_name") == original_training_name, snapshot.get("selected_action")
 
 
+def _test_candidate_shop_buys_requires_purchasable_rows():
+  effective_shop_items = [
+    {
+      "key": "stamina_manual",
+      "display_name": "Stamina Manual",
+      "cost": 15,
+      "effective_priority": "HIGH",
+      "max_quantity": 4,
+      "policy_notes": "manual",
+    }
+  ]
+  shop_summary = {
+    "shop_coins": 18,
+    "year": "Senior Year Early Mar",
+    "turn": 20,
+    "items_detected": ["stamina_manual"],
+    "purchasable_items": [],
+  }
+
+  would_buy = _candidate_shop_buys(
+    effective_shop_items,
+    shop_items=[],
+    shop_summary=shop_summary,
+    held_quantities={},
+  )
+
+  assert would_buy == [], would_buy
+
+
+def _test_planner_rebinds_item_plan_to_selected_action():
+  state_obj = _base_state()
+  set_trackblazer_runtime_path(state_obj, RUNTIME_PATH_PLANNER_RUNTIME, source="test")
+  action = _base_action(state_obj)
+  action.func = "do_rest"
+
+  plan_calls = []
+
+  def _fake_plan_item_usage(*, policy=None, state_obj=None, action=None, limit=8):
+    plan_calls.append(
+      {
+        "func": getattr(action, "func", None),
+        "training_name": action.get("training_name") if hasattr(action, "get") else None,
+      }
+    )
+    return {
+      "context": {
+        "energy_rescue": True,
+        "training_name": action.get("training_name") if hasattr(action, "get") else None,
+      },
+      "candidates": [
+        {
+          "key": "vita_20",
+          "name": "Vita 20",
+          "usage_group": "energy",
+          "reason": "synthetic energy rescue",
+        }
+      ],
+      "deferred": [],
+    }
+
+  with ExitStack() as stack:
+    stack.enter_context(patch("core.trackblazer.planner._build_planner_race_plan", return_value=_stub_planner_race_plan()))
+    stack.enter_context(
+      patch(
+        "core.trackblazer.derive._lookahead_summary",
+        return_value={
+          "source": {},
+          "next_turn_races_count": 0,
+          "next_n_turns_races_count": 0,
+          "projected_energy_deficit": False,
+          "next_g1_distance": None,
+          "next_race_day_distance": None,
+        },
+      )
+    )
+    stack.enter_context(patch("core.trackblazer.planner.plan_item_usage", side_effect=_fake_plan_item_usage))
+    planner_state = plan_once(state_obj, action, limit=8)
+
+  turn_plan = TurnPlan.from_snapshot(planner_state.get("turn_plan") or {})
+  selected_action = dict((turn_plan.review_context or {}).get("selected_action") or {})
+  execution_payload = turn_plan.to_execution_payload().get("item_execution") or {}
+  selected_binding = dict((turn_plan.item_plan or {}).get("selected_action_binding") or {})
+
+  assert (turn_plan.race_plan or {}).get("selected_action", {}).get("func") == "do_training", turn_plan.race_plan
+  assert plan_calls[-1]["func"] == "do_training", plan_calls
+  assert plan_calls[-1]["training_name"] == "speed", plan_calls
+  assert selected_action.get("func") == "do_training", selected_action
+  assert selected_action.get("training_name") == "speed", selected_action
+  assert selected_binding.get("func") == "do_training", selected_binding
+  assert selected_binding.get("training_name") == "speed", selected_binding
+  assert execution_payload.get("binding_label") == "do_training:speed", execution_payload
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -236,6 +330,8 @@ def main():
   _test_skill_cadence_candidate_is_ranked_but_not_selected_main_action()
   _test_shop_deviation_rules_record_rationale()
   _test_build_review_snapshot_does_not_mutate_live_action()
+  _test_candidate_shop_buys_requires_purchasable_rows()
+  _test_planner_rebinds_item_plan_to_selected_action()
   print("trackblazer planner milestone 9 checks: ok")
 
 

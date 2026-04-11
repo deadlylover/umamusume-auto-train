@@ -586,8 +586,8 @@ def collect_main_state():
   return state_object
 
 
-def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, trigger="automatic"):
-  """Open, scan, and close the Trackblazer training items inventory."""
+def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, trigger="automatic", keep_open=False):
+  """Open, scan, and optionally close the Trackblazer training items inventory."""
   from scenarios.trackblazer import (
     scan_training_items_inventory,
     build_inventory_summary,
@@ -616,6 +616,7 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     "trigger": trigger,
     "execution_intent": bot.get_execution_intent(),
     "allow_open_non_execute": bool(allow_open_non_execute),
+    "keep_open": bool(keep_open),
     "opened": False,
     "already_open": False,
     "closed": False,
@@ -692,6 +693,9 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
     if flow["already_open"]:
       flow["closed"] = False
       flow["reason"] = flow["reason"] or "inventory_was_already_open"
+    elif keep_open:
+      flow["closed"] = False
+      flow["reason"] = flow["reason"] or "inventory_kept_open_for_followup"
     else:
       t0 = time.time()
       close_result = close_training_items_inventory()
