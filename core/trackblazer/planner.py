@@ -10,6 +10,7 @@ import core.bot as bot
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
+from core.race_selector import get_race_gate_for_turn_label
 from core.trackblazer.compat import (
   capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
 )
@@ -2153,6 +2154,13 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   lookahead = dict(derived_data.get("lookahead_summary") or {})
   race_opportunity = dict(derived_data.get("race_opportunity") or {})
   timeline_window = dict(derived_data.get("timeline_window") or {})
+  operator_race_gate = get_race_gate_for_turn_label(
+    observed_data.get("year"),
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+  optional_races_blocked = bool(
+    operator_race_gate.get("enabled") and not operator_race_gate.get("race_allowed")
+  )
   energy_ratio = _safe_float(derived_data.get("energy_ratio"), None)
   if energy_ratio is None:
     energy_ratio = 0.5
@@ -2270,7 +2278,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     elif node_id == "race:rival":
       rival_visible = bool(race_opportunity.get("rival_visible"))
       optional_safe = bool(race_opportunity.get("optional_safe_under_lookahead"))
-      if (not rival_visible) or (energy_ratio <= rival_min_energy):
+      if optional_races_blocked or (not rival_visible) or (energy_ratio <= rival_min_energy):
         viable = False
       score = 46.0 + (4.0 if optional_safe else -6.0)
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
@@ -2278,15 +2286,21 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       score_components = {
         "rival_visible": rival_visible,
         "optional_safe_under_lookahead": optional_safe,
+        "operator_race_gate_blocked": optional_races_blocked,
+        "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
       }
     elif node_id == "race:fallback":
       rival_visible = bool(race_opportunity.get("rival_visible"))
-      if rival_visible:
+      if optional_races_blocked or rival_visible:
         viable = False
       score = 38.0
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
         score -= 12.0
-      score_components = {"rival_visible": rival_visible}
+      score_components = {
+        "rival_visible": rival_visible,
+        "operator_race_gate_blocked": optional_races_blocked,
+        "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
+      }
     elif _candidate_is_forced_race(node_id):
       forced_bias = {
         "race:climax_locked": 120.0,

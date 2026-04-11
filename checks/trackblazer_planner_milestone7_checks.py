@@ -78,6 +78,25 @@ def _rest_action():
   return action
 
 
+def _training_action(*, score=22.0, supports=1):
+  action = Action()
+  action.func = "do_training"
+  action.available_actions = ["do_training", "do_rest", "do_race"]
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = {
+    "name": "speed",
+    "score_tuple": (score, 0),
+    "weighted_stat_score": score,
+    "stat_gains": {"speed": 17, "power": 5, "sp": 2},
+    "failure": 0,
+    "total_supports": supports,
+    "total_rainbow_friends": 0,
+  }
+  action["available_trainings"] = {"speed": copy.deepcopy(action["training_data"])}
+  return action
+
+
 def _legacy_runtime_state():
   state_obj = _base_state()
   state_obj["year"] = "Senior Year"
@@ -115,6 +134,7 @@ def _runtime_hooks():
     update_operator_snapshot=lambda *args, **kwargs: None,
     should_retry_training_after_consecutive_warning=lambda action: False,
     prepare_training_fallback_after_consecutive_warning=lambda action: False,
+    should_force_rest_after_consecutive_warning=lambda action: False,
   )
 
 
@@ -187,6 +207,53 @@ def _test_planner_prefers_training_over_race_gate_rest_fallback():
   assert selected_action.get("func") == "do_training", selected_action
   assert selected_action.get("training_name") == "speed", selected_action
   assert (selected_action.get("trackblazer_race_decision") or {}).get("reason") == planner_race_decision["reason"], selected_action
+
+
+def _test_planner_does_not_reselect_optional_race_when_operator_gate_blocks_date():
+  bot.set_trackblazer_use_new_planner_enabled(True)
+  state_obj = _base_state()
+  state_obj["year"] = "Classic Year Early Nov"
+  state_obj["turn"] = 4
+  state_obj["current_mood"] = "GREAT"
+  state_obj["energy_level"] = 109
+  state_obj["max_energy"] = 131
+  state_obj["rival_indicator_detected"] = True
+  state_obj["training_results"] = {
+    "speed": {
+      "name": "speed",
+      "score_tuple": (22.0, 0),
+      "weighted_stat_score": 22.0,
+      "stat_gains": {"speed": 17, "power": 5, "sp": 2},
+      "failure": 0,
+      "total_supports": 1,
+      "total_rainbow_friends": 0,
+      "total_friendship_levels": {"blue": 0, "green": 1, "yellow": 0, "max": 1},
+    }
+  }
+  action = _training_action(score=22.0, supports=1)
+
+  blocked_selector = {
+    "enabled": True,
+    "dates": [
+      {
+        "year": "Classic Year",
+        "date": "Early Nov",
+        "name": "Queen Elizabeth II Cup",
+        "race_allowed": False,
+      }
+    ],
+  }
+
+  with patch.object(config, "OPERATOR_RACE_SELECTOR", blocked_selector), patch.object(config, "RACE_SCHEDULE", {}):
+    activation = _activate_trackblazer_planner_turn(state_obj, action)
+    assert activation.get("status") == "planner", activation
+    snapshot = _assert_snapshot_path(state_obj, action, "planner_runtime", "blocked_optional_race_keeps_training")
+    selected_action = snapshot.get("selected_action") or {}
+    planned_clicks = list(snapshot.get("planned_clicks") or [])
+    assert selected_action.get("func") == "do_training", selected_action
+    assert selected_action.get("training_name") == "speed", selected_action
+    assert (selected_action.get("trackblazer_race_decision") or {}).get("should_race") is False, selected_action
+    assert "Open training menu" in ((planned_clicks[0] or {}).get("label") if planned_clicks else ""), planned_clicks
 
 
 def _test_planner_snapshot_and_boundary_history_are_copyable():
@@ -381,6 +448,7 @@ def main():
     _test_path_provenance_distinguishes_runtime_modes()
     _test_pre_debut_planner_still_prefers_training_over_stale_rest()
     _test_planner_prefers_training_over_race_gate_rest_fallback()
+    _test_planner_does_not_reselect_optional_race_when_operator_gate_blocks_date()
     _test_planner_snapshot_and_boundary_history_are_copyable()
     _test_forced_runtime_fallback_sets_explicit_path()
     _test_activation_failure_restores_action_payload()
