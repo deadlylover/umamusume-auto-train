@@ -11,6 +11,7 @@ from core.trackblazer.planner import (
   PLANNER_STATE_KEY,
   build_turn_plan_execution_action,
 )
+from core.trackblazer.compat import capture_rival_fallback_payload
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 import core.skeleton as skeleton
 
@@ -109,6 +110,7 @@ def _runtime_hooks():
     update_operator_snapshot=lambda *args, **kwargs: None,
     should_retry_training_after_consecutive_warning=lambda action: False,
     prepare_training_fallback_after_consecutive_warning=lambda action: False,
+    should_force_rest_after_consecutive_warning=lambda action: False,
   )
 
 
@@ -322,6 +324,90 @@ def _test_same_turn_handoff_is_the_legacy_hydration_point():
   retry_debug_mock.assert_called_once()
 
 
+def _test_legacy_compat_payload_does_not_invent_rest_without_explicit_fallback():
+  action = Action()
+  action.func = "do_race"
+  action.available_actions = ["do_race", "do_training", "do_rest"]
+
+  payload = capture_rival_fallback_payload(action)
+
+  assert payload.get("func") == "", payload
+  assert payload.get("training_name") is None, payload
+  assert payload.get("training_data") == {}, payload
+
+
+def _test_planner_activation_does_not_preserve_provisional_rest_on_strong_training_turn():
+  bot.set_trackblazer_use_new_planner_enabled(True)
+  state_obj = _base_state()
+  state_obj["rival_indicator_detected"] = True
+  state_obj["energy_level"] = 84
+  state_obj["training_results"] = {
+    "speed": {
+      "name": "speed",
+      "score_tuple": (41.0, 0),
+      "weighted_stat_score": 41.0,
+      "stat_gains": {"speed": 22, "power": 7, "sp": 10},
+      "failure": 0,
+      "total_supports": 4,
+      "total_rainbow_friends": 1,
+    },
+    "stamina": {
+      "name": "stamina",
+      "score_tuple": (18.0, 0),
+      "weighted_stat_score": 18.0,
+      "stat_gains": {"stamina": 12, "power": 3, "sp": 5},
+      "failure": 0,
+      "total_supports": 2,
+      "total_rainbow_friends": 0,
+    },
+  }
+
+  action = Action()
+  action.func = "do_rest"
+  action.available_actions = ["do_rest", "do_training", "do_race"]
+  action["training_name"] = "speed"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = copy.deepcopy(state_obj["training_results"]["speed"])
+  action["available_trainings"] = copy.deepcopy(state_obj["training_results"])
+  action["trackblazer_race_decision"] = {
+    "prefer_rest_over_weak_training": True,
+    "reason": "stale legacy rest sentinel",
+  }
+
+  activation = skeleton._activate_trackblazer_planner_turn(state_obj, action)
+
+  assert activation.get("status") == "planner", activation
+  assert action.func == "do_training", action
+  assert action.get("training_name") == "speed", action
+  assert (action.get("trackblazer_planner_race") or {}).get("branch_kind") == "training", action
+
+
+def _test_warning_cancel_can_still_resolve_to_rest_when_policy_targets_rest():
+  action = _race_action()
+  action["trackblazer_planner_race"] = {
+    "branch_kind": "optional_rival_race",
+    "fallback_action": {
+      "func": "do_rest",
+    },
+  }
+  action["planner_race_warning_policy"] = {
+    "warning_expected": True,
+    "cancel_target": "do_rest",
+    "force_rest_on_cancel": True,
+  }
+  action["planner_warning_outcome"] = {
+    "cancelled": True,
+    "force_rest": True,
+    "reason": "consecutive_warning_cancelled",
+  }
+
+  reverted = skeleton._revert_optional_race_to_fallback(action)
+
+  assert reverted is True, reverted
+  assert action.func == "do_rest", action
+  assert action.get("disable_skip_turn_fallback") is True, action
+
+
 def main():
   config.reload_config(print_config=False)
   constants.SCENARIO_NAME = "trackblazer"
@@ -331,6 +417,9 @@ def main():
   _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback()
   _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fallback()
   _test_same_turn_handoff_is_the_legacy_hydration_point()
+  _test_legacy_compat_payload_does_not_invent_rest_without_explicit_fallback()
+  _test_planner_activation_does_not_preserve_provisional_rest_on_strong_training_turn()
+  _test_warning_cancel_can_still_resolve_to_rest_when_policy_targets_rest()
   print("trackblazer planner milestone 8 checks: ok")
 
 

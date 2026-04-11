@@ -1475,6 +1475,18 @@ def _apply_effective_rival_fallback_payload(action, fallback_payload=None):
   return _apply_legacy_rival_fallback_payload(action, fallback_payload)
 
 
+def _apply_planner_owned_fallback_payload(action, fallback_payload) -> bool:
+  fallback_payload = dict(fallback_payload or {}) if isinstance(fallback_payload, dict) else {}
+  if not fallback_payload.get("func"):
+    return False
+  apply_selected_action_payload(action, fallback_payload)
+  if _action_func(action) == "do_rest":
+    action["disable_skip_turn_fallback"] = True
+  elif hasattr(action, "options"):
+    action.options.pop("disable_skip_turn_fallback", None)
+  return True
+
+
 def _set_rest_fallback_action(action):
   planner_race_payload = _action_value(action, "trackblazer_planner_race") or {}
   if isinstance(planner_race_payload, dict) and planner_race_payload:
@@ -1754,6 +1766,8 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
   if turn_plan.decision_path != "planner":
     return None
+  if not _planner_runtime_owns_race_payload(action):
+    apply_turn_plan_action_payload(action, turn_plan)
 
   race_plan = dict(turn_plan.race_plan or {})
   race_scout = dict(race_plan.get("race_scout") or {})
@@ -1845,7 +1859,7 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   if not scout_fallback:
     scout_fallback = _effective_rival_fallback_payload(action)
   if scout_fallback.get("func"):
-    _apply_effective_rival_fallback_payload(action, scout_fallback)
+    _apply_planner_owned_fallback_payload(action, scout_fallback)
     update_operator_snapshot(
       state_obj,
       action,
@@ -1920,7 +1934,14 @@ def _run_planner_warning_cancel_fallback_subroutine(
 
   previous_year = state_obj.get("year")
   previous_turn = state_obj.get("turn")
-  _apply_effective_rival_fallback_payload(action, cancel_fallback)
+  if turn_plan := TurnPlan.from_snapshot(dict(((state_obj.get(PLANNER_STATE_KEY) or {}).get("turn_plan") or {}))):
+    planner_owned_fallback = turn_plan.decision_path == "planner"
+  else:
+    planner_owned_fallback = False
+  if planner_owned_fallback:
+    _apply_planner_owned_fallback_payload(action, cancel_fallback)
+  else:
+    _apply_effective_rival_fallback_payload(action, cancel_fallback)
   updated_planned_clicks = _planned_clicks_for_action(action)
 
   device_action.flush_screenshot_cache()

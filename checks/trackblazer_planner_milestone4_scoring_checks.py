@@ -88,16 +88,16 @@ def _stub_planner_race_plan():
     "branch_kind": "non_race",
     "selection_rationale": "",
     "selected_action": {
-      "func": "do_rest",
+      "func": "",
       "trackblazer_race_decision": {},
       "trackblazer_race_lookahead": {},
     },
     "action_payload": {
       "planner_owned": True,
       "branch_kind": "non_race",
-      "func": "do_rest",
-      "options": {"func": "do_rest"},
-      "fallback_action": {"func": "do_rest"},
+      "func": "",
+      "options": {"func": ""},
+      "fallback_action": {},
       "available_actions": ["do_training", "do_rest", "do_race"],
     },
     "race_check": {"planner_owned": True, "branch_kind": "non_race"},
@@ -289,6 +289,69 @@ def main():
     },
   )
   _assert_selected(case6_plan.get("turn_plan") or {}, expected_node_id="rest", expected_func="do_rest")
+
+  # Regression: rival-visible strong summer training should not collapse to
+  # rest just because lookahead claims an energy deficit.
+  case7_state = _base_state()
+  case7_state["year"] = "Classic Year Late Aug"
+  case7_state["turn"] = 9
+  case7_state["energy_level"] = 66
+  case7_state["max_energy"] = 126
+  case7_state["current_mood"] = "GREAT"
+  case7_state["rival_indicator_detected"] = True
+  case7_state["training_results"] = {
+    "pwr": {
+      "name": "pwr",
+      "score_tuple": (41.0, 0),
+      "weighted_stat_score": 41.0,
+      "stat_gains": {"sta": 16, "pwr": 25, "sp": 4},
+      "failure": 4,
+      "total_supports": 2,
+      "total_rainbow_friends": 1,
+      "total_friendship_levels": {"yellow": 2, "max": 0, "gray": 0, "blue": 0, "green": 0},
+    },
+    "wit": {
+      "name": "wit",
+      "score_tuple": (27.0, 0),
+      "weighted_stat_score": 27.0,
+      "stat_gains": {"spd": 10, "wit": 17, "sp": 5},
+      "failure": 0,
+      "total_supports": 2,
+      "total_rainbow_friends": 0,
+      "total_friendship_levels": {"yellow": 2},
+    },
+  }
+  case7_state["trackblazer_inventory"]["motivating_megaphone"] = {"detected": True, "held_quantity": 1}
+  case7_state["trackblazer_inventory_summary"]["held_quantities"]["motivating_megaphone"] = 1
+  case7_state["trackblazer_inventory_summary"]["items_detected"] = ["motivating_megaphone"]
+  case7_state["trackblazer_inventory_summary"]["actionable_items"] = ["motivating_megaphone"]
+  case7_state["trackblazer_inventory_summary"]["by_category"] = {"support": ["motivating_megaphone"]}
+  case7_state["trackblazer_inventory_summary"]["total_detected"] = 1
+  case7_action = Action()
+  case7_action.func = "do_training"
+  case7_action.available_actions = ["do_training", "do_rest", "do_race"]
+  case7_action["training_name"] = "pwr"
+  case7_action["training_function"] = "stat_weight_training"
+  case7_action["training_data"] = copy.deepcopy(case7_state["training_results"]["pwr"])
+  case7_action["available_trainings"] = copy.deepcopy(case7_state["training_results"])
+  case7_plan = _plan_once_with_stubs(
+    case7_state,
+    case7_action,
+    lookahead={
+      "source": {"reason": "synthetic deficit"},
+      "next_turn_races_count": 1,
+      "next_n_turns_races_count": 2,
+      "projected_energy_deficit": True,
+      "next_g1_distance": 1,
+      "next_race_day_distance": 1,
+    },
+  )
+  _assert_selected(
+    case7_plan.get("turn_plan") or {},
+    expected_node_id="train:pwr+items:motivating_megaphone",
+    expected_func="do_training",
+    expected_training_name="pwr",
+  )
 
   print("trackblazer planner milestone 4 scoring checks: ok")
 

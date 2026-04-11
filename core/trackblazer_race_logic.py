@@ -410,9 +410,10 @@ def get_race_lookahead_energy_advice(state_obj, selector=None):
       break
     if not matching_entry.get("race_allowed", True):
       break
-    race_name = str(matching_entry.get("name") or "").strip()
-    if not race_name:
+    selected_race = str(matching_entry.get("selected_race") or "").strip()
+    if not selected_race:
       break
+    race_name = str(matching_entry.get("name") or selected_race).strip()
     year_end_exempt = turn_label in _RACE_LOOKAHEAD_YEAR_END_EXEMPT_TURNS
     upcoming_races.append(
       {

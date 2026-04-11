@@ -84,7 +84,7 @@ def capture_rival_fallback_payload(action) -> Dict[str, Any]:
     or {}
   )
   if not fallback_func or fallback_func == "do_race":
-    fallback_func = "do_training" if training_name and training_data else "do_rest"
+    fallback_func = "do_training" if training_name and training_data else ""
   return {
     "func": fallback_func,
     "training_name": training_name,

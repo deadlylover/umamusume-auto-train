@@ -63,8 +63,18 @@ def _apply_retry_payload(state_obj, action, retry_payload, hooks: PlannerRuntime
   return action
 
 
+def _caller_has_planner_binding(action) -> bool:
+  if not hasattr(action, "get"):
+    return False
+  return bool(
+    action.get("trackblazer_planner_race")
+    or action.get("planner_race_warning_policy")
+    or action.get("planner_warning_outcome")
+  )
+
+
 def _sync_execution_action_back(action, execution_action):
-  if not hasattr(action, "__setitem__"):
+  if not hasattr(action, "__setitem__") or not _caller_has_planner_binding(action):
     return action
   payload = dict(copy.deepcopy(getattr(execution_action, "options", {}) or {}))
   payload["func"] = getattr(execution_action, "func", None)

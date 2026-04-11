@@ -500,6 +500,44 @@ def _capture_action_payload(action, state_obj=None) -> Dict[str, Any]:
   return payload
 
 
+def _explicit_rest_payload(action, *, state_obj=None, fallback_payload=None, action_payload=None) -> Dict[str, Any]:
+  fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
+  action_payload = (
+    copy.deepcopy(action_payload)
+    if isinstance(action_payload, dict) and action_payload else
+    _capture_action_payload(action, state_obj=state_obj)
+  )
+  action_func = str(action_payload.get("func") or "")
+  warning_outcome = _warning_outcome_payload(action)
+  planner_race = _planner_race_payload(action)
+  warning_plan = (
+    _action_value(action, "planner_race_warning_policy")
+    or planner_race.get("warning_plan")
+    or {}
+  )
+
+  if action_func == "do_rest" and planner_race and not warning_outcome.get("cancelled"):
+    return action_payload
+
+  cancel_resolves_to_rest = bool(warning_outcome.get("cancelled")) and (
+    action_func == "do_rest"
+    or str(fallback_payload.get("func") or "") == "do_rest"
+    or str((warning_plan or {}).get("cancel_target") or "") == "do_rest"
+    or bool(warning_outcome.get("force_rest"))
+  )
+  if not cancel_resolves_to_rest:
+    return {}
+
+  rest_payload = copy.deepcopy(action_payload if action_func == "do_rest" else fallback_payload)
+  rest_payload["func"] = "do_rest"
+  if isinstance(state_obj, dict):
+    rest_payload.setdefault("energy_level", state_obj.get("energy_level"))
+    rest_payload.setdefault("year", state_obj.get("year"))
+  if warning_outcome:
+    rest_payload["planner_warning_outcome"] = copy.deepcopy(warning_outcome)
+  return rest_payload
+
+
 def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   def _best_from_trainings(trainings):
@@ -544,12 +582,19 @@ def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
 
   if bool(state_obj.get("date_event_available")):
     return {"func": "do_recreation"}
-  return {"func": "do_rest"}
+  return {}
 
 
 def _resolve_pre_debut_non_race_payload(action, state_obj=None, fallback_payload=None) -> Dict[str, Any]:
   fallback_payload = fallback_payload if isinstance(fallback_payload, dict) else {}
+  action_payload = _capture_action_payload(action, state_obj=state_obj)
   best_payload = _best_training_payload_from_state(action, state_obj=state_obj)
+  explicit_rest = _explicit_rest_payload(
+    action,
+    state_obj=state_obj,
+    fallback_payload=fallback_payload,
+    action_payload=action_payload,
+  )
 
   # Pre-debut turns should still use the strongest scanned training when one is
   # available, even if the legacy action arrived as a provisional rest fallback.
@@ -563,10 +608,13 @@ def _resolve_pre_debut_non_race_payload(action, state_obj=None, fallback_payload
   if best_payload.get("func"):
     return best_payload
 
-  if fallback_func and fallback_func != "do_race":
+  if explicit_rest:
+    return explicit_rest
+
+  if fallback_func and fallback_func != "do_race" and fallback_func != "do_rest":
     return copy.deepcopy(fallback_payload)
 
-  return {"func": "do_rest"}
+  return {}
 
 
 def _resolve_planner_non_race_payload(action, state_obj=None, race_decision=None, fallback_payload=None) -> Dict[str, Any]:
@@ -577,6 +625,12 @@ def _resolve_planner_non_race_payload(action, state_obj=None, race_decision=None
   action_payload = _capture_action_payload(action, state_obj=state_obj)
   action_func = action_payload.get("func")
   best_payload = _best_training_payload_from_state(action, state_obj=state_obj)
+  explicit_rest = _explicit_rest_payload(
+    action,
+    state_obj=state_obj,
+    fallback_payload=fallback_payload,
+    action_payload=action_payload,
+  )
   best_training_available = best_payload.get("func") == "do_training"
   race_reason = str(race_decision.get("reason") or "").strip().lower()
 
@@ -592,6 +646,9 @@ def _resolve_planner_non_race_payload(action, state_obj=None, race_decision=None
   ):
     return best_payload
 
+  if action_func == "do_rest" and explicit_rest:
+    return explicit_rest
+
   if action_func == "do_training":
     training_name = action_payload.get("training_name")
     training_data = action_payload.get("training_data") or {}
@@ -600,17 +657,20 @@ def _resolve_planner_non_race_payload(action, state_obj=None, race_decision=None
     if best_training_available:
       return best_payload
 
-  if action_func and action_func != "do_race":
+  if action_func and action_func not in {"do_race", "do_rest"}:
     return action_payload
 
   if best_payload.get("func"):
     return best_payload
 
   fallback_func = fallback_payload.get("func")
-  if fallback_func and fallback_func != "do_race":
+  if fallback_func and fallback_func != "do_race" and fallback_func != "do_rest":
     return copy.deepcopy(fallback_payload)
 
-  return {"func": "do_rest"}
+  if explicit_rest:
+    return explicit_rest
+
+  return {}
 
 
 def _planner_native_goal_race_active(state_obj) -> Tuple[bool, str]:
@@ -1121,7 +1181,7 @@ def _planner_selected_action_payload(
   branch_kind="",
 ):
   fallback_action = fallback_action if isinstance(fallback_action, dict) else {}
-  selected_func = func or _action_func(action)
+  selected_func = str(func or "")
   payload = {
     "func": selected_func,
     "training_name": training_name if training_name is not None else _action_value(action, "training_name"),
@@ -1243,9 +1303,9 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   }
   warning_plan = {}
 
-  if forced_action:
+  if forced_action and (forced_action.get("action_payload") or {}).get("func"):
     forced_payload = dict(forced_action.get("action_payload") or {})
-    forced_func = forced_payload.get("func") or "do_rest"
+    forced_func = forced_payload.get("func") or ""
     branch_kind = "warning_cancel_fallback" if warning_cancelled else "forced_fallback"
     warning_plan = {
       "planner_owned": True,
@@ -1413,7 +1473,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
       branch_kind = "training"
       selected_action_payload = _planner_selected_action_payload(
         action,
-        func=pre_debut_fallback.get("func") or "do_training",
+        func=pre_debut_fallback.get("func") or "",
         training_name=pre_debut_fallback.get("training_name"),
         training_function=pre_debut_fallback.get("training_function"),
         training_data=copy.deepcopy(pre_debut_fallback.get("training_data") or {}),
@@ -1738,6 +1798,17 @@ def _planner_owned_primary_fallback_payload(
   return _candidate_to_fallback_payload(top_non_race, state_obj=state_obj, action=action)
 
 
+def _ranked_warning_cancel_candidate(non_race, *, prefer_rest=False):
+  non_race = [entry for entry in list(non_race or []) if isinstance(entry, dict)]
+  if not non_race:
+    return {}
+  if prefer_rest:
+    rest_candidate = next((entry for entry in non_race if str(entry.get("node_id") or "") == "rest"), None)
+    if rest_candidate:
+      return rest_candidate
+  return non_race[0]
+
+
 def _planner_owned_warning_policy_for_node(
   branch_kind,
   selected_node_id,
@@ -1803,19 +1874,17 @@ def _planner_owned_warning_policy_for_node(
     # Weak-training fallback race: when blocked by the consecutive-race warning
     # the planner prefers rest over the weak training that triggered the
     # fallback in the first place. We still source rest from the ranked list.
-    cancel_candidate = rest_candidate or top_non_race
-    cancel_payload = _candidate_to_fallback_payload(cancel_candidate, state_obj=state_obj, action=action) if cancel_candidate else {"func": "do_rest"}
-    if not cancel_payload:
-      cancel_payload = {"func": "do_rest"}
+    cancel_candidate = _ranked_warning_cancel_candidate(non_race, prefer_rest=True)
+    cancel_payload = _candidate_to_fallback_payload(cancel_candidate, state_obj=state_obj, action=action) if cancel_candidate else {}
     return {
       "planner_owned": True,
       "warning_expected": True,
       "accept_warning": False,
       "cancel_reason": "Weak-training fallback race is not worth a third consecutive race.",
-      "cancel_target": cancel_payload.get("func") or "do_rest",
-      "cancel_target_label": _fallback_target_label(cancel_payload) or "rest",
-      "cancel_target_node_id": (cancel_candidate.get("node_id") if cancel_candidate else None) or "rest",
-      "force_rest_on_cancel": True,
+      "cancel_target": cancel_payload.get("func") or "",
+      "cancel_target_label": _fallback_target_label(cancel_payload) if cancel_payload.get("func") else "",
+      "cancel_target_node_id": (cancel_candidate.get("node_id") if cancel_candidate else None) or "",
+      "force_rest_on_cancel": bool(cancel_payload.get("func") == "do_rest"),
       "cancel_reason_key": "optional_fallback_non_rival_race",
     }
 
@@ -1830,10 +1899,10 @@ def _planner_owned_warning_policy_for_node(
         "warning_expected": True,
         "accept_warning": False,
         "cancel_reason": "Optional rival race promoted from rest should preserve the rest fallback when blocked.",
-        "cancel_target": "do_rest",
-        "cancel_target_label": "rest",
-        "cancel_target_node_id": "rest",
-        "force_rest_on_cancel": True,
+        "cancel_target": top_func or "",
+        "cancel_target_label": top_label or "",
+        "cancel_target_node_id": top_node_id or "",
+        "force_rest_on_cancel": bool(top_func == "do_rest"),
         "cancel_reason_key": "optional_rival_promoted_from_rest",
       }
     accept_warning = not bool(getattr(config, "CANCEL_CONSECUTIVE_RACE", False))
@@ -1856,10 +1925,10 @@ def _planner_owned_warning_policy_for_node(
       "accept_warning": False,
       "accept_reason": "",
       "cancel_reason": "Config cancels optional rival races at the consecutive-race warning.",
-      "cancel_target": "do_rest",
-      "cancel_target_label": "rest" if rest_present else (top_label or "rest"),
-      "cancel_target_node_id": "rest" if rest_present else top_node_id,
-      "force_rest_on_cancel": True,
+      "cancel_target": (rest_candidate.get("node_id") and "do_rest") if rest_present else (top_func or ""),
+      "cancel_target_label": "rest" if rest_present else (top_label or ""),
+      "cancel_target_node_id": "rest" if rest_present else (top_node_id or ""),
+      "force_rest_on_cancel": bool(rest_present),
       "cancel_reason_key": "cancel_consecutive_race_setting",
     }
 
@@ -1936,7 +2005,9 @@ def _planner_owned_fallback_chain_from_ranked(
       )
     if candidate:
       return _entry_from_candidate(trigger, candidate)
-    cancel_func = warning_policy.get("cancel_target") or "do_rest"
+    cancel_func = warning_policy.get("cancel_target") or ""
+    if not cancel_func:
+      return {}
     payload = {"func": cancel_func}
     return {
       "trigger": trigger,
@@ -1968,7 +2039,9 @@ def _planner_owned_fallback_chain_from_ranked(
     # they require a full replan rather than chaining to a non-race candidate.
 
     if warning_policy.get("warning_expected") and not warning_policy.get("accept_warning"):
-      raw_chain.append(_entry_from_warning_policy("consecutive_warning_cancel"))
+      warning_entry = _entry_from_warning_policy("consecutive_warning_cancel")
+      if warning_entry:
+        raw_chain.append(warning_entry)
 
   bounded = raw_chain[:max_depth] if max_depth > 0 else []
   replan_required = len(raw_chain) > max_depth
@@ -2257,6 +2330,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf")
   ]
 
+  rest_entry = next((entry for entry in scored if entry.get("node_id") == "rest"), None)
   rival_entry = next((entry for entry in scored if entry.get("node_id") == "race:rival"), None)
   fallback_entry = next((entry for entry in scored if entry.get("node_id") == "race:fallback"), None)
   non_forced_best = max(
@@ -2290,6 +2364,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
           f"{entry.get('rationale') or ''}; penalized because training score "
           f"{best_training_base_score:.2f} >= override threshold {training_threshold:.2f}"
         ).strip("; ")
+
     else:
       rival_score = _safe_float(rival_entry.get("priority_score"), float("-inf")) if rival_entry else float("-inf")
       fallback_score = _safe_float(fallback_entry.get("priority_score"), float("-inf")) if fallback_entry else float("-inf")
@@ -2334,6 +2409,26 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     for entry in scored:
       if entry.get("node_id") == "rest" and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf"):
         entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) + 6.0
+
+  if (
+    not forced_viable
+    and bool(race_opportunity.get("rival_visible"))
+    and best_training_base_score >= training_threshold
+    and rest_entry
+  ):
+    rest_score = _safe_float(rest_entry.get("priority_score"), float("-inf"))
+    training_floor = max(best_training_score, best_training_base_score)
+    if (
+      rest_score != float("-inf")
+      and training_floor != float("-inf")
+      and rest_score >= training_floor
+    ):
+      rest_entry["priority_score"] = training_floor - 1.0
+      rest_entry["rationale"] = (
+        f"{rest_entry.get('rationale') or ''}; final cap keeps rest below strong rival-visible "
+        f"training because score {best_training_base_score:.2f} >= override threshold "
+        f"{training_threshold:.2f}"
+      ).strip("; ")
 
   ranked = sorted(
     scored,
@@ -2447,9 +2542,10 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
   if not race_decision.get("reason") and rationale:
     race_decision["reason"] = rationale
 
-  selected_func = "do_rest"
-  training_name = None
-  training_data = {}
+  materialized_payload = _candidate_to_fallback_payload(selected_candidate, state_obj=state_obj, action=action)
+  selected_func = str(materialized_payload.get("func") or "")
+  training_name = materialized_payload.get("training_name")
+  training_data = copy.deepcopy(materialized_payload.get("training_data") or {})
   training_function = _action_value(action, "training_function") or "stat_weight_training"
   race_name = selected_action.get("race_name") or _action_value(action, "race_name") or "any"
   race_image_path = selected_action.get("race_image_path") or _action_value(action, "race_image_path")
@@ -2463,9 +2559,8 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
   trackblazer_climax_race_day = bool(selected_action.get("trackblazer_climax_race_day"))
 
   if node_id.startswith("train:"):
-    selected_func = "do_training"
-    training_name = _candidate_training_name(node_id)
-    training_data = copy.deepcopy((state_obj.get("training_results") or {}).get(training_name) or {})
+    training_name = training_name or _candidate_training_name(node_id)
+    training_data = copy.deepcopy(training_data or (state_obj.get("training_results") or {}).get(training_name) or {})
     if not training_data:
       training_data = copy.deepcopy((_action_value(action, "available_trainings") or {}).get(training_name) or {})
     if item_key and training_data:
@@ -2475,14 +2570,7 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
       "should_race": False,
       "branch_kind": "training",
     }
-  elif node_id == "rest":
-    selected_func = "do_rest"
-    race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
-  elif node_id == "recreation":
-    selected_func = "do_recreation"
-    race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
-  elif node_id == "infirmary":
-    selected_func = "do_infirmary"
+  elif selected_func in {"do_rest", "do_recreation", "do_infirmary"}:
     race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
   elif node_id.startswith("race:"):
     selected_func = "do_race"
