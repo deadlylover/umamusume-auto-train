@@ -25,6 +25,8 @@ from core.trackblazer_item_use import (
   get_default_training_behavior_settings,
   get_effective_item_use_items,
   get_training_behavior_settings,
+  get_training_behavior_committed_training_score_threshold,
+  get_training_behavior_optional_race_threshold,
   normalize_item_use_policy,
 )
 from core.trackblazer_shop import (
@@ -104,6 +106,8 @@ class OperatorConsole:
     self._skip_full_stats_aptitude_check_var = None
     self._trackblazer_scoring_mode_var = None
     self._strong_training_score_threshold_var = None
+    self._optional_race_training_threshold_var = None
+    self._committed_training_score_threshold_var = None
     self._phase_labels = {}
     self._race_selector_status_var = None
     self._race_selector_window = None
@@ -2935,6 +2939,9 @@ class OperatorConsole:
     normalized_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
     return get_training_behavior_settings(normalized_policy)
 
+  def _get_active_planner_policy(self):
+    return config.normalize_trackblazer_planner_policy(getattr(config, "TRACKBLAZER_PLANNER_POLICY", None))
+
   def _open_stat_weights_window(self):
     if self._root is None:
       return
@@ -3085,6 +3092,72 @@ class OperatorConsole:
       anchor="w",
       wraplength=640,
     ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+
+    planner_behavior_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    planner_behavior_frame.pack(fill=tk.X)
+    tk.Label(
+      planner_behavior_frame,
+      text="Race / commit thresholds",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    planner_behavior = self._get_active_planner_policy()
+    tk.Label(
+      planner_behavior_frame,
+      text="Optional race below",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=0, sticky="e", padx=(0, 4), pady=2)
+    self._optional_race_training_threshold_var = tk.StringVar(
+      value=str(
+        int(planner_behavior.get("training_overrides_race_threshold", get_training_behavior_optional_race_threshold()))
+      )
+    )
+    tk.Spinbox(
+      planner_behavior_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._optional_race_training_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=1, sticky="w", pady=2)
+    tk.Label(
+      planner_behavior_frame,
+      text="Commit training at",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="e",
+    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
+    self._committed_training_score_threshold_var = tk.StringVar(
+      value=str(get_training_behavior_committed_training_score_threshold())
+    )
+    tk.Spinbox(
+      planner_behavior_frame,
+      from_=0,
+      to=200,
+      width=5,
+      textvariable=self._committed_training_score_threshold_var,
+      bg="#192028",
+      fg="white",
+      buttonbackground="#2d333b",
+    ).grid(row=1, column=3, sticky="w", pady=2)
+    tk.Label(
+      planner_behavior_frame,
+      text=(
+        "If the visible board is below the optional race threshold, racing stays valid. "
+        "The commit threshold controls when item-use logic treats a training as strong enough to commit/rescue."
+      ),
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 0))
 
     optional_race_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
     optional_race_frame.pack(fill=tk.X)
@@ -3509,6 +3582,15 @@ class OperatorConsole:
       self._wit_gate_energy_var.set(str(behavior.get("wit_failure_gate_high_energy_pct", 80)))
     if self._strong_training_score_threshold_var is not None:
       self._strong_training_score_threshold_var.set(str(behavior.get("strong_training_score_threshold", 40)))
+    if self._optional_race_training_threshold_var is not None:
+      planner_policy = self._get_active_planner_policy()
+      self._optional_race_training_threshold_var.set(
+        str(int(planner_policy.get("training_overrides_race_threshold", behavior.get("optional_race_training_threshold", 30))))
+      )
+    if self._committed_training_score_threshold_var is not None:
+      self._committed_training_score_threshold_var.set(
+        str(behavior.get("committed_training_score_threshold", 35))
+      )
     if self._race_lookahead_enabled_var is not None:
       self._race_lookahead_enabled_var.set(bool(behavior.get("race_lookahead_enabled", True)))
     if self._race_lookahead_threshold_var is not None:
@@ -3548,6 +3630,7 @@ class OperatorConsole:
       return
 
     current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    current_planner_policy = config.normalize_trackblazer_planner_policy(getattr(config, "TRACKBLAZER_PLANNER_POLICY", None))
     training_behavior = get_default_training_behavior_settings()
     settings = current_policy.get("settings", {}) if isinstance(current_policy.get("settings"), dict) else {}
     behavior_settings = settings.get("training_behavior", {}) if isinstance(settings.get("training_behavior"), dict) else {}
@@ -3574,6 +3657,20 @@ class OperatorConsole:
       threshold_text = str(self._strong_training_score_threshold_var.get() or "").strip()
       try:
         training_behavior["strong_training_score_threshold"] = max(0, int(threshold_text))
+      except ValueError:
+        pass
+    optional_race_training_threshold = None
+    if self._optional_race_training_threshold_var is not None:
+      threshold_text = str(self._optional_race_training_threshold_var.get() or "").strip()
+      try:
+        optional_race_training_threshold = max(0, int(threshold_text))
+        training_behavior["optional_race_training_threshold"] = optional_race_training_threshold
+      except ValueError:
+        pass
+    if self._committed_training_score_threshold_var is not None:
+      threshold_text = str(self._committed_training_score_threshold_var.get() or "").strip()
+      try:
+        training_behavior["committed_training_score_threshold"] = max(0, int(threshold_text))
       except ValueError:
         pass
     if self._race_lookahead_enabled_var is not None:
@@ -3638,6 +3735,11 @@ class OperatorConsole:
       },
       "items": current_policy.get("items", {}),
     }
+    if optional_race_training_threshold is not None:
+      current_planner_policy["training_overrides_race_threshold"] = float(optional_race_training_threshold)
+    if not self._persist_config_value("trackblazer.planner_policy", current_planner_policy):
+      self._message_value.set("Failed to save planner thresholds.")
+      return
     if not self._persist_config_value("trackblazer.item_use_policy", policy):
       self._message_value.set("Failed to save training behavior.")
       return
@@ -3664,6 +3766,10 @@ class OperatorConsole:
       },
       "items": current_policy.get("items", {}),
     }
+    default_planner_policy = config.normalize_trackblazer_planner_policy({})
+    if not self._persist_config_value("trackblazer.planner_policy", default_planner_policy):
+      self._message_value.set("Failed to reset planner thresholds.")
+      return
     if not self._persist_config_value("trackblazer.item_use_policy", policy):
       self._message_value.set("Failed to reset training behavior.")
       return

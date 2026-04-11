@@ -548,14 +548,44 @@ def _match_scenario_banners(screenshot, threshold=0.8):
 
 def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
   anchor_counts = {}
-  for name, (template_path, _bbox_key) in STABLE_CAREER_SCREEN_ANCHORS.items():
-    matches = device_action.match_template(template_path, screenshot, threshold=threshold)
+  game_window_bbox = getattr(constants, "GAME_WINDOW_BBOX", None)
+  screenshot_h, screenshot_w = screenshot.shape[:2] if screenshot is not None else (0, 0)
+  for name, (template_path, bbox_key) in STABLE_CAREER_SCREEN_ANCHORS.items():
+    match_screenshot = screenshot
+    region_ltrb = getattr(constants, bbox_key, None) if bbox_key else None
+    if (
+      screenshot is not None
+      and isinstance(region_ltrb, tuple)
+      and len(region_ltrb) == 4
+      and isinstance(game_window_bbox, tuple)
+      and len(game_window_bbox) == 4
+    ):
+      left = max(0, int(region_ltrb[0] - game_window_bbox[0]))
+      top = max(0, int(region_ltrb[1] - game_window_bbox[1]))
+      right = min(screenshot_w, int(region_ltrb[2] - game_window_bbox[0]))
+      bottom = min(screenshot_h, int(region_ltrb[3] - game_window_bbox[1]))
+      if right > left and bottom > top:
+        match_screenshot = screenshot[top:bottom, left:right]
+    matches = device_action.match_template(template_path, match_screenshot, threshold=threshold)
     anchor_counts[name] = len(matches)
   return anchor_counts
 
 
 def _has_stable_career_screen(anchor_counts):
-  return any(count > 0 for count in anchor_counts.values())
+  if not isinstance(anchor_counts, dict):
+    return False
+
+  top_anchor_count = sum(
+    int(anchor_counts.get(name, 0) or 0)
+    for name in ("details_button", "details_button_alt")
+  )
+  bottom_anchor_count = sum(
+    int(anchor_counts.get(name, 0) or 0)
+    for name in ("training_button", "rest_button", "recreation_button", "races_button")
+  )
+  tazuna_hint_count = int(anchor_counts.get("tazuna_hint", 0) or 0)
+
+  return bool(bottom_anchor_count > 0 and (top_anchor_count > 0 or tazuna_hint_count > 0))
 
 
 def detect_scenario():
@@ -1409,6 +1439,10 @@ def _apply_effective_rival_fallback_payload(action, fallback_payload=None):
     return False
   if _planner_runtime_owns_race_payload(action):
     apply_selected_action_payload(action, fallback_payload)
+    if _action_func(action) == "do_rest":
+      action["disable_skip_turn_fallback"] = True
+    elif hasattr(action, "options"):
+      action.options.pop("disable_skip_turn_fallback", None)
     return True
   return _apply_legacy_rival_fallback_payload(action, fallback_payload)
 
@@ -1730,7 +1764,7 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   if not scout_fallback:
     scout_fallback = _effective_rival_fallback_payload(action)
   if scout_fallback.get("func"):
-    apply_selected_action_payload(action, scout_fallback)
+    _apply_effective_rival_fallback_payload(action, scout_fallback)
     update_operator_snapshot(
       state_obj,
       action,

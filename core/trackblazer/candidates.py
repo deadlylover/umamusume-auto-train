@@ -312,6 +312,17 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
 
   energy_ratio = derived_data.get("energy_ratio")
   rival_min_energy = float((policy or {}).get("rival_race_min_energy_ratio", 0.02) or 0.02)
+  training_threshold = float((policy or {}).get("training_overrides_race_threshold", 30) or 30)
+  best_training_score = None
+  if training_values:
+    best_training_score = max(
+      (
+        float(training.get("score") or 0.0)
+        for training in training_values
+        if isinstance(training, dict)
+      ),
+      default=None,
+    )
   if race_opportunity.get("rival_visible") and isinstance(energy_ratio, (int, float)) and energy_ratio > rival_min_energy:
     _append_candidate(
       candidates,
@@ -321,6 +332,26 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       requirements=["race_opportunity", "energy"],
       expected_warnings=["consecutive_race_warning"],
       source_facts=race_opportunity,
+    )
+  elif (
+    isinstance(energy_ratio, (int, float))
+    and energy_ratio > rival_min_energy
+    and not bool(derived_data.get("is_summer"))
+    and list((constants.ALL_RACES or {}).get(observed_data.get("year"), []) or [])
+    and (best_training_score is None or best_training_score < training_threshold)
+  ):
+    _append_candidate(
+      candidates,
+      node_id="race:fallback",
+      kind="race",
+      rationale="training board is below the race threshold and a normal race is available on this date",
+      requirements=["race_opportunity", "energy", "training"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts={
+        **copy.deepcopy(race_opportunity),
+        "best_training_score": best_training_score,
+        "training_overrides_race_threshold": training_threshold,
+      },
     )
 
   if race_opportunity.get("lobby_scheduled"):

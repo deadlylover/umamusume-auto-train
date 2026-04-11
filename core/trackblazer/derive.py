@@ -273,10 +273,14 @@ def _training_value(training_results, state_obj, policy):
         if int(held_quantities.get(match_key, 0) or 0) > 0 or match_key in shop_items:
           best_item_key = match_key
           break
-    score = _safe_float(training_data.get("weighted_stat_score"), None)
+    score_tuple = training_data.get("score_tuple") or ()
+    score = _safe_float(score_tuple[0], None) if score_tuple else None
     if score is None:
-      score_tuple = training_data.get("score_tuple") or ()
-      score = _safe_float(score_tuple[0], 0.0) if score_tuple else 0.0
+      weighted_score = _safe_float(training_data.get("weighted_stat_score"), None)
+      if weighted_score is None:
+        score = 0.0
+      else:
+        score = weighted_score + (_safe_float(training_data.get("bond_boost"), 0.0) or 0.0)
     total_stat_gain = sum(
       int(value)
       for stat_name, value in (training_data.get("stat_gains") or {}).items()
@@ -284,7 +288,12 @@ def _training_value(training_results, state_obj, policy):
     )
     matching_stat_gain = int(((training_data.get("stat_gains") or {}).get(training_name)) or 0)
     item_assist_available = bool(best_item_key)
-    item_assist_score_delta = _safe_float(usage_context.get("training_score"), 0.0) if item_assist_available else 0.0
+    item_assist_score_delta = 0.0
+    if item_assist_available:
+      assisted_score = _safe_float(usage_context.get("training_score"), 0.0) or 0.0
+      # usage_context["training_score"] is the absolute score snapshot for the
+      # selected training, not an additive bonus from the item itself.
+      item_assist_score_delta = max(0.0, assisted_score - float(score or 0.0))
     results.append(
       {
         "name": training_name,

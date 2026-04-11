@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
@@ -55,6 +56,20 @@ def _apply_retry_payload(state_obj, action, retry_payload, hooks: PlannerRuntime
   _set_disable_skip_turn_fallback(action, enabled=(action.func == "do_rest"))
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
     hooks.attach_trackblazer_pre_action_item_plan(state_obj, action)
+  return action
+
+
+def _sync_execution_action_back(action, execution_action):
+  if not hasattr(action, "__setitem__"):
+    return action
+  payload = dict(copy.deepcopy(getattr(execution_action, "options", {}) or {}))
+  payload["func"] = getattr(execution_action, "func", None)
+  apply_selected_action_payload(
+    action,
+    payload,
+    available_actions=list(getattr(execution_action, "available_actions", []) or []),
+  )
+  _set_disable_skip_turn_fallback(action, enabled=(getattr(action, "func", "") == "do_rest"))
   return action
 
 
@@ -159,6 +174,7 @@ def run_trackblazer_planner_turn(
     )
     status = outcome.get("status")
     if status in {"executed", "previewed", "reassess", "blocked"}:
+      _sync_execution_action_back(action, execution_action)
       _transition(state_obj, "planner_runtime", "planner_runtime", status, outcome.get("reason") or "")
       return outcome
 

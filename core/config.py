@@ -10,7 +10,7 @@ SLEEP_TIME_MULTIPLIER = 1
 TRACKBLAZER_PLANNER_POLICY = {
   "energy_class_cutoffs": {"critical": 0.05, "low": 0.30, "ok": 0.70},
   "training_value_class_cutoffs": {"weak": 35, "adequate": 40, "strong": 50, "very_strong": 60},
-  "training_overrides_race_threshold": 40,
+  "training_overrides_race_threshold": 30,
   "rival_race_min_energy_ratio": 0.02,
   "lookahead_horizon_turns": 3,
   "max_fallback_depth": 3,

@@ -8,6 +8,7 @@ import utils.constants as constants
 from core.actions import Action
 from core.trackblazer.models import TurnPlan
 from core.trackblazer.planner import plan_once
+from core.trackblazer_race_logic import evaluate_trackblazer_race
 
 
 def _base_state():
@@ -145,38 +146,115 @@ def main():
   case1_plan = _plan_once_with_stubs(case1_state, case1_action)
   _assert_selected(case1_plan.get("turn_plan") or {}, expected_node_id="race:rival", expected_func="do_race")
 
-  # PRD acceptance: strong training overrides optional rival race.
+  # Weak training + rival visible should still race when a stat manual is held.
+  case1b_state = _base_state()
+  case1b_state["rival_indicator_detected"] = True
+  case1b_state["trackblazer_inventory"]["speed_manual"] = {"detected": True, "held_quantity": 1}
+  case1b_state["trackblazer_inventory_summary"]["held_quantities"]["speed_manual"] = 1
+  case1b_state["trackblazer_inventory_summary"]["items_detected"] = ["speed_manual"]
+  case1b_state["trackblazer_inventory_summary"]["actionable_items"] = ["speed_manual"]
+  case1b_state["trackblazer_inventory_summary"]["by_category"] = {"training_boost": ["speed_manual"]}
+  case1b_state["trackblazer_inventory_summary"]["total_detected"] = 1
+  case1b_action = _base_action(case1b_state)
+  case1b_plan = _plan_once_with_stubs(case1b_state, case1b_action)
+  _assert_selected(case1b_plan.get("turn_plan") or {}, expected_node_id="race:rival", expected_func="do_race")
+
+  # Boundary: rival-visible boards race below 30 and train at 30+.
   case2_state = _base_state()
   case2_state["rival_indicator_detected"] = True
-  case2_state["training_results"]["speed"]["weighted_stat_score"] = 42.0
-  case2_state["training_results"]["speed"]["score_tuple"] = (42.0, 0)
+  case2_state["training_results"]["speed"]["weighted_stat_score"] = 29.0
+  case2_state["training_results"]["speed"]["score_tuple"] = (29.0, 0)
   case2_action = _base_action(case2_state)
   case2_plan = _plan_once_with_stubs(case2_state, case2_action)
+  _assert_selected(case2_plan.get("turn_plan") or {}, expected_node_id="race:rival", expected_func="do_race")
+
+  # PRD acceptance: strong-enough training overrides optional rival race.
+  case3_state = _base_state()
+  case3_state["rival_indicator_detected"] = True
+  case3_state["energy_level"] = 90
+  case3_state["training_results"]["speed"]["weighted_stat_score"] = 30.0
+  case3_state["training_results"]["speed"]["score_tuple"] = (30.0, 0)
+  case3_action = _base_action(case3_state)
+  case3_plan = _plan_once_with_stubs(case3_state, case3_action)
   _assert_selected(
-    case2_plan.get("turn_plan") or {},
+    case3_plan.get("turn_plan") or {},
     expected_node_id="train:speed",
     expected_func="do_training",
     expected_training_name="speed",
   )
 
+  # Pre-first-summer bond score should count toward keeping training over race.
+  case3b_state = _base_state()
+  case3b_state["year"] = "Classic Year Early Jun"
+  case3b_state["rival_indicator_detected"] = True
+  case3b_state["energy_level"] = 90
+  case3b_state["training_results"]["speed"]["weighted_stat_score"] = 24.0
+  case3b_state["training_results"]["speed"]["bond_boost"] = 10.0
+  case3b_state["training_results"]["speed"]["score_tuple"] = (34.0, 0)
+  case3b_state["training_results"]["speed"]["stat_gains"] = {"speed": 12, "power": 4, "sp": 8}
+  case3b_state["training_results"]["speed"]["total_friendship_levels"] = {"blue": 1, "green": 0, "yellow": 0, "max": 0}
+  case3b_action = _base_action(case3b_state)
+  case3b_plan = _plan_once_with_stubs(case3b_state, case3b_action)
+  _assert_selected(
+    case3b_plan.get("turn_plan") or {},
+    expected_node_id="train:speed",
+    expected_func="do_training",
+    expected_training_name="speed",
+  )
+
+  # Runtime race gate should use training score, not raw stat totals.
+  runtime_score_state = _base_state()
+  runtime_score_state["rival_indicator_detected"] = True
+  runtime_score_state["energy_level"] = 90
+  runtime_score_state["year"] = "Classic Year Early Jun"
+  runtime_score_action = _base_action(runtime_score_state)
+  runtime_score_action["training_data"]["weighted_stat_score"] = 24.0
+  runtime_score_action["training_data"]["bond_boost"] = 10.0
+  runtime_score_action["training_data"]["score_tuple"] = (34.0, 0)
+  runtime_score_action["training_data"]["stat_gains"] = {"speed": 12, "power": 4, "sp": 8}
+  runtime_decision = evaluate_trackblazer_race(runtime_score_state, runtime_score_action)
+  assert runtime_decision.get("should_race") is False, runtime_decision
+  assert runtime_decision.get("training_score") == 34.0, runtime_decision
+
+  # A high-stat but low-score board should still race when score is below threshold.
+  runtime_weak_state = _base_state()
+  runtime_weak_state["rival_indicator_detected"] = True
+  runtime_weak_state["energy_level"] = 90
+  runtime_weak_action = _base_action(runtime_weak_state)
+  runtime_weak_action["training_data"]["weighted_stat_score"] = 28.0
+  runtime_weak_action["training_data"]["score_tuple"] = (28.0, 0)
+  runtime_weak_action["training_data"]["stat_gains"] = {"speed": 20, "power": 12, "sp": 8}
+  runtime_weak_decision = evaluate_trackblazer_race(runtime_weak_state, runtime_weak_action)
+  assert runtime_weak_decision.get("should_race") is True, runtime_weak_decision
+
+  # No rival marker: a normal race is still valid when the board is under 30.
+  case4_state = _base_state()
+  case4_state["year"] = "Senior Year Late Feb"
+  case4_state["rival_indicator_detected"] = False
+  case4_state["training_results"]["speed"]["weighted_stat_score"] = 28.0
+  case4_state["training_results"]["speed"]["score_tuple"] = (28.0, 0)
+  case4_action = _base_action(case4_state)
+  case4_plan = _plan_once_with_stubs(case4_state, case4_action)
+  _assert_selected(case4_plan.get("turn_plan") or {}, expected_node_id="race:fallback", expected_func="do_race")
+
   # PRD acceptance: item-assisted training beats rest/rival on high-failure board.
-  case3_state = _base_state()
-  case3_state["rival_indicator_detected"] = True
-  case3_state["energy_level"] = 85
-  case3_state["training_results"]["speed"]["weighted_stat_score"] = 38.0
-  case3_state["training_results"]["speed"]["score_tuple"] = (38.0, 0)
-  case3_state["training_results"]["speed"]["failure"] = 32
-  case3_state["training_results"]["speed"]["failure_bypassed_by_items"] = True
-  case3_state["trackblazer_inventory"]["rich_hand_cream"] = {"detected": True, "held_quantity": 1}
-  case3_state["trackblazer_inventory_summary"]["held_quantities"]["rich_hand_cream"] = 1
-  case3_state["trackblazer_inventory_summary"]["items_detected"] = ["rich_hand_cream"]
-  case3_state["trackblazer_inventory_summary"]["actionable_items"] = ["rich_hand_cream"]
-  case3_state["trackblazer_inventory_summary"]["by_category"] = {"support": ["rich_hand_cream"]}
-  case3_state["trackblazer_inventory_summary"]["total_detected"] = 1
-  case3_action = _base_action(case3_state)
-  case3_plan = _plan_once_with_stubs(
-    case3_state,
-    case3_action,
+  case5_state = _base_state()
+  case5_state["rival_indicator_detected"] = True
+  case5_state["energy_level"] = 85
+  case5_state["training_results"]["speed"]["weighted_stat_score"] = 38.0
+  case5_state["training_results"]["speed"]["score_tuple"] = (38.0, 0)
+  case5_state["training_results"]["speed"]["failure"] = 32
+  case5_state["training_results"]["speed"]["failure_bypassed_by_items"] = True
+  case5_state["trackblazer_inventory"]["rich_hand_cream"] = {"detected": True, "held_quantity": 1}
+  case5_state["trackblazer_inventory_summary"]["held_quantities"]["rich_hand_cream"] = 1
+  case5_state["trackblazer_inventory_summary"]["items_detected"] = ["rich_hand_cream"]
+  case5_state["trackblazer_inventory_summary"]["actionable_items"] = ["rich_hand_cream"]
+  case5_state["trackblazer_inventory_summary"]["by_category"] = {"support": ["rich_hand_cream"]}
+  case5_state["trackblazer_inventory_summary"]["total_detected"] = 1
+  case5_action = _base_action(case5_state)
+  case5_plan = _plan_once_with_stubs(
+    case5_state,
+    case5_action,
     lookahead={
       "source": {},
       "next_turn_races_count": 1,
@@ -187,20 +265,20 @@ def main():
     },
   )
   _assert_selected(
-    case3_plan.get("turn_plan") or {},
+    case5_plan.get("turn_plan") or {},
     expected_node_id="train:speed+items:rich_hand_cream",
     expected_func="do_training",
     expected_training_name="speed",
   )
 
   # PRD acceptance: critical energy + near race cadence -> rest.
-  case4_state = _base_state()
-  case4_state["energy_level"] = 8
-  case4_state["rival_indicator_detected"] = False
-  case4_action = _base_action(case4_state)
-  case4_plan = _plan_once_with_stubs(
-    case4_state,
-    case4_action,
+  case6_state = _base_state()
+  case6_state["energy_level"] = 8
+  case6_state["rival_indicator_detected"] = False
+  case6_action = _base_action(case6_state)
+  case6_plan = _plan_once_with_stubs(
+    case6_state,
+    case6_action,
     lookahead={
       "source": {},
       "next_turn_races_count": 1,
@@ -210,7 +288,7 @@ def main():
       "next_race_day_distance": 1,
     },
   )
-  _assert_selected(case4_plan.get("turn_plan") or {}, expected_node_id="rest", expected_func="do_rest")
+  _assert_selected(case6_plan.get("turn_plan") or {}, expected_node_id="rest", expected_func="do_rest")
 
   print("trackblazer planner milestone 4 scoring checks: ok")
 

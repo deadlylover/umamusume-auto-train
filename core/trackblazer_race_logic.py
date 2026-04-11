@@ -13,6 +13,7 @@ from core.race_selector import get_race_gate_for_turn_label, normalize_operator_
 from core.trackblazer_item_use import (
   _ENERGY_RESTORE_VALUES,
   _VITA_ITEM_KEYS,
+  get_training_behavior_optional_race_threshold,
   get_training_behavior_settings,
   get_training_behavior_strong_training_score_threshold,
 )
@@ -30,7 +31,6 @@ _SUMMER_WINDOWS = (
   "Senior Year Late Aug",
 )
 
-_WEAK_TRAINING_THRESHOLD = 35
 _JUNIOR_THREE_SUPPORT_MIN_SUPPORTS = 3
 _MIN_RACE_ENERGY_PCT = 0.05
 _ZERO_ENERGY_OPTIONAL_RACE_PCT = 0.02
@@ -54,6 +54,12 @@ _RACE_LOOKAHEAD_YEAR_END_EXEMPT_TURNS = {
   "Classic Year Late Dec",
   "Senior Year Late Dec",
 }
+
+
+def _weak_training_threshold():
+  return get_training_behavior_optional_race_threshold(
+    getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None)
+  )
 
 
 def _safe_int(value, default=None):
@@ -192,13 +198,16 @@ def get_trackblazer_training_score(action):
   training_data = action.get("training_data") if hasattr(action, "get") else None
   if not isinstance(training_data, dict):
     return None
-  weighted_score = training_data.get("weighted_stat_score")
-  if weighted_score is not None:
-    return _safe_float(weighted_score)
   score_tuple = training_data.get("score_tuple")
-  if not isinstance(score_tuple, (tuple, list)) or not score_tuple:
+  if isinstance(score_tuple, (tuple, list)) and score_tuple:
+    score_value = _safe_float(score_tuple[0])
+    if score_value is not None:
+      return score_value
+  weighted_score = _safe_float(training_data.get("weighted_stat_score"))
+  if weighted_score is None:
     return None
-  return _safe_float(score_tuple[0])
+  bond_boost = _safe_float(training_data.get("bond_boost")) or 0.0
+  return weighted_score + bond_boost
 
 
 def _support_count(action):
@@ -757,6 +766,7 @@ def evaluate_trackblazer_race(state_obj, action):
 
   scoring_mode = bot.get_trackblazer_scoring_mode()
   strong_training_score_threshold = _strong_training_score_threshold()
+  weak_training_threshold = _weak_training_threshold()
   training_score = _training_score(action)
   if (
     scoring_mode == "stat_focused"
@@ -803,17 +813,18 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_info=race_info,
     )
 
-  # Summer: only race the rival if training is weak.
+  # Summer: only race the rival if training score is weak.
   if summer:
-    if training_stats is None or training_stats < _WEAK_TRAINING_THRESHOLD:
+    if training_score is None or training_score < weak_training_threshold:
       return _decision(
         should_race=True,
         reason=(
           f"Summer, but rival present and training is weak "
-          f"({training_stats} < {_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
+          f"(score {training_score} < {weak_training_threshold}) — scout will verify aptitude"
           f"{low_energy_reason_suffix}"
         ),
         training_total_stats=training_stats,
+        training_score=training_score,
         training_supports=training_supports,
         is_summer=True,
         g1_forced=False,
@@ -840,14 +851,14 @@ def evaluate_trackblazer_race(state_obj, action):
       race_tier_info=race_info,
     )
 
-  # Non-summer: weak training → rival race is better than a bad turn.
-  # Also treat None stats as weak (no usable training data available).
-  if training_stats is None or training_stats < _WEAK_TRAINING_THRESHOLD:
+  # Non-summer: weak training score → rival race is better than a bad turn.
+  # Also treat None score as weak (no usable training score available).
+  if training_score is None or training_score < weak_training_threshold:
     return _decision(
       should_race=True,
       reason=(
-        f"Rival present with weak training ({training_stats} < "
-        f"{_WEAK_TRAINING_THRESHOLD}) — scout will verify aptitude"
+        f"Rival present with weak training score ({training_score} < "
+        f"{weak_training_threshold}) — scout will verify aptitude"
         f"{low_energy_reason_suffix}"
       ),
       training_total_stats=training_stats,
@@ -866,10 +877,10 @@ def evaluate_trackblazer_race(state_obj, action):
   # Non-summer, adequate training, rival present — prefer training.
   return _decision(
     should_race=False,
-    reason=(
-      f"Rival present but training is strong enough to skip "
-      f"({training_stats} >= {_WEAK_TRAINING_THRESHOLD})"
-    ),
+      reason=(
+        f"Rival present but training score is strong enough to skip "
+        f"({training_score} >= {weak_training_threshold})"
+      ),
     training_total_stats=training_stats,
     training_score=training_score,
     training_supports=training_supports,

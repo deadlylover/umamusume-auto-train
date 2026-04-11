@@ -82,7 +82,6 @@ _ZERO_ENERGY_SCHEDULED_RACE_PCT = 0.02
 # Keep this aligned with the Trackblazer optional-race gate: spending energy to
 # "rescue" a training only makes sense if the reassess pass would still keep
 # that training over an optional rival race.
-_RACE_GATE_WEAK_TRAINING_THRESHOLD = 35
 _VITA_ITEM_KEYS = (
   "vita_65",
   "vita_40",
@@ -103,6 +102,8 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "wit_failure_gate_min_rainbows": 1,
   "wit_failure_gate_high_energy_pct": 80,
   "strong_training_score_threshold": 40,
+  "optional_race_training_threshold": 30,
+  "committed_training_score_threshold": 35,
   "save_vita_for_summer": True,
   "prefer_rest_on_zero_energy_optional_race": True,
   "allow_zero_energy_optional_race_with_vita": True,
@@ -353,6 +354,14 @@ def _normalize_training_behavior_settings(raw_settings=None):
       raw_settings.get("strong_training_score_threshold"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
     ),
+    "optional_race_training_threshold": _normalize_quantity(
+      raw_settings.get("optional_race_training_threshold"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["optional_race_training_threshold"],
+    ),
+    "committed_training_score_threshold": _normalize_quantity(
+      raw_settings.get("committed_training_score_threshold"),
+      _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["committed_training_score_threshold"],
+    ),
     "save_vita_for_summer": _safe_bool(
       raw_settings.get("save_vita_for_summer"),
       _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
@@ -446,6 +455,20 @@ def get_training_behavior_strong_training_score_threshold(policy=None):
   return _normalize_quantity(
     training_behavior.get("strong_training_score_threshold"),
     _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["strong_training_score_threshold"],
+  )
+
+def get_training_behavior_optional_race_threshold(policy=None):
+  training_behavior = get_training_behavior_settings(policy)
+  return _normalize_quantity(
+    training_behavior.get("optional_race_training_threshold"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["optional_race_training_threshold"],
+  )
+
+def get_training_behavior_committed_training_score_threshold(policy=None):
+  training_behavior = get_training_behavior_settings(policy)
+  return _normalize_quantity(
+    training_behavior.get("committed_training_score_threshold"),
+    _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["committed_training_score_threshold"],
   )
 
 
@@ -922,7 +945,8 @@ def _energy_rescue_survives_race_gate(state_obj, candidate):
     return True
   training_total = _safe_int(candidate.get("total_stat_gain"), 0)
   training_score = _safe_float(candidate.get("score"), 0.0)
-  if training_total >= _RACE_GATE_WEAK_TRAINING_THRESHOLD:
+  optional_race_threshold = get_training_behavior_optional_race_threshold()
+  if training_total >= optional_race_threshold:
     return True
   if bot.get_trackblazer_scoring_mode() == "stat_focused":
     strong_training_score_threshold = get_training_behavior_strong_training_score_threshold()
@@ -938,11 +962,12 @@ def _energy_can_rescue_training(state_obj, candidate):
   on this specific training is clearly the better play."""
   if not candidate:
     return False
+  committed_training_threshold = get_training_behavior_committed_training_score_threshold()
   # Only rescue trainings that are actually strong — weak boards should reroll.
   strong = (
     candidate["supports"] >= 3
-    or candidate["score"] >= 35.0
-    or candidate["total_stat_gain"] >= 35
+    or candidate["score"] >= committed_training_threshold
+    or candidate["total_stat_gain"] >= committed_training_threshold
     or (candidate["supports"] >= 2 and candidate["matching_stat_gain"] >= 20)
   )
   if not strong:
@@ -1091,14 +1116,13 @@ def _usage_context(state_obj, action, policy=None):
   timeline_label = timeline.get("timeline_label") or ""
   timeline_index = timeline.get("timeline_index")
   climax_window = bool(timeline.get("is_climax"))
-  if weighted_stat_score is not None:
-    score_value = _safe_float(weighted_stat_score, 0.0)
+  score_tuple = training_data.get("score_tuple")
+  if isinstance(score_tuple, (list, tuple)) and score_tuple:
+    score_value = _safe_float(score_tuple[0], 0.0)
+  elif weighted_stat_score is not None:
+    score_value = _safe_float(weighted_stat_score, 0.0) + (_safe_float(training_data.get("bond_boost"), 0.0) or 0.0)
   else:
-    score_tuple = training_data.get("score_tuple")
-    if isinstance(score_tuple, (list, tuple)) and score_tuple:
-      score_value = _safe_float(score_tuple[0], 0.0)
-    else:
-      score_value = _preview_training_score_from_gains(state_obj, training_name, training_data)
+    score_value = _preview_training_score_from_gains(state_obj, training_name, training_data)
   past_final_summer = _past_final_summer(timeline_index)
   score_over_50 = score_value > 50.0
   # Stop hoarding "save for summer" items when no summer windows remain, or
@@ -1211,7 +1235,7 @@ def _usage_context(state_obj, action, policy=None):
   committed_value_training = bool(
     action_func == "do_training"
     and (
-      score_value >= 35.0
+      score_value >= get_training_behavior_committed_training_score_threshold()
     )
   )
   failure_bypassed_by_items = bool(training_data.get("failure_bypassed_by_items"))

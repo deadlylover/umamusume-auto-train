@@ -1995,6 +1995,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
 
   scored = []
   best_training_score = float("-inf")
+  best_training_base_score = float("-inf")
   best_training_class = "weak"
 
   for raw_candidate in planner_native_candidates:
@@ -2081,6 +2082,8 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       if score > best_training_score:
         best_training_score = score
         best_training_class = str(training.get("value_class") or "weak")
+      if base_score > best_training_base_score:
+        best_training_base_score = base_score
     elif node_id == "rest":
       score = (1.0 - energy_ratio) * 100.0
       if lookahead.get("projected_energy_deficit"):
@@ -2187,7 +2190,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   )
 
   if not forced_viable:
-    if best_training_score >= training_threshold:
+    if best_training_base_score >= training_threshold:
       for entry in (rival_entry, fallback_entry):
         if not entry:
           continue
@@ -2196,7 +2199,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) - 500.0
         entry["rationale"] = (
           f"{entry.get('rationale') or ''}; penalized because training score "
-          f"{best_training_score:.2f} >= override threshold {training_threshold:.2f}"
+          f"{best_training_base_score:.2f} >= override threshold {training_threshold:.2f}"
         ).strip("; ")
     else:
       rival_score = _safe_float(rival_entry.get("priority_score"), float("-inf")) if rival_entry else float("-inf")
