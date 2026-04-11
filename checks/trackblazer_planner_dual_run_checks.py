@@ -185,6 +185,49 @@ def _rest_action():
   return action, training_results
 
 
+def _rest_with_failure_blocked_training_action(blocked_score=36.0):
+  action = Action()
+  action.func = "do_rest"
+  action.available_actions = ["do_training", "do_rest", "do_race"]
+  training_results = {
+    "speed": {
+      "name": "speed",
+      "weighted_stat_score": blocked_score - 10.0,
+      "bond_boost": 10.0,
+      "score_tuple": (blocked_score, 0),
+      "stat_gains": {"speed": 9, "power": 7, "sp": 3},
+      "failure": 25,
+      "total_supports": 2,
+      "total_rainbow_friends": 0,
+      "total_friendship_levels": {"blue": 1, "green": 0, "yellow": 0, "max": 0},
+      "failure_bypassed_by_items": False,
+    },
+    "wit": {
+      "name": "wit",
+      "weighted_stat_score": 24.0,
+      "bond_boost": 0.0,
+      "score_tuple": (24.0, 0),
+      "stat_gains": {"wit": 7, "speed": 2, "sp": 3},
+      "failure": 0,
+      "total_supports": 1,
+      "total_rainbow_friends": 0,
+      "total_friendship_levels": {"blue": 0, "green": 1, "yellow": 0, "max": 0},
+      "failure_bypassed_by_items": False,
+    },
+  }
+  action["training_name"] = "wit"
+  action["training_function"] = "stat_weight_training"
+  action["training_data"] = dict(training_results["wit"])
+  action["available_trainings"] = {"wit": dict(training_results["wit"])}
+  action["trackblazer_race_lookahead"] = {
+    "enabled": True,
+    "conserve": False,
+    "can_train_and_race": True,
+    "reason": "test",
+  }
+  return action, training_results
+
+
 def _scheduled_race_action():
   action = Action()
   action.func = "do_race"
@@ -866,6 +909,43 @@ def main():
     energy_step_sequence = [step.to_dict() for step in energy_turn_plan.step_sequence]
     energy_transition_step = next(step for step in energy_step_sequence if step.get("step_type") == "transition_reassess_after_items")
     assert energy_transition_step.get("metadata", {}).get("transition_kind") == "energy_rescue_reassess", "energy case should expose the explicit reassess transition on the planner step"
+
+    rest_race_state = _base_state()
+    rest_race_state["year"] = "Junior Year Late Sep"
+    rest_race_state["turn"] = 7
+    rest_race_state["energy_level"] = 46
+    rest_race_state["max_energy"] = 126
+    rest_race_state["rival_indicator_detected"] = False
+    rest_race_action, rest_race_training_results = _rest_with_failure_blocked_training_action(blocked_score=36.0)
+    rest_race_state["training_results"] = dict(rest_race_training_results)
+    rest_race_decision = evaluate_trackblazer_race(rest_race_state, rest_race_action)
+    assert rest_race_decision.get("should_race") is True, rest_race_decision
+    assert rest_race_decision.get("fallback_non_rival_race") is True, rest_race_decision
+    assert rest_race_decision.get("training_score") == 36.0, rest_race_decision
+
+    edge_blocked_state = _base_state()
+    edge_blocked_state["year"] = "Junior Year Late Sep"
+    edge_blocked_state["turn"] = 7
+    edge_blocked_state["energy_level"] = 46
+    edge_blocked_state["max_energy"] = 126
+    edge_blocked_state["rival_indicator_detected"] = False
+    edge_blocked_action, edge_blocked_training_results = _rest_with_failure_blocked_training_action(blocked_score=40.0)
+    edge_blocked_state["training_results"] = dict(edge_blocked_training_results)
+    edge_blocked_decision = evaluate_trackblazer_race(edge_blocked_state, edge_blocked_action)
+    assert edge_blocked_decision.get("should_race") is True, edge_blocked_decision
+    assert edge_blocked_decision.get("fallback_non_rival_race") is True, edge_blocked_decision
+
+    strong_blocked_state = _base_state()
+    strong_blocked_state["year"] = "Junior Year Late Sep"
+    strong_blocked_state["turn"] = 7
+    strong_blocked_state["energy_level"] = 46
+    strong_blocked_state["max_energy"] = 126
+    strong_blocked_state["rival_indicator_detected"] = False
+    strong_blocked_action, strong_blocked_training_results = _rest_with_failure_blocked_training_action(blocked_score=41.0)
+    strong_blocked_state["training_results"] = dict(strong_blocked_training_results)
+    strong_blocked_decision = evaluate_trackblazer_race(strong_blocked_state, strong_blocked_action)
+    assert strong_blocked_decision.get("should_race") is False, strong_blocked_decision
+    assert strong_blocked_decision.get("fallback_non_rival_race") is False, strong_blocked_decision
 
   assert all(count == 0 for count in traversal_calls.values()), traversal_calls
   print(json.dumps({

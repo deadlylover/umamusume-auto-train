@@ -102,7 +102,7 @@ _DEFAULT_TRAINING_BEHAVIOR_SETTINGS = {
   "wit_failure_gate_min_rainbows": 1,
   "wit_failure_gate_high_energy_pct": 80,
   "strong_training_score_threshold": 40,
-  "optional_race_training_threshold": 30,
+  "optional_race_training_threshold": 40,
   "committed_training_score_threshold": 35,
   "save_vita_for_summer": True,
   "prefer_rest_on_zero_energy_optional_race": True,
@@ -943,16 +943,9 @@ def _energy_rescue_survives_race_gate(state_obj, candidate):
   rival_indicator = bool(state_obj.get("rival_indicator_detected"))
   if not rival_indicator:
     return True
-  training_total = _safe_int(candidate.get("total_stat_gain"), 0)
   training_score = _safe_float(candidate.get("score"), 0.0)
   optional_race_threshold = get_training_behavior_optional_race_threshold()
-  if training_total >= optional_race_threshold:
-    return True
-  if bot.get_trackblazer_scoring_mode() == "stat_focused":
-    strong_training_score_threshold = get_training_behavior_strong_training_score_threshold()
-    if training_score >= strong_training_score_threshold:
-      return True
-  return False
+  return training_score > optional_race_threshold
 
 
 def _energy_can_rescue_training(state_obj, candidate):

@@ -335,6 +335,168 @@ def _strong_training_score_threshold():
   return get_training_behavior_strong_training_score_threshold()
 
 
+def _fallback_race_is_available(state_obj, race_info=None):
+  date_key = str((state_obj or {}).get("year", "") or "")
+  race_info = race_info if isinstance(race_info, dict) else {}
+  race_gate = get_race_gate_for_turn_label(
+    date_key,
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+  if race_gate.get("enabled") and race_gate.get("race_allowed"):
+    return True
+  all_races_on_date = list((constants.ALL_RACES or {}).get(date_key, []) or [])
+  if all_races_on_date:
+    return True
+  return bool(race_info.get("race_count"))
+
+
+def _failure_blocked_rest_race_threshold():
+  return _strong_training_score_threshold()
+
+
+def _best_failure_blocked_training(state_obj, action):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  training_results = state_obj.get("training_results")
+  if not isinstance(training_results, dict) or not training_results:
+    return None
+
+  training_function = "stat_weight_training"
+  if hasattr(action, "get"):
+    training_function = action.get("training_function") or training_function
+
+  try:
+    from core.trackblazer.review import (
+      resolve_review_risk_taking_set,
+      score_training_for_display,
+      summarize_training_exclusion,
+    )
+    from core.strategies import Strategy
+  except Exception:
+    return None
+
+  try:
+    training_template = Strategy().get_training_template(state_obj) or {}
+  except Exception:
+    training_template = {}
+
+  risk_taking_set = resolve_review_risk_taking_set(state_obj, training_function)
+  best_entry = None
+  best_score = float("-inf")
+
+  for training_name, training_data in training_results.items():
+    if not isinstance(training_data, dict):
+      continue
+    max_allowed_failure, _, _ = summarize_training_exclusion(
+      training_name=training_name,
+      training_data=training_data,
+      state_obj=state_obj,
+      training_function=training_function,
+      risk_taking_set=risk_taking_set,
+    )
+    failure = _safe_float(training_data.get("failure"))
+    if failure is None or failure <= max_allowed_failure:
+      continue
+
+    score_tuple = training_data.get("score_tuple")
+    score = None
+    if isinstance(score_tuple, (tuple, list)) and score_tuple:
+      score = _safe_float(score_tuple[0])
+    if score is None:
+      score_tuple = score_training_for_display(
+        training_name,
+        training_data,
+        state_obj,
+        training_function,
+        training_template,
+      )
+      if isinstance(score_tuple, (tuple, list)) and score_tuple:
+        score = _safe_float(score_tuple[0])
+    if score is None:
+      continue
+
+    if score > best_score:
+      best_score = score
+      best_entry = {
+        "training_name": training_name,
+        "score": score,
+        "failure": failure,
+        "max_allowed_failure": max_allowed_failure,
+        "training_data": training_data,
+      }
+
+  return best_entry
+
+
+def _rest_promotion_fallback_race(
+  state_obj, action, training_stats, training_supports, summer, race_info,
+):
+  if getattr(action, "func", None) != "do_rest":
+    return None
+  if summer:
+    return None
+
+  blocked_training = _best_failure_blocked_training(state_obj, action)
+  if not blocked_training:
+    return None
+
+  blocked_score = blocked_training.get("score")
+  keep_training_threshold = _failure_blocked_rest_race_threshold()
+  if blocked_score is not None and blocked_score > keep_training_threshold:
+    return None
+
+  lookahead = {}
+  if hasattr(action, "get"):
+    lookahead = action.get("trackblazer_race_lookahead") or {}
+  if not isinstance(lookahead, dict) or not lookahead:
+    lookahead = get_race_lookahead_energy_advice(
+      state_obj,
+      getattr(config, "OPERATOR_RACE_SELECTOR", None),
+    )
+  if lookahead.get("conserve"):
+    return None
+
+  has_energy, _ = _has_race_energy(state_obj)
+  if not has_energy:
+    return None
+
+  if not _fallback_race_is_available(state_obj, race_info):
+    return None
+
+  blocked_training_data = blocked_training.get("training_data") or {}
+  blocked_training_stats = 0
+  found_stat_gain = False
+  for stat_name, value in (blocked_training_data.get("stat_gains") or {}).items():
+    if stat_name == "sp":
+      continue
+    normalized = _safe_int(value)
+    if normalized is None:
+      continue
+    blocked_training_stats += normalized
+    found_stat_gain = True
+
+  return _decision(
+    should_race=True,
+    fallback_non_rival_race=True,
+    reason=(
+      "No rival, and the best training is failure-blocked "
+      f"({blocked_training.get('training_name')} {blocked_training.get('failure'):.0f}% > "
+      f"{blocked_training.get('max_allowed_failure'):.0f}%) with full score "
+      f"{blocked_score} <= {keep_training_threshold} — take a schedule race instead of resting"
+    ),
+    training_total_stats=blocked_training_stats if found_stat_gain else training_stats,
+    training_score=blocked_score,
+    training_supports=_safe_int(blocked_training_data.get("total_supports")) or training_supports,
+    is_summer=False,
+    g1_forced=False,
+    prefer_rival_race=False,
+    race_tier_target="any",
+    race_name=None,
+    race_available=True,
+    rival_indicator=False,
+    race_tier_info=race_info,
+  )
+
+
 def get_optional_race_low_energy_override(state_obj):
   return _optional_race_low_energy_override(state_obj)
 
@@ -479,7 +641,7 @@ def get_race_lookahead_energy_advice(state_obj, selector=None):
 
 
 def _weak_training_fallback_race(
-  state_obj, training_score, training_stats, training_supports, summer, race_info,
+  state_obj, action, training_score, training_stats, training_supports, summer, race_info,
 ):
   """When training is weak and no rival indicator, prefer a schedule race or rest.
 
@@ -492,8 +654,14 @@ def _weak_training_fallback_race(
   if not training_behavior.get("weak_training_fallback_race_enabled"):
     return None
 
+  rest_promotion_result = _rest_promotion_fallback_race(
+    state_obj, action, training_stats, training_supports, summer, race_info,
+  )
+  if rest_promotion_result is not None:
+    return rest_promotion_result
+
   score_threshold = training_behavior.get("weak_training_fallback_race_score_threshold", 30)
-  if training_score is not None and training_score >= score_threshold:
+  if training_score is not None and training_score > score_threshold:
     return None
 
   # Earliest turn gate: don't fallback race before this turn in the timeline.
@@ -544,10 +712,7 @@ def _weak_training_fallback_race(
   if not has_energy:
     return None
 
-  # Check if any races exist on this date (unfiltered by aptitude).
-  date_key = state_obj.get("year", "")
-  all_races_on_date = list((constants.ALL_RACES or {}).get(date_key, []) or [])
-  if not all_races_on_date:
+  if not _fallback_race_is_available(state_obj, race_info):
     return None
 
   return _decision(
@@ -683,7 +848,7 @@ def evaluate_trackblazer_race(state_obj, action):
     # --- Weak-training fallback race: prefer any schedule race over a bad
     # training turn, even without a rival indicator on screen. -----------
     fallback_result = _weak_training_fallback_race(
-      state_obj, training_score, training_stats, training_supports, summer, race_info,
+      state_obj, action, training_score, training_stats, training_supports, summer, race_info,
     )
     if fallback_result is not None:
       return fallback_result
@@ -772,12 +937,12 @@ def evaluate_trackblazer_race(state_obj, action):
   if (
     scoring_mode == "stat_focused"
     and training_score is not None
-    and training_score >= strong_training_score_threshold
+    and training_score > strong_training_score_threshold
   ):
     return _decision(
       should_race=False,
       reason=(
-        f"Stat-focused training score is strong ({training_score} >= "
+        f"Stat-focused training score is strong ({training_score} > "
         f"{strong_training_score_threshold}) — keep the training turn instead of taking the optional rival race"
       ),
       training_total_stats=training_stats,
@@ -816,12 +981,12 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # Summer: only race the rival if training score is weak.
   if summer:
-    if training_score is None or training_score < weak_training_threshold:
+    if training_score is None or training_score <= weak_training_threshold:
       return _decision(
         should_race=True,
         reason=(
-          f"Summer, but rival present and training is weak "
-          f"(score {training_score} < {weak_training_threshold}) — scout will verify aptitude"
+          f"Summer, but rival present and training is not strong enough "
+          f"(score {training_score} <= {weak_training_threshold}) — scout will verify aptitude"
           f"{low_energy_reason_suffix}"
         ),
         training_total_stats=training_stats,
@@ -854,11 +1019,11 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # Non-summer: weak training score → rival race is better than a bad turn.
   # Also treat None score as weak (no usable training score available).
-  if training_score is None or training_score < weak_training_threshold:
+  if training_score is None or training_score <= weak_training_threshold:
     return _decision(
       should_race=True,
       reason=(
-        f"Rival present with weak training score ({training_score} < "
+        f"Rival present and training score is not strong enough ({training_score} <= "
         f"{weak_training_threshold}) — scout will verify aptitude"
         f"{low_energy_reason_suffix}"
       ),
@@ -880,7 +1045,7 @@ def evaluate_trackblazer_race(state_obj, action):
     should_race=False,
       reason=(
         f"Rival present but training score is strong enough to skip "
-        f"({training_score} >= {weak_training_threshold})"
+        f"({training_score} > {weak_training_threshold})"
       ),
     training_total_stats=training_stats,
     training_score=training_score,

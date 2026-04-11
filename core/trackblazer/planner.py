@@ -1161,6 +1161,7 @@ def _planner_selected_action_payload(
   action,
   *,
   func=None,
+  year=None,
   training_name=None,
   training_function=None,
   training_data=None,
@@ -1184,6 +1185,7 @@ def _planner_selected_action_payload(
   selected_func = str(func or "")
   payload = {
     "func": selected_func,
+    "year": year if year is not None else _action_value(action, "year"),
     "training_name": training_name if training_name is not None else _action_value(action, "training_name"),
     "training_function": training_function if training_function is not None else _action_value(action, "training_function"),
     "training_data": copy.deepcopy(training_data if training_data is not None else (_action_value(action, "training_data") or {})),
@@ -2623,6 +2625,7 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
   selected_payload = _planner_selected_action_payload(
     action,
     func=selected_func,
+    year=state_obj.get("year"),
     training_name=training_name,
     training_function=training_function,
     training_data=training_data,
