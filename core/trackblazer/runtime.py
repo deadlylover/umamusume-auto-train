@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict
 
 import utils.constants as constants
 from core.trackblazer.executor import PlannerExecutorHooks, run_planner_action_with_review
+from core.trackblazer.models import TurnPlan
 from core.trackblazer.planner import (
   RUNTIME_PATH_PLANNER_FALLBACK_LEGACY,
   RUNTIME_PATH_PLANNER_RUNTIME,
@@ -14,6 +15,7 @@ from core.trackblazer.planner import (
   build_turn_plan_execution_action,
   get_turn_plan,
   mark_planner_fallback,
+  set_planner_forced_action,
   set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
 )
@@ -28,6 +30,7 @@ class PlannerRuntimeHooks:
   update_operator_snapshot: Callable[..., Any]
   should_retry_training_after_consecutive_warning: Callable[[Any], bool]
   prepare_training_fallback_after_consecutive_warning: Callable[[Any], bool]
+  should_force_rest_after_consecutive_warning: Callable[[Any], bool]
 
 
 def _transition(state_obj, step_id, step_type, status, note="", details=None):
@@ -110,7 +113,18 @@ def _refresh_planner_turn(state_obj, action):
   return planner_state, turn_plan
 
 
+def _should_suppress_legacy_fallback(reason: str) -> bool:
+  return str(reason or "").startswith("consecutive_warning_cancelled:")
+
+
 def _planner_runtime_fallback_to_legacy(state_obj, action, reason):
+  if _should_suppress_legacy_fallback(reason):
+    warning(
+      "[TB_PLANNER] Suppressing legacy handoff after consecutive-race warning cancel; "
+      "staying in planner runtime."
+    )
+    _transition(state_obj, "planner_runtime", "planner_runtime", "failed", reason)
+    return {"status": "failed", "reason": reason}
   warning(f"[TB_PLANNER] Falling back to legacy for this turn: {reason}")
   mark_planner_fallback(state_obj, reason)
   try:
@@ -159,6 +173,7 @@ def run_trackblazer_planner_turn(
 
   attempted_retry_keys = []
   exhausted_reason = "planner_runtime_exhausted"
+  resume_context = None
   while True:
     attempted_planner_execution = True
     outcome = run_planner_action_with_review(
@@ -171,8 +186,17 @@ def run_trackblazer_planner_turn(
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
+      resume_context=resume_context,
     )
     status = outcome.get("status")
+    if status == "replanned":
+      resumed_turn_plan = outcome.get("turn_plan")
+      if isinstance(resumed_turn_plan, TurnPlan):
+        turn_plan = resumed_turn_plan
+      resume_context = dict(outcome.get("resume_context") or {})
+      planned_clicks = outcome.get("planned_clicks") or planned_clicks
+      continue
+    resume_context = None
     if status in {"executed", "previewed", "reassess", "blocked"}:
       _sync_execution_action_back(action, execution_action)
       _transition(state_obj, "planner_runtime", "planner_runtime", status, outcome.get("reason") or "")
@@ -195,6 +219,7 @@ def run_trackblazer_planner_turn(
     )
 
     consecutive_warning_retry_training = runtime_hooks.should_retry_training_after_consecutive_warning(execution_action)
+    consecutive_warning_force_rest = runtime_hooks.should_force_rest_after_consecutive_warning(execution_action)
     if consecutive_warning_retry_training:
       if runtime_hooks.prepare_training_fallback_after_consecutive_warning(execution_action):
         info(
@@ -208,6 +233,35 @@ def run_trackblazer_planner_turn(
         )
 
     retry_entries = _planner_retry_entries(turn_plan)
+    if consecutive_warning_force_rest:
+      warning_outcome = dict(getattr(execution_action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {})
+      if not warning_outcome.get("cancelled"):
+        warning_outcome = {
+          "cancelled": True,
+          "force_rest": True,
+          "reason": "consecutive_warning_cancelled",
+        }
+      set_planner_forced_action(
+        state_obj,
+        {
+          "func": "do_rest",
+          "planner_warning_outcome": copy.deepcopy(warning_outcome),
+        },
+        reason=warning_outcome.get("reason") or "consecutive_warning_cancelled",
+      )
+      retry_entries = [
+        {
+          "trigger": "consecutive_warning_cancel",
+          "target_func": "do_rest",
+          "target_payload": {
+            "func": "do_rest",
+            "planner_warning_outcome": copy.deepcopy(warning_outcome),
+          },
+          "target_label": "rest",
+          "source_node_id": "rest",
+          "planner_ranked": False,
+        },
+      ] + retry_entries
     if consecutive_warning_retry_training:
       retry_entries = [
         {

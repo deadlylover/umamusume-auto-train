@@ -142,6 +142,13 @@ STABLE_CAREER_SCREEN_ANCHORS = {
   "rest_button": ("assets/buttons/rest_btn.png", "SCREEN_BOTTOM_BBOX"),
   "recreation_button": ("assets/buttons/recreation_btn.png", "SCREEN_BOTTOM_BBOX"),
   "races_button": ("assets/buttons/races_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "climax_race_button": (
+    constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button"),
+    "SCREEN_BOTTOM_BBOX",
+    1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  ),
+  "skills_button": ("assets/buttons/skills_btn.png", "SCREEN_BOTTOM_BBOX"),
+  "shop_lobby_button": ("assets/buttons/shop_enter_lobby.png", "SCREEN_BOTTOM_BBOX"),
   "details_button": ("assets/buttons/details_btn.png", "SCREEN_TOP_BBOX"),
   "details_button_alt": ("assets/buttons/details_btn_2.png", "SCREEN_TOP_BBOX"),
 }
@@ -550,7 +557,15 @@ def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
   anchor_counts = {}
   game_window_bbox = getattr(constants, "GAME_WINDOW_BBOX", None)
   screenshot_h, screenshot_w = screenshot.shape[:2] if screenshot is not None else (0, 0)
-  for name, (template_path, bbox_key) in STABLE_CAREER_SCREEN_ANCHORS.items():
+  for name, anchor_config in STABLE_CAREER_SCREEN_ANCHORS.items():
+    if len(anchor_config) == 2:
+      template_path, bbox_key = anchor_config
+      template_scaling = 1.0
+    else:
+      template_path, bbox_key, template_scaling = anchor_config
+    if not template_path:
+      anchor_counts[name] = 0
+      continue
     match_screenshot = screenshot
     region_ltrb = getattr(constants, bbox_key, None) if bbox_key else None
     if (
@@ -566,7 +581,12 @@ def _detect_stable_career_screen_anchors(screenshot, threshold=0.8):
       bottom = min(screenshot_h, int(region_ltrb[3] - game_window_bbox[1]))
       if right > left and bottom > top:
         match_screenshot = screenshot[top:bottom, left:right]
-    matches = device_action.match_template(template_path, match_screenshot, threshold=threshold)
+    matches = device_action.match_template(
+      template_path,
+      match_screenshot,
+      threshold=threshold,
+      template_scaling=template_scaling,
+    )
     anchor_counts[name] = len(matches)
   return anchor_counts
 
@@ -581,7 +601,15 @@ def _has_stable_career_screen(anchor_counts):
   )
   bottom_anchor_count = sum(
     int(anchor_counts.get(name, 0) or 0)
-    for name in ("training_button", "rest_button", "recreation_button", "races_button")
+    for name in (
+      "training_button",
+      "rest_button",
+      "recreation_button",
+      "races_button",
+      "climax_race_button",
+      "skills_button",
+      "shop_lobby_button",
+    )
   )
   tazuna_hint_count = int(anchor_counts.get("tazuna_hint", 0) or 0)
 
@@ -1678,6 +1706,12 @@ def _prepare_training_fallback_after_consecutive_warning(action):
   return True
 
 
+def _should_force_rest_after_consecutive_warning(action):
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return False
+  return _consecutive_warning_force_rest(action)
+
+
 def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
   if _action_func(action) != "do_race":
     return None
@@ -1725,6 +1759,55 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   race_scout = dict(race_plan.get("race_scout") or {})
   if not race_scout.get("required"):
     return None
+
+  warning_policy = dict(
+    (turn_plan.warning_plan or {})
+    or _action_value(action, "planner_race_warning_policy")
+    or {}
+  )
+  if warning_policy.get("warning_expected") and warning_policy.get("accept_warning") is False:
+    warning_reason = (
+      warning_policy.get("cancel_reason")
+      or "Consecutive-race warning policy rejects this optional rival race."
+    )
+    warning_reason_key = str(
+      warning_policy.get("cancel_reason_key")
+      or "optional_rival_promoted_from_rest"
+    )
+    cancel_fallback = {"func": "do_rest"} if warning_policy.get("cancel_target") == "do_rest" else {}
+    if not cancel_fallback:
+      fallback_policy = dict(turn_plan.fallback_policy or {})
+      fallback_chain = list(fallback_policy.get("chain") or [])
+      cancel_fallback = next(
+        (
+          dict(entry.get("target_payload") or {})
+          for entry in fallback_chain
+          if isinstance(entry, dict) and entry.get("trigger") == "consecutive_warning_cancel"
+        ),
+        {},
+      )
+    if not cancel_fallback:
+      cancel_fallback = _effective_rival_fallback_payload(action)
+    action["planner_warning_outcome"] = {
+      "cancelled": True,
+      "force_rest": bool(warning_policy.get("force_rest_on_cancel")),
+      "reason": warning_reason_key,
+      "resolved": True,
+      "policy_source": "preflight_skip",
+    }
+    if cancel_fallback.get("func"):
+      _apply_effective_rival_fallback_payload(action, cancel_fallback)
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="executing_action",
+        message=f"Skipping rival scout. {warning_reason}",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return None
+    return "failed"
 
   from scenarios.trackblazer import scout_rival_race
 
@@ -2294,6 +2377,12 @@ def _planned_clicks_for_action(action):
     is_race_day = bool(_action_value(action, "is_race_day"))
     is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
     scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+    warning_policy = _action_value(action, "planner_race_warning_policy") or {}
+    warning_accept = (
+      bool(warning_policy.get("accept_warning"))
+      if isinstance(warning_policy, dict) and warning_policy.get("accept_warning") is not None
+      else scheduled_race
+    )
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
     if is_race_day and is_trackblazer_climax_race_day:
       clicks = skill_clicks + shop_clicks + pre_action_clicks + [
@@ -2321,37 +2410,13 @@ def _planned_clicks_for_action(action):
         note=(
           "If this warning appears after clicking Races, continue with OK for scheduled races; "
           "otherwise follow the race gate before opening the race list."
-          if scheduled_race else
+          if warning_accept and scheduled_race else
           "Fallback non-rival race: cancel and revert to training if consecutive-race warning appears."
           if fallback_non_rival_race else
+          "If this warning appears after clicking Races, cancel and return to lobby so the rest fallback can proceed."
+          if not warning_accept else
           "If this warning appears after clicking Races, decide whether to continue with OK "
           "or back out with Cancel before opening the race list."
-        ),
-      ),
-      _planned_click(
-        "Continue through warning (OK)",
-        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note=(
-          "Scheduled race override: click the warning dialog OK and continue into the race list."
-          if scheduled_race else
-          "Use the warning-dialog OK when the race gate accepts a third consecutive race."
-        ),
-      ),
-      _planned_click(
-        "Fallback warning OK",
-        "assets/buttons/ok_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note="Generic fallback if the warning-specific OK template is not matched.",
-      ),
-      _planned_click(
-        "Back out from warning (Cancel)",
-        "assets/buttons/cancel_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note=(
-          "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
-          if scheduled_race else
-          "Use this when the race gate rejects a third consecutive race and returns to lobby."
         ),
       ),
       _planned_click(
@@ -2366,6 +2431,39 @@ def _planned_clicks_for_action(action):
       _planned_click("Confirm race", "assets/buttons/race_btn.png"),
       _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
     ]
+    if warning_accept:
+      clicks[2:2] = [
+        _planned_click(
+          "Continue through warning (OK)",
+          constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note=(
+            "Scheduled race override: click the warning dialog OK and continue into the race list."
+            if scheduled_race else
+            "Use the warning-dialog OK when the race gate accepts a third consecutive race."
+          ),
+        ),
+        _planned_click(
+          "Fallback warning OK",
+          "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note="Generic fallback if the warning-specific OK template is not matched.",
+        ),
+      ]
+    else:
+      clicks.insert(
+        2,
+        _planned_click(
+          "Back out from warning (Cancel)",
+          "assets/buttons/cancel_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note=(
+            "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
+            if scheduled_race else
+            "Use this when the race gate rejects a third consecutive race and returns to lobby."
+          ),
+        ),
+      )
     return clicks
   if action_func == "buy_skill":
     return skill_clicks + shop_clicks + pre_action_clicks + [
@@ -3181,6 +3279,102 @@ def _run_post_energy_item_followup(state_obj, action, sub_phase=None, ocr_debug=
     "training_data": recheck_result.get("training_data"),
     "followup_items": followup_items,
     "followup_result": followup_result,
+  }
+
+
+def _run_post_reset_whistle_replan(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
+  if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
+    return {"status": "blocked", "reason": "reset_whistle_replan_wrong_scenario"}
+  if not hasattr(action, "get") or not hasattr(action, "__setitem__"):
+    return {"status": "blocked", "reason": "reset_whistle_replan_invalid_action"}
+
+  training_function = action.get("training_function") or "stat_weight_training"
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="collecting_training_state",
+    message="Reset Whistle applied. Rescanning trainings only before replanning.",
+    sub_phase=sub_phase or "reassess_after_item_use",
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  previous_training_results = copy.deepcopy(state_obj.get("training_results") or {})
+  state_obj = collect_training_state(state_obj, training_function)
+  refreshed_training_results = copy.deepcopy(state_obj.get("training_results") or {})
+  if not refreshed_training_results:
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text="Reset Whistle replan could not refresh trainings after the reroll.",
+      sub_phase=sub_phase or "reassess_after_item_use",
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return {"status": "blocked", "reason": "reset_whistle_training_rescan_empty"}
+
+  action["trackblazer_pre_action_items"] = []
+  action["trackblazer_reassess_after_item_use"] = False
+  action["trackblazer_shop_buy_plan"] = []
+
+  try:
+    _, turn_plan = set_turn_plan_decision_path(
+      state_obj,
+      action,
+      "planner",
+      reason="reset_whistle_training_rescan",
+      plan_options={"skip_shop_buys": True},
+    )
+  except Exception as exc:
+    reason = f"reset_whistle_replan_failed:{exc}"
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="recovering",
+      status="error",
+      error_text=f"Reset Whistle replan failed: {exc}",
+      sub_phase=sub_phase or "reassess_after_item_use",
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return {"status": "blocked", "reason": reason}
+
+  selected_action = dict((turn_plan.review_context or {}).get("selected_action") or {})
+  followup_items = list((turn_plan.item_plan or {}).get("pre_action_items") or [])
+  selected_func = selected_action.get("func") or getattr(action, "func", "")
+  selected_training = selected_action.get("training_name") or action.get("training_name")
+  selected_race = selected_action.get("race_name") or action.get("race_name")
+  selected_label = (
+    f"training {selected_training}"
+    if selected_func == "do_training" and selected_training else
+    f"race {selected_race}"
+    if selected_func == "do_race" and selected_race else
+    selected_func or "action"
+  )
+  followup_label = ", ".join(entry.get("name") or entry.get("key") or "item" for entry in followup_items)
+  updated_planned_clicks = turn_plan.to_planned_clicks()
+  training_changed = refreshed_training_results != previous_training_results
+  message = f"Reset Whistle rerolled the board. Replanned from a training-only refresh to {selected_label}."
+  if followup_label:
+    message += f" Follow-up items queued: {followup_label}."
+  elif training_changed:
+    message += " No additional pre-action items are needed on the rerolled board."
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action",
+    message=message,
+    sub_phase=sub_phase or "reassess_after_item_use",
+    ocr_debug=ocr_debug,
+    planned_clicks=updated_planned_clicks,
+  )
+  return {
+    "status": "replanned",
+    "reason": message,
+    "turn_plan": turn_plan,
+    "planned_clicks": updated_planned_clicks,
+    "selected_action": selected_action,
   }
 
 
@@ -5313,6 +5507,7 @@ def _trackblazer_planner_executor_hooks():
     execute_trackblazer_pre_action_items=_execute_trackblazer_pre_action_items,
     recheck_selected_training_after_item_use=_recheck_selected_training_after_item_use,
     run_post_energy_item_followup=_run_post_energy_item_followup,
+    run_post_reset_whistle_replan=_run_post_reset_whistle_replan,
     wait_for_lobby_after_item_use=_wait_for_lobby_after_item_use,
     enforce_operator_race_gate_before_execute=_enforce_operator_race_gate_before_execute,
     run_planner_race_preflight=_run_planner_race_preflight,
@@ -5336,6 +5531,7 @@ def _trackblazer_planner_runtime_hooks():
     update_operator_snapshot=update_operator_snapshot,
     should_retry_training_after_consecutive_warning=_should_retry_training_after_consecutive_warning,
     prepare_training_fallback_after_consecutive_warning=_prepare_training_fallback_after_consecutive_warning,
+    should_force_rest_after_consecutive_warning=_should_force_rest_after_consecutive_warning,
   )
 
 
@@ -5557,6 +5753,9 @@ def career_lobby(dry_run_turn=False):
             _template_debug_entry("rest_button", "assets/buttons/rest_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("rest_button", 0)),
             _template_debug_entry("recreation_button", "assets/buttons/recreation_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("recreation_button", 0)),
             _template_debug_entry("races_button", "assets/buttons/races_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("races_button", 0)),
+            _template_debug_entry("climax_race_button", constants.TRACKBLAZER_RACE_TEMPLATES.get("climax_race_button"), bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("climax_race_button", 0)),
+            _template_debug_entry("skills_button", "assets/buttons/skills_btn.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("skills_button", 0)),
+            _template_debug_entry("shop_lobby_button", "assets/buttons/shop_enter_lobby.png", bbox_key="SCREEN_BOTTOM_BBOX", parsed_value=stable_anchor_counts.get("shop_lobby_button", 0)),
             _template_debug_entry("details_button", "assets/buttons/details_btn.png", bbox_key="SCREEN_TOP_BBOX", parsed_value=stable_anchor_counts.get("details_button", 0)),
             _template_debug_entry("details_button_alt", "assets/buttons/details_btn_2.png", bbox_key="SCREEN_TOP_BBOX", parsed_value=stable_anchor_counts.get("details_button_alt", 0)),
             _template_debug_entry("next_button", "assets/buttons/next_btn.png", bbox_key="GAME_WINDOW_BBOX", parsed_value=len(matches.get("next", []))),

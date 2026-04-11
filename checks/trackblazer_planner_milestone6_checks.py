@@ -115,8 +115,9 @@ def _turn_plan(*step_types, fallback_policy=None):
   )
 
 
-def _executor_hooks(recorder, *, execute_intent="execute", item_result=None):
+def _executor_hooks(recorder, *, execute_intent="execute", item_result=None, reset_whistle_replan_result=None):
   item_result = item_result or {"status": "skipped", "reason": "no_pre_action_items"}
+  reset_whistle_replan_result = reset_whistle_replan_result or {"status": "blocked", "reason": "unused_in_check"}
 
   def _review(*args, **kwargs):
     recorder.append(("review", kwargs.get("reasoning_notes")))
@@ -143,6 +144,9 @@ def _executor_hooks(recorder, *, execute_intent="execute", item_result=None):
     wait_for_lobby_after_shop_purchase=lambda: recorder.append(("wait_shop", None)) or True,
     refresh_trackblazer_pre_action_inventory=_refresh,
     execute_trackblazer_pre_action_items=_execute_items,
+    recheck_selected_training_after_item_use=lambda *args, **kwargs: recorder.append(("recheck_selected_training", None)) or {"status": "reassess", "reason": "unused_in_check"},
+    run_post_energy_item_followup=lambda *args, **kwargs: recorder.append(("post_energy_followup", None)) or {"status": "ready", "reason": "unused_in_check"},
+    run_post_reset_whistle_replan=lambda *args, **kwargs: recorder.append(("reset_whistle_replan", None)) or dict(reset_whistle_replan_result),
     wait_for_lobby_after_item_use=lambda *args, **kwargs: recorder.append(("wait_items", None)) or True,
     enforce_operator_race_gate_before_execute=lambda *args, **kwargs: recorder.append(("race_gate", None)) or None,
     run_planner_race_preflight=lambda *args, **kwargs: recorder.append(("race_preflight", None)) or None,
@@ -215,6 +219,105 @@ def _test_executor_reassess_transition():
   assert result.get("status") == "reassess"
   assert ("execute_items", "full") in recorder
   assert ("wait_items", None) in recorder
+
+
+def _test_executor_reset_whistle_replans_in_place():
+  state_obj = _base_state()
+  action = _training_action()
+  recorder = []
+  resumed_turn_plan = _turn_plan("execute_main_action", "resolve_post_action")
+  resumed_turn_plan.review_context = {
+    "selected_action": {
+      "func": "do_training",
+      "training_name": "speed",
+    }
+  }
+  resumed_turn_plan.item_plan = {
+    "pre_action_items": [{"key": "motivating_megaphone", "name": "Motivating Megaphone"}],
+  }
+  turn_plan = _turn_plan(
+    "await_operator_review",
+    "refresh_inventory_for_items",
+    "replan_pre_action_items",
+    "execute_pre_action_items",
+    "await_lobby_after_items",
+    "transition_after_pre_action_items",
+  )
+  turn_plan.item_plan = {
+    "execution_payload": {
+      "reassess_transition": {
+        "required": True,
+        "transition_kind": "reset_whistle_reroll",
+      }
+    }
+  }
+
+  result = run_planner_action_with_review(
+    state_obj,
+    action,
+    turn_plan,
+    0,
+    "review",
+    _executor_hooks(
+      recorder,
+      item_result={"status": "reassess", "reason": "item_reassess"},
+      reset_whistle_replan_result={
+        "status": "replanned",
+        "reason": "replanned_after_whistle",
+        "turn_plan": resumed_turn_plan,
+        "planned_clicks": [{"label": "Resume training"}],
+        "selected_action": {"func": "do_training", "training_name": "speed"},
+      },
+    ),
+  )
+
+  assert result.get("status") == "replanned", result
+  assert result.get("resume_context", {}).get("skip_review") is True, result
+  assert ("reset_whistle_replan", None) in recorder, recorder
+
+
+def _test_runtime_replanned_turn_resumes_without_review():
+  state_obj = _base_state()
+  action = _training_action()
+  recorder = []
+  resume_contexts = []
+  initial_turn_plan = _turn_plan("await_operator_review", "transition_after_pre_action_items")
+  resumed_turn_plan = _turn_plan("execute_main_action", "resolve_post_action")
+
+  def _fake_executor(*args, **kwargs):
+    resume_contexts.append(dict(kwargs.get("resume_context") or {}))
+    if len(resume_contexts) == 1:
+      return {
+        "status": "replanned",
+        "reason": "replanned_after_whistle",
+        "committed": True,
+        "turn_plan": resumed_turn_plan,
+        "planned_clicks": [{"label": "Resume training"}],
+        "resume_context": {
+          "skip_review": True,
+          "skip_skill_purchases": True,
+          "skip_shop_purchases": True,
+          "reason": "resume_after_reset_whistle_replan",
+        },
+      }
+    return {"status": "executed", "reason": "turn_complete", "committed": True}
+
+  with patch("core.trackblazer.runtime.set_turn_plan_decision_path", return_value=({}, initial_turn_plan)), patch(
+    "core.trackblazer.runtime.run_planner_action_with_review",
+    side_effect=_fake_executor,
+  ):
+    result = run_trackblazer_planner_turn(
+      state_obj,
+      action,
+      0,
+      "review",
+      executor_hooks=_executor_hooks(recorder),
+      runtime_hooks=_runtime_hooks(recorder),
+    )
+
+  assert result.get("status") == "executed", result
+  assert resume_contexts[0] == {}, resume_contexts
+  assert resume_contexts[1].get("skip_review") is True, resume_contexts
 
 
 def _test_executor_skill_emergency_close_matches_legacy():
@@ -437,9 +540,11 @@ def main():
   constants.SCENARIO_NAME = "trackblazer"
   _test_executor_check_only_preview()
   _test_executor_reassess_transition()
+  _test_executor_reset_whistle_replans_in_place()
   _test_executor_skill_emergency_close_matches_legacy()
   _test_executor_item_failure_can_block_retry()
   _test_executor_resolve_consecutive_warning_step_owned()
+  _test_runtime_replanned_turn_resumes_without_review()
   _test_runtime_retry_owned_by_planner_runtime()
   _test_runtime_empty_planner_retry_chain_falls_back_to_legacy()
   _test_runtime_safe_legacy_fallback()

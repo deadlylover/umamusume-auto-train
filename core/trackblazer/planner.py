@@ -40,6 +40,7 @@ from core.trackblazer.models import (
 PLANNER_STATE_KEY = "trackblazer_planner_state"
 PLANNER_RUNTIME_KEY = "trackblazer_planner_runtime"
 PLANNER_FORCE_FALLBACK_KEY = "_trackblazer_planner_force_fallback"
+PLANNER_FORCED_ACTION_KEY = "_trackblazer_planner_forced_action"
 TRACKBLAZER_RUNTIME_PATH_KEY = "trackblazer_runtime_path"
 TRACKBLAZER_RUNTIME_PATH_META_KEY = "trackblazer_runtime_path_meta"
 RUNTIME_PATH_PLANNER_RUNTIME = "planner_runtime"
@@ -632,6 +633,32 @@ def clear_planner_fallback(state_obj):
     state_obj.pop(PLANNER_FORCE_FALLBACK_KEY, None)
 
 
+def _planner_forced_action(state_obj) -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  forced = dict(state_obj.get(PLANNER_FORCED_ACTION_KEY) or {})
+  if forced.get("turn_key") != _turn_key(state_obj):
+    return {}
+  return forced
+
+
+def clear_planner_forced_action(state_obj):
+  if isinstance(state_obj, dict):
+    state_obj.pop(PLANNER_FORCED_ACTION_KEY, None)
+
+
+def set_planner_forced_action(state_obj, action_payload, *, reason=""):
+  if not isinstance(state_obj, dict):
+    return {}
+  payload = {
+    "turn_key": _turn_key(state_obj),
+    "reason": str(reason or ""),
+    "action_payload": copy.deepcopy(action_payload if isinstance(action_payload, dict) else {}),
+  }
+  state_obj[PLANNER_FORCED_ACTION_KEY] = payload
+  return payload
+
+
 def mark_planner_fallback(state_obj, reason):
   if not isinstance(state_obj, dict):
     return {}
@@ -1160,6 +1187,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   warning_cancel_reason = str(warning_outcome.get("reason") or "")
   existing_planner_race = copy.deepcopy(_planner_race_payload(action))
   existing_planner_branch = str(existing_planner_race.get("branch_kind") or "")
+  forced_action = _planner_forced_action(state_obj)
 
   race_decision = {}
   race_decision_cached_only = False
@@ -1215,7 +1243,39 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   }
   warning_plan = {}
 
-  if (
+  if forced_action:
+    forced_payload = dict(forced_action.get("action_payload") or {})
+    forced_func = forced_payload.get("func") or "do_rest"
+    branch_kind = "warning_cancel_fallback" if warning_cancelled else "forced_fallback"
+    warning_plan = {
+      "planner_owned": True,
+      "provisional": True,
+      "forced_action": True,
+      "cancel_reason_key": warning_cancel_reason or str(forced_action.get("reason") or ""),
+    }
+    selected_action_payload = _planner_selected_action_payload(
+      action,
+      func=forced_func,
+      training_name=forced_payload.get("training_name"),
+      training_function=forced_payload.get("training_function"),
+      training_data=copy.deepcopy(forced_payload.get("training_data") or {}),
+      race_decision={
+        "should_race": False,
+        "branch_kind": branch_kind,
+        "reason": str(forced_action.get("reason") or warning_cancel_reason or "Planner forced fallback action."),
+      },
+      warning_policy=warning_plan,
+      fallback_action=base_fallback,
+      branch_kind=branch_kind,
+    )
+    if forced_payload.get("planner_warning_outcome"):
+      selected_action_payload["planner_warning_outcome"] = copy.deepcopy(forced_payload.get("planner_warning_outcome") or {})
+    race_scout.update({
+      "executed": bool(existing_rival_scout),
+      "rival_found": existing_rival_scout.get("rival_found"),
+      "status": "forced_fallback_applied",
+    })
+  elif (
     existing_planner_branch
     and not warning_cancelled
     and existing_rival_scout.get("rival_found") is not False
@@ -3221,6 +3281,12 @@ def _build_main_action_step_planned_clicks(action):
     is_race_day = bool(_action_value(action, "is_race_day"))
     is_trackblazer_climax_race_day = bool(_action_value(action, "trackblazer_climax_race_day"))
     scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+    warning_policy = _action_value(action, "planner_race_warning_policy") or {}
+    warning_accept = (
+      bool(warning_policy.get("accept_warning"))
+      if isinstance(warning_policy, dict) and warning_policy.get("accept_warning") is not None
+      else scheduled_race
+    )
     race_template = f"assets/races/{race_name}.png" if race_name and race_name not in ("", "any") else _action_value(action, "race_image_path") or "assets/ui/match_track.png"
     if is_race_day and is_trackblazer_climax_race_day:
       return [
@@ -3238,7 +3304,7 @@ def _build_main_action_step_planned_clicks(action):
         _planned_click("Confirm race", "assets/buttons/race_btn.png"),
         _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
       ]
-    return [
+    clicks = [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
         "Check consecutive-race warning",
@@ -3247,37 +3313,13 @@ def _build_main_action_step_planned_clicks(action):
         note=(
           "If this warning appears after clicking Races, continue with OK for scheduled races; "
           "otherwise follow the race gate before opening the race list."
-          if scheduled_race else
+          if warning_accept and scheduled_race else
           "Fallback non-rival race: cancel and revert to training if consecutive-race warning appears."
           if fallback_non_rival_race else
+          "If this warning appears after clicking Races, cancel and return to lobby so the rest fallback can proceed."
+          if not warning_accept else
           "If this warning appears after clicking Races, decide whether to continue with OK "
           "or back out with Cancel before opening the race list."
-        ),
-      ),
-      _planned_click(
-        "Continue through warning (OK)",
-        constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note=(
-          "Scheduled race override: click the warning dialog OK and continue into the race list."
-          if scheduled_race else
-          "Use the warning-dialog OK when the race gate accepts a third consecutive race."
-        ),
-      ),
-      _planned_click(
-        "Fallback warning OK",
-        "assets/buttons/ok_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note="Generic fallback if the warning-specific OK template is not matched.",
-      ),
-      _planned_click(
-        "Back out from warning (Cancel)",
-        "assets/buttons/cancel_btn.png",
-        region_key="GAME_WINDOW_BBOX",
-        note=(
-          "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
-          if scheduled_race else
-          "Use this when the race gate rejects a third consecutive race and returns to lobby."
         ),
       ),
       _planned_click(
@@ -3292,6 +3334,40 @@ def _build_main_action_step_planned_clicks(action):
       _planned_click("Confirm race", "assets/buttons/race_btn.png"),
       _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
     ]
+    if warning_accept:
+      clicks[2:2] = [
+        _planned_click(
+          "Continue through warning (OK)",
+          constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok") or "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note=(
+            "Scheduled race override: click the warning dialog OK and continue into the race list."
+            if scheduled_race else
+            "Use the warning-dialog OK when the race gate accepts a third consecutive race."
+          ),
+        ),
+        _planned_click(
+          "Fallback warning OK",
+          "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note="Generic fallback if the warning-specific OK template is not matched.",
+        ),
+      ]
+    else:
+      clicks.insert(
+        2,
+        _planned_click(
+          "Back out from warning (Cancel)",
+          "assets/buttons/cancel_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note=(
+            "Not expected for scheduled races; only use if the dialog must be dismissed back to lobby."
+            if scheduled_race else
+            "Use this when the race gate rejects a third consecutive race and returns to lobby."
+          ),
+        ),
+      )
+    return clicks
   if action_func == "buy_skill":
     return [
       _planned_click("Open skills menu", "assets/buttons/skills_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
@@ -3554,8 +3630,8 @@ def sync_turn_plan_execution_contract(state_obj, action, turn_plan: TurnPlan) ->
   return turn_plan
 
 
-def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
-  planner_state = plan_once(state_obj, action, limit=8)
+def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason="", plan_options=None):
+  planner_state = plan_once(state_obj, action, limit=8, plan_options=plan_options)
   turn_plan = TurnPlan.from_snapshot(dict((planner_state or {}).get("turn_plan") or {}))
   runtime_path = runtime_path_for_decision_path(str(decision_path or "legacy"))
   turn_plan.decision_path = decision_path_for_runtime_path(runtime_path)
@@ -3564,6 +3640,7 @@ def set_turn_plan_decision_path(state_obj, action, decision_path, *, reason=""):
     "decision_path": turn_plan.decision_path,
     "runtime_path": runtime_path,
     "fallback_reason": str(reason or ""),
+    "plan_options": copy.deepcopy(plan_options if isinstance(plan_options, dict) else {}),
   }
   turn_plan = sync_turn_plan_execution_contract(state_obj, action, turn_plan)
   planner_state["decision_path"] = turn_plan.decision_path
@@ -3664,15 +3741,23 @@ def update_turn_discussion_dual_run(state_obj, action, snapshot_context, legacy_
   return comparison
 
 
-def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
+def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
   if not isinstance(state_obj, dict):
     return {}
 
+  plan_options = plan_options if isinstance(plan_options, dict) else {}
+  skip_shop_buys = bool(plan_options.get("skip_shop_buys"))
   runtime_state = ensure_planner_runtime_state(state_obj)
   turn_key = _turn_key(state_obj)
   state_key = _hash_payload(_state_signature(state_obj))
   observation_id = state_key
-  action_key = _hash_payload(_action_signature(action))
+  action_key_payload = _action_signature(action)
+  if plan_options:
+    action_key_payload = {
+      "action": action_key_payload,
+      "plan_options": copy.deepcopy(plan_options),
+    }
+  action_key = _hash_payload(action_key_payload)
   skill_context_key = _hash_payload(_skill_context_signature(state_obj))
   freshness = PlannerFreshness(
     turn_key=turn_key,
@@ -3708,13 +3793,15 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     year=state_obj.get("year"),
     turn=state_obj.get("turn"),
   )
-  shop_buy_plan = _candidate_shop_buys(
-    effective_shop_items,
-    shop_items=shop_items,
-    shop_summary=shop_summary,
-    held_quantities=held_quantities,
-    limit=limit,
-  )
+  shop_buy_plan = []
+  if not skip_shop_buys:
+    shop_buy_plan = _candidate_shop_buys(
+      effective_shop_items,
+      shop_items=shop_items,
+      shop_summary=shop_summary,
+      held_quantities=held_quantities,
+      limit=limit,
+    )
 
   projected_state = _project_inventory(plan_state, shop_buy_plan) if shop_buy_plan else plan_state
   item_use_plan = plan_item_usage(
@@ -3956,6 +4043,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
       "decision_path": decision_path,
       "runtime_path": runtime_path,
       "inventory_source": inventory_source,
+      "plan_options": copy.deepcopy(plan_options),
       "runtime": copy.deepcopy(runtime_state),
       "fallback_reason": forced_fallback.get("reason") if forced_fallback else "",
     },
@@ -3994,6 +4082,7 @@ def plan_once(state_obj, action, limit=8) -> Dict[str, Any]:
     "inventory_source": inventory_source,
     "inventory_source_summary": copy.deepcopy(inventory_summary),
     "projected_inventory_summary": projected_summary,
+    "plan_options": copy.deepcopy(plan_options),
     "dual_run": {
       "observed": observed.to_dict(),
       "derived": derived.to_dict(),

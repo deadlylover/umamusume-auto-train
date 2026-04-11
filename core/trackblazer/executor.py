@@ -27,6 +27,7 @@ class PlannerExecutorHooks:
   execute_trackblazer_pre_action_items: Callable[[Dict[str, Any], Any, str], Dict[str, Any]]
   recheck_selected_training_after_item_use: Callable[..., Dict[str, Any]]
   run_post_energy_item_followup: Callable[..., Dict[str, Any]]
+  run_post_reset_whistle_replan: Callable[..., Dict[str, Any]]
   wait_for_lobby_after_item_use: Callable[..., bool]
   enforce_operator_race_gate_before_execute: Callable[..., Optional[str]]
   run_planner_race_preflight: Callable[..., Optional[str]]
@@ -85,52 +86,70 @@ def run_planner_action_with_review(
   sub_phase=None,
   ocr_debug=None,
   planned_clicks=None,
+  resume_context=None,
 ):
   skill_plan = hooks.skill_purchase_plan(action)
   execution_payload = turn_plan.to_execution_payload()
   item_execution_payload = dict(execution_payload.get("item_execution") or {})
   reasoning_notes = _review_reasoning_notes(skill_plan)
   committed = False
+  resume_context = resume_context if isinstance(resume_context, dict) else {}
+  skip_review = bool(resume_context.get("skip_review"))
+  skip_skill_purchases = bool(resume_context.get("skip_skill_purchases"))
+  skip_shop_purchases = bool(resume_context.get("skip_shop_purchases"))
+  resume_reason = str(resume_context.get("reason") or "resume_after_in_turn_replan")
 
-  _transition(state_obj, "await_operator_review", "await_operator_review", "started")
-  if not hooks.review_action_before_execution(
-    state_obj,
-    action,
-    review_message,
-    sub_phase=sub_phase,
-    ocr_debug=ocr_debug,
-    planned_clicks=planned_clicks,
-    reasoning_notes=reasoning_notes,
-  ):
-    _transition(state_obj, "await_operator_review", "await_operator_review", "failed", "review_cancelled")
-    return {"status": "failed", "step_id": "await_operator_review", "reason": "review_cancelled", "committed": committed}
-
-  execution_intent = hooks.wait_for_execute_intent(
-    state_obj,
-    action,
-    message_prefix="Action review ready",
-    reasoning_notes=reasoning_notes,
-    sub_phase=sub_phase,
-    ocr_debug=ocr_debug,
-    planned_clicks=planned_clicks,
-  )
-  if execution_intent == "failed":
-    _transition(state_obj, "await_operator_review", "await_operator_review", "failed", "execute_intent_failed")
-    return {"status": "failed", "step_id": "await_operator_review", "reason": "execute_intent_failed", "committed": committed}
-  if execution_intent != "execute":
-    preview_result = _preview_trackblazer_items(state_obj, action, hooks)
+  if skip_review:
     _transition(
       state_obj,
       "await_operator_review",
       "await_operator_review",
-      "previewed",
-      "check_only_preview",
-      {"item_preview_status": preview_result.get("status")},
+      "skipped",
+      resume_reason,
+      {"resume_context": dict(resume_context)},
     )
-    return {"status": "previewed", "step_id": "await_operator_review", "reason": "check_only_preview", "committed": committed}
-  _transition(state_obj, "await_operator_review", "await_operator_review", "completed", "operator_confirmed")
+  else:
+    _transition(state_obj, "await_operator_review", "await_operator_review", "started")
+    if not hooks.review_action_before_execution(
+      state_obj,
+      action,
+      review_message,
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+      reasoning_notes=reasoning_notes,
+    ):
+      _transition(state_obj, "await_operator_review", "await_operator_review", "failed", "review_cancelled")
+      return {"status": "failed", "step_id": "await_operator_review", "reason": "review_cancelled", "committed": committed}
 
-  if _step_present(turn_plan, "execute_skill_purchases"):
+    execution_intent = hooks.wait_for_execute_intent(
+      state_obj,
+      action,
+      message_prefix="Action review ready",
+      reasoning_notes=reasoning_notes,
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    if execution_intent == "failed":
+      _transition(state_obj, "await_operator_review", "await_operator_review", "failed", "execute_intent_failed")
+      return {"status": "failed", "step_id": "await_operator_review", "reason": "execute_intent_failed", "committed": committed}
+    if execution_intent != "execute":
+      preview_result = _preview_trackblazer_items(state_obj, action, hooks)
+      _transition(
+        state_obj,
+        "await_operator_review",
+        "await_operator_review",
+        "previewed",
+        "check_only_preview",
+        {"item_preview_status": preview_result.get("status")},
+      )
+      return {"status": "previewed", "step_id": "await_operator_review", "reason": "check_only_preview", "committed": committed}
+    _transition(state_obj, "await_operator_review", "await_operator_review", "completed", "operator_confirmed")
+
+  if _step_present(turn_plan, "execute_skill_purchases") and skip_skill_purchases:
+    _transition(state_obj, "execute_skill_purchases", "execute_skill_purchases", "skipped", "resume_after_in_turn_replan")
+  elif _step_present(turn_plan, "execute_skill_purchases"):
     _transition(state_obj, "execute_skill_purchases", "execute_skill_purchases", "started")
     skill_purchase_result = hooks.run_skill_purchase_plan(state_obj, action, action_count)
     if skill_purchase_result.get("status") == "failed":
@@ -200,7 +219,9 @@ def run_planner_action_with_review(
     else:
       _transition(state_obj, "execute_skill_purchases", "execute_skill_purchases", "skipped")
 
-  if _step_present(turn_plan, "execute_shop_purchases"):
+  if _step_present(turn_plan, "execute_shop_purchases") and skip_shop_purchases:
+    _transition(state_obj, "execute_shop_purchases", "execute_shop_purchases", "skipped", "resume_after_in_turn_replan")
+  elif _step_present(turn_plan, "execute_shop_purchases"):
     _transition(state_obj, "execute_shop_purchases", "execute_shop_purchases", "started")
     shop_purchase_result = hooks.run_trackblazer_shop_purchases(state_obj, action)
     if shop_purchase_result.get("status") == "blocked":
@@ -479,6 +500,70 @@ def run_planner_action_with_review(
           "reason": recheck_result.get("reason") or item_execute_result.get("reason") or "trackblazer_item_use_reassess",
           "committed": committed,
         }
+    elif transition_kind == "reset_whistle_reroll":
+      replan_result = hooks.run_post_reset_whistle_replan(
+        state_obj,
+        action,
+        sub_phase="reassess_after_item_use",
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      replan_status = str(replan_result.get("status") or "")
+      if replan_status == "replanned":
+        selected_action = dict(replan_result.get("selected_action") or {})
+        _transition(
+          state_obj,
+          "transition_after_pre_action_items",
+          "transition_reassess_after_items",
+          "completed",
+          replan_result.get("reason") or "reset_whistle_replanned_after_training_rescan",
+          {
+            "transition_kind": transition_kind,
+            "selected_func": selected_action.get("func") or getattr(action, "func", ""),
+            "training_name": selected_action.get("training_name"),
+          },
+        )
+        return {
+          "status": "replanned",
+          "step_id": "transition_after_pre_action_items",
+          "reason": replan_result.get("reason") or "reset_whistle_replanned_after_training_rescan",
+          "committed": committed,
+          "turn_plan": replan_result.get("turn_plan"),
+          "planned_clicks": replan_result.get("planned_clicks"),
+          "resume_context": {
+            "skip_review": True,
+            "skip_skill_purchases": True,
+            "skip_shop_purchases": True,
+            "reason": replan_result.get("reason") or "resume_after_reset_whistle_replan",
+          },
+        }
+      if replan_status == "blocked":
+        _transition(
+          state_obj,
+          "transition_after_pre_action_items",
+          "transition_reassess_after_items",
+          "blocked",
+          replan_result.get("reason") or "reset_whistle_replan_blocked",
+        )
+        return {
+          "status": "blocked",
+          "step_id": "transition_after_pre_action_items",
+          "reason": replan_result.get("reason") or "reset_whistle_replan_blocked",
+          "committed": committed,
+        }
+      _transition(
+        state_obj,
+        "transition_after_pre_action_items",
+        "transition_reassess_after_items",
+        "failed",
+        replan_result.get("reason") or "reset_whistle_replan_failed",
+      )
+      return {
+        "status": "failed",
+        "step_id": "transition_after_pre_action_items",
+        "reason": replan_result.get("reason") or "reset_whistle_replan_failed",
+        "committed": committed,
+      }
     else:
       hooks.update_operator_snapshot(
         state_obj,
@@ -590,27 +675,43 @@ def run_planner_action_with_review(
   _transition(state_obj, "execute_main_action", "execute_main_action", "started", getattr(action, "func", ""))
   result = action.run()
   if not result:
+    warning_outcome = dict(getattr(action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {})
+    warning_reason = (
+      warning_outcome.get("reason")
+      or getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancel_reason")
+      or ""
+    )
+    warning_cancelled = bool(
+      warning_outcome.get("cancelled")
+      or getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancelled")
+    )
+    failure_reason = (
+      f"consecutive_warning_cancelled:{warning_reason or 'warning_cancelled'}"
+      if warning_cancelled else
+      f"action_failed:{getattr(action, 'func', '')}"
+    )
     _transition(
       state_obj,
       "execute_main_action",
       "execute_main_action",
       "failed",
-      f"action_failed:{getattr(action, 'func', '')}",
+      failure_reason,
       {
-        "warning_outcome": dict(getattr(action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {}),
-        "warning_cancelled": bool(getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancelled")),
-        "warning_reason": (
-          (dict(getattr(action, "get", lambda _k, _d=None: _d)("planner_warning_outcome") or {}).get("reason"))
-          or getattr(action, "get", lambda _k, _d=None: _d)("_consecutive_warning_cancel_reason")
-        ),
+        "warning_outcome": warning_outcome,
+        "warning_cancelled": warning_cancelled,
+        "warning_reason": warning_reason,
       },
     )
     hooks.update_operator_snapshot(
       state_obj,
       action,
       phase="recovering",
-      status="error",
-      error_text=f"Action failed: {action.func}",
+      status="warning" if warning_cancelled else "error",
+      error_text=(
+        "Consecutive-race warning cancelled the race entry; applying fallback."
+        if warning_cancelled else
+        f"Action failed: {action.func}"
+      ),
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
@@ -618,7 +719,7 @@ def run_planner_action_with_review(
     return {
       "status": "failed",
       "step_id": "execute_main_action",
-      "reason": f"action_failed:{action.func}",
+      "reason": failure_reason,
       "committed": committed,
     }
   committed = True
