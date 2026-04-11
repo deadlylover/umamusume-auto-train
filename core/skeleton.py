@@ -1780,46 +1780,22 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
     or {}
   )
   if warning_policy.get("warning_expected") and warning_policy.get("accept_warning") is False:
-    warning_reason = (
-      warning_policy.get("cancel_reason")
-      or "Consecutive-race warning policy rejects this optional rival race."
+    # Do not resolve the consecutive-race warning during preflight. The warning
+    # only exists after the race menu is opened, so short-circuiting here skips
+    # the exact runtime branch the preview promised to exercise.
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message=(
+        "Planner warning policy will be resolved at race entry. "
+        "Skipping rival scout until the race menu is opened."
+      ),
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
     )
-    warning_reason_key = str(
-      warning_policy.get("cancel_reason_key")
-      or "optional_rival_promoted_from_rest"
-    )
-    cancel_fallback = {"func": "do_rest"} if warning_policy.get("cancel_target") == "do_rest" else {}
-    if not cancel_fallback:
-      fallback_policy = dict(turn_plan.fallback_policy or {})
-      fallback_chain = list(fallback_policy.get("chain") or [])
-      cancel_fallback = next(
-        (
-          dict(entry.get("target_payload") or {})
-          for entry in fallback_chain
-          if isinstance(entry, dict) and entry.get("trigger") == "consecutive_warning_cancel"
-        ),
-        {},
-      )
-    if not cancel_fallback:
-      cancel_fallback = _effective_rival_fallback_payload(action)
-    action["planner_warning_outcome"] = {
-      "cancelled": True,
-      "force_rest": bool(warning_policy.get("force_rest_on_cancel")),
-      "reason": warning_reason_key,
-      "resolved": True,
-      "policy_source": "preflight_skip",
-    }
-    if cancel_fallback.get("func"):
-      return _run_planner_warning_cancel_fallback_subroutine(
-        state_obj,
-        action,
-        cancel_fallback=cancel_fallback,
-        warning_reason=warning_reason,
-        sub_phase=sub_phase,
-        ocr_debug=ocr_debug,
-        planned_clicks=planned_clicks,
-      )
-    return "failed"
+    return None
 
   from scenarios.trackblazer import scout_rival_race
 

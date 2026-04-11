@@ -235,6 +235,59 @@ def _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback():
   assert action.get("training_name") == "speed", action
 
 
+def _test_planner_race_preflight_defers_warning_cancel_until_race_entry():
+  bot.set_trackblazer_use_new_planner_enabled(True)
+  state_obj = _base_state()
+  action = _race_action()
+  action.available_actions = ["do_race", "do_rest"]
+  action["planner_race_warning_policy"] = {
+    "warning_expected": True,
+    "accept_warning": False,
+    "cancel_target": "do_rest",
+    "force_rest_on_cancel": True,
+    "cancel_reason_key": "optional_rival_promoted_from_rest",
+  }
+  state_obj[PLANNER_STATE_KEY] = {
+    "turn_plan": _turn_plan_for_payload(
+      {
+        "func": "do_race",
+        "race_name": "any",
+        "prefer_rival_race": True,
+        "planner_race_warning_policy": copy.deepcopy(action["planner_race_warning_policy"]),
+      },
+      fallback_policy={
+        "planner_owned": True,
+        "chain": [
+          {
+            "trigger": "consecutive_warning_cancel",
+            "target_func": "do_rest",
+            "target_payload": {"func": "do_rest"},
+            "source_node_id": "rest",
+            "planner_ranked": True,
+          },
+        ],
+      },
+      race_scout={"required": True, "failure_transition": "revert_to_fallback_action"},
+    ).to_snapshot(),
+  }
+
+  with patch(
+    "scenarios.trackblazer.scout_rival_race",
+    side_effect=AssertionError("preflight should not scout before the race warning can appear"),
+  ), patch(
+    "core.skeleton._run_planner_warning_cancel_fallback_subroutine",
+    side_effect=AssertionError("preflight should not execute the warning cancel fallback"),
+  ), patch(
+    "core.skeleton.update_operator_snapshot",
+    lambda *args, **kwargs: None,
+  ):
+    result = skeleton._run_planner_race_preflight(state_obj, action)
+
+  assert result is None, result
+  assert action.func == "do_race", action
+  assert action.get("prefer_rival_race") is True, action
+
+
 def _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback():
   action = _race_action()
   action["trackblazer_planner_race"] = {
@@ -414,6 +467,7 @@ def main():
   _test_turn_plan_builds_execution_action_without_mutating_caller()
   _test_runtime_retry_preserves_caller_action()
   _test_planner_race_preflight_uses_planner_payload_not_legacy_fallback()
+  _test_planner_race_preflight_defers_warning_cancel_until_race_entry()
   _test_operator_gate_revert_uses_planner_payload_not_legacy_fallback()
   _test_consecutive_warning_training_retry_uses_planner_payload_not_legacy_fallback()
   _test_same_turn_handoff_is_the_legacy_hydration_point()
