@@ -48,6 +48,16 @@ RUNTIME_PATH_LEGACY_RUNTIME = "legacy_runtime"
 PLANNER_VERSION = 3
 
 
+def _is_empty_payload_value(value: Any) -> bool:
+  if value is None:
+    return True
+  if isinstance(value, str):
+    return value == ""
+  if isinstance(value, (list, dict, tuple, set)):
+    return len(value) == 0
+  return False
+
+
 def _normalize_runtime_path(runtime_path: str) -> str:
   normalized = str(runtime_path or "").strip()
   if normalized in {"planner_runtime", "planner"}:
@@ -408,7 +418,7 @@ def apply_selected_action_payload(action, selected_payload, *, available_actions
   for key, value in selected_payload.items():
     if key == "func":
       continue
-    if value in (None, "", [], {}) and key not in {
+    if _is_empty_payload_value(value) and key not in {
       "trackblazer_race_decision",
       "trackblazer_race_lookahead",
       "planner_race_warning_policy",

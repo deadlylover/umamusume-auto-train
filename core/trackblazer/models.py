@@ -8,6 +8,16 @@ from typing import Any, Dict, List, Optional
 _SKILL_SCAN_STATES = ("queued", "capturing", "processing", "ready", "stale", "failed")
 
 
+def _is_empty_render_value(value: Any) -> bool:
+  if value is None:
+    return True
+  if isinstance(value, str):
+    return value == ""
+  if isinstance(value, (list, dict, tuple, set)):
+    return len(value) == 0
+  return False
+
+
 @dataclass
 class BackgroundSkillScanState:
   status: str = "stale"
@@ -745,7 +755,7 @@ def _format_compact_timing_lines(state_summary):
 def _format_short_mapping(payload):
   lines = []
   for key, value in payload.items():
-    if value in (None, "", [], {}):
+    if _is_empty_render_value(value):
       continue
     if isinstance(value, list):
       rendered = ", ".join(_stringify_list_item(item) for item in value)
@@ -753,7 +763,7 @@ def _format_short_mapping(payload):
     elif isinstance(value, dict):
       parts = []
       for sub_key, sub_value in value.items():
-        if sub_value in (None, "", [], {}):
+        if _is_empty_render_value(sub_value):
           continue
         parts.append(f"{sub_key}={sub_value}")
       if parts:
