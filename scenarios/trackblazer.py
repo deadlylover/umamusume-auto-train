@@ -2864,6 +2864,36 @@ def scroll_trackblazer_shop(direction="down", duration=0.55, settle_seconds=1.0)
     }
 
 
+def reset_trackblazer_shop_to_top(settle_seconds=0.3):
+    """Best-effort reset of the shop list to the top using only the scrollbar."""
+    result = {
+        "method": "none",
+        "scrollbar": None,
+        "actions": [],
+        "settle_seconds": float(settle_seconds),
+        "swiped": False,
+        "is_at_top": False,
+    }
+
+    scrollbar = inspect_trackblazer_shop_scrollbar()
+    result["scrollbar"] = scrollbar
+    if scrollbar.get("detected") and scrollbar.get("scrollable"):
+        result["is_at_top"] = bool(scrollbar.get("is_at_top"))
+        if scrollbar.get("is_at_top"):
+            result["method"] = "already_at_top"
+            return result
+        drag_result = _drag_trackblazer_shop_scrollbar(scrollbar, edge="top")
+        result["method"] = "scrollbar_drag"
+        result["actions"].append(drag_result)
+        result["swiped"] = bool(drag_result.get("swiped"))
+        if result["swiped"]:
+            sleep(settle_seconds)
+        return result
+
+    result["method"] = "no_scrollbar_detected"
+    return result
+
+
 def _append_shop_scan_page(flow, page, page_index, seen_items, ordered_items, capture_mode, scrollbar=None, elapsed=None, seen_purchasable=None, ordered_purchasable=None):
     visible_items = list(page.get("visible_items") or [])
     purchasable_items = list(page.get("purchasable_items") or [])
@@ -2899,7 +2929,7 @@ def _scan_all_trackblazer_shop_items_paged(
     threshold=0.8,
     checkbox_threshold=0.8,
     confirm_threshold=0.8,
-    max_reset_swipes=4,
+    max_reset_swipes=1,
     max_forward_swipes=12,
 ):
     """Scan the full Trackblazer shop by paging through visible rows.
@@ -2917,9 +2947,11 @@ def _scan_all_trackblazer_shop_items_paged(
         "scan_mode": "paged_swipe_fallback",
     }
 
-    # Best-effort reset toward the top so the scan starts from a consistent state.
-    for _ in range(max_reset_swipes):
-        flow["reset_swipes"].append(scroll_trackblazer_shop(direction="up"))
+    # Best-effort reset toward the top so the scan starts from a consistent
+    # state, but avoid the old blind multi-swipe loop.
+    if max_reset_swipes:
+        reset_result = reset_trackblazer_shop_to_top(settle_seconds=1.0)
+        flow["reset_swipes"] = list(reset_result.get("actions") or [])
 
     seen_items = set()
     ordered_items = []
@@ -3706,17 +3738,9 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_sh
         # Reset scrollbar to the top before selecting items — the scan
         # leaves the scrollbar at the bottom and subsequent per-item
         # seeks are unreliable when starting from the bottom edge.
-        post_scan_scrollbar = inspect_trackblazer_shop_scrollbar()
-        if post_scan_scrollbar.get("detected") and not post_scan_scrollbar.get("is_at_top"):
-            reset_result = _drag_trackblazer_shop_scrollbar(post_scan_scrollbar, edge="top")
-            flow["pre_select_reset"] = reset_result
-            sleep(0.3)
-        else:
-            # Fallback: swipe up if scrollbar detection failed after scan
-            for _ in range(3):
-                scroll_trackblazer_shop(direction="up")
-            flow["pre_select_reset"] = {"direction": "swipe_up_fallback", "swiped": True}
-            sleep(0.3)
+        flow["pre_select_reset"] = reset_trackblazer_shop_to_top(
+            settle_seconds=0.3,
+        )
 
         # Sort items by their scan scroll position (top-to-bottom) so seeks
         # are short monotonic drags rather than back-and-forth jumps.
