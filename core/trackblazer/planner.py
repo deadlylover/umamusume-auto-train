@@ -4,6 +4,7 @@ import copy
 import difflib
 import hashlib
 import json
+import time
 from typing import Any, Dict, List, Tuple
 
 import core.bot as bot
@@ -363,6 +364,7 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
       or existing.get("runtime_path_source")
       or ""
     ),
+    active_transition_starts=dict(existing.get("active_transition_starts") or {}),
     transition_breadcrumbs=list(existing.get("transition_breadcrumbs") or []),
   )
   runtime_payload = runtime.to_dict()
@@ -751,6 +753,21 @@ def append_planner_runtime_transition(state_obj, *, step_id="", step_type="", st
   if not isinstance(state_obj, dict):
     return {}
   runtime_state = ensure_planner_runtime_state(state_obj)
+  now = time.time()
+  transition_key = str(step_id or step_type or "")
+  active_starts = dict(runtime_state.get("active_transition_starts") or {})
+  previous_started_at = active_starts.get(transition_key)
+  started_at = float(previous_started_at) if previous_started_at is not None else float(now)
+  finished_at = None
+  duration = None
+
+  if str(status or "") == "started":
+    active_starts[transition_key] = float(now)
+  else:
+    finished_at = float(now)
+    duration = round(max(0.0, finished_at - started_at), 4)
+    active_starts.pop(transition_key, None)
+
   breadcrumbs = list(runtime_state.get("transition_breadcrumbs") or [])
   breadcrumbs.append(
     {
@@ -759,9 +776,13 @@ def append_planner_runtime_transition(state_obj, *, step_id="", step_type="", st
       "step_type": str(step_type or ""),
       "status": str(status or ""),
       "note": str(note or ""),
+      "started_at": round(float(started_at), 4),
+      "finished_at": round(float(finished_at), 4) if finished_at is not None else None,
+      "duration": duration,
       "details": copy.deepcopy(details or {}),
     }
   )
+  runtime_state["active_transition_starts"] = active_starts
   runtime_state["transition_breadcrumbs"] = breadcrumbs[-24:]
   state_obj[PLANNER_RUNTIME_KEY] = runtime_state
   return runtime_state

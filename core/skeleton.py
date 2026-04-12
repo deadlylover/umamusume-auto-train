@@ -4200,7 +4200,7 @@ def _handle_trackblazer_inspiration_go_screen(state_obj, action):
     }
 
   template_path = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("inspiration_go")
-  region_ltrb = getattr(constants, "TRACKBLAZER_INSPIRATION_GO_BBOX", None)
+  region_ltrb = getattr(constants, "SCREEN_BOTTOM_BBOX", None)
   if not template_path or not region_ltrb:
     return {
       "detected": False,
@@ -4239,7 +4239,7 @@ def _handle_trackblazer_inspiration_go_screen(state_obj, action):
   bot.push_debug_history({
     "event": "click",
     "asset": "inspiration_go.png",
-    "result": "clicked",
+    "result": "clicked:screen_bottom",
     "context": "post_action_resolution",
   })
   return {

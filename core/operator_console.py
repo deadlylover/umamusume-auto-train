@@ -1061,12 +1061,15 @@ class OperatorConsole:
     if last_completed_metrics:
       sections.append(self._format_turn_metrics_section(last_completed_metrics, title="Last Completed Turn"))
     sections = [section for section in sections if section]
+    planner_text = self._format_planner_timing(snapshot)
+    if planner_text:
+      sections.append(planner_text)
     flow_text = self._format_flow_timing(snapshot)
+    if flow_text and flow_text != "No timing data":
+      sections.append(flow_text)
     if sections:
-      if flow_text and flow_text != "No timing data":
-        sections.append(flow_text)
-      return "\n\n".join(sections)
-    return flow_text
+      return "\n\n".join(section for section in sections if section)
+    return "No timing data"
 
   def _format_flow_timing(self, snapshot):
     state_summary = snapshot.get("state_summary") or {}
@@ -1074,55 +1077,201 @@ class OperatorConsole:
     if sub_phase == "manual_skill_purchase_check":
       flow = state_summary.get("skill_purchase_flow") or {}
       title = "Skill Purchase Flow"
+      return self._format_flow_timing_section(title, flow) if flow else "No timing data"
     elif sub_phase == "manual_shop_check":
       flow = state_summary.get("trackblazer_shop_flow") or {}
       title = "Shop Flow"
+      return self._format_flow_timing_section(title, flow) if flow else "No timing data"
     elif sub_phase in ("manual_inventory_check", "manual_inventory_selection_test"):
       flow = state_summary.get("trackblazer_inventory_flow") or {}
       title = "Inventory Flow"
-    else:
-      flow = state_summary.get("skill_purchase_flow") or {}
-      title = "Skill Purchase Flow"
-      if not flow:
-        flow = state_summary.get("trackblazer_inventory_flow") or {}
-        title = "Inventory Flow"
-      if not flow:
-        flow = state_summary.get("trackblazer_shop_flow") or {}
-        title = "Shop Flow"
-    if not flow:
-      return "No timing data"
-    lines = []
-    # Flow-level totals
-    lines.append(f"=== {title} ===")
-    for key in ("timing_open", "timing_scan", "timing_controls", "timing_close", "timing_total"):
-      val = flow.get(key)
-      if val is not None:
-        label = key.replace("timing_", "")
-        lines.append(f"  {label:10s} {val:.3f}s")
-    for key in ("timing_reset_swipes", "timing_forward_swipes"):
-      val = flow.get(key)
-      if val is not None:
-        label = key.replace("timing_", "")
-        lines.append(f"  {label:10s} {val:.3f}s")
-    # Open breakdown
+      return self._format_flow_timing_section(title, flow) if flow else "No timing data"
+
+    sections = []
+    planner_state = snapshot.get("trackblazer_planner_state") or state_summary.get("trackblazer_planner_state") or {}
+    turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
+    if turn_plan_snapshot:
+      turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot)
+      planner_timing = dict(turn_plan.timing or {})
+      for label, flow in (
+        ("Planner Snapshot: Inventory", planner_timing.get("inventory") or {}),
+        ("Planner Snapshot: Shop", planner_timing.get("shop") or {}),
+        ("Planner Snapshot: Skill", planner_timing.get("skill") or {}),
+      ):
+        section = self._format_flow_timing_section(label, flow)
+        if section:
+          sections.append(section)
+
+    for title, flow in (
+      ("Inventory Flow (Pre-Shop)", state_summary.get("trackblazer_inventory_pre_shop_flow") or {}),
+      ("Inventory Flow", state_summary.get("trackblazer_inventory_flow") or {}),
+      ("Shop Flow", state_summary.get("trackblazer_shop_flow") or {}),
+      ("Skill Purchase Flow", state_summary.get("skill_purchase_flow") or {}),
+    ):
+      section = self._format_flow_timing_section(title, flow)
+      if section:
+        sections.append(section)
+
+    if sections:
+      return "\n\n".join(sections)
+    return "No timing data"
+
+  def _format_planner_timing(self, snapshot):
+    state_summary = snapshot.get("state_summary") or {}
+    runtime = (
+      snapshot.get("trackblazer_planner_runtime")
+      or state_summary.get("trackblazer_planner_runtime")
+      or {}
+    )
+    planner_state = snapshot.get("trackblazer_planner_state") or state_summary.get("trackblazer_planner_state") or {}
+    turn_plan_snapshot = dict((planner_state or {}).get("turn_plan") or {})
+    turn_plan = TurnPlan.from_snapshot(turn_plan_snapshot) if turn_plan_snapshot else None
+    decision_path = getattr(turn_plan, "decision_path", "") or (planner_state.get("decision_path") or "")
+    selection_rationale = getattr(turn_plan, "selection_rationale", "") or ""
+    debug_summary = dict(getattr(turn_plan, "debug_summary", {}) or {})
+    metadata = dict(getattr(turn_plan, "planner_metadata", {}) or {})
+
+    has_runtime = bool(runtime)
+    has_plan = bool(turn_plan_snapshot)
+    if not has_runtime and not has_plan:
+      return ""
+
+    lines = ["=== Planner Runtime ==="]
+    runtime_path = runtime.get("runtime_path") or metadata.get("runtime_path") or snapshot.get("trackblazer_runtime_path")
+    if runtime_path:
+      lines.append(f"  runtime_path  {runtime_path}")
+    if decision_path:
+      lines.append(f"  decision_path {decision_path}")
+    inventory_source = debug_summary.get("inventory_source") or metadata.get("inventory_source")
+    if inventory_source:
+      lines.append(f"  inventory_src {inventory_source}")
+    if runtime.get("latest_observation_id"):
+      lines.append(f"  observation   {runtime.get('latest_observation_id')}")
+    fallback_count = runtime.get("fallback_count")
+    if fallback_count is not None:
+      fallback_line = f"  fallbacks     {int(fallback_count)}"
+      if runtime.get("last_fallback_reason"):
+        fallback_line += f" | {runtime.get('last_fallback_reason')}"
+      lines.append(fallback_line)
+    if debug_summary:
+      summary_parts = []
+      for key in (
+        "planner_native_candidate_count",
+        "ranked_training_count",
+        "shop_item_count",
+        "shop_deviation_count",
+        "execution_item_count",
+      ):
+        value = debug_summary.get(key)
+        if value is not None:
+          label = key.replace("_count", "").replace("_", " ")
+          summary_parts.append(f"{label}={value}")
+      if summary_parts:
+        lines.append(f"  plan_counts   {' | '.join(summary_parts)}")
+    if selection_rationale:
+      lines.append(f"  selection     {selection_rationale}")
+
+    pending_skill = dict(runtime.get("pending_skill_scan") or {})
+    pending_skill_line = self._format_pending_state_line("pending_skill", pending_skill)
+    if pending_skill_line:
+      lines.append(pending_skill_line)
+    pending_shop = dict(runtime.get("pending_shop_scan") or {})
+    pending_shop_line = self._format_pending_state_line("pending_shop", pending_shop)
+    if pending_shop_line:
+      lines.append(pending_shop_line)
+
+    transitions = list(runtime.get("transition_breadcrumbs") or [])
+    if transitions:
+      lines.append("")
+      lines.append("Planner Transitions:")
+      for index, transition in enumerate(transitions[-8:], start=max(1, len(transitions) - 7)):
+        lines.append(self._format_planner_transition(transition, index))
+
+    return "\n".join(lines)
+
+  def _format_pending_state_line(self, label, payload):
+    if not isinstance(payload, dict) or not payload:
+      return ""
+    status = payload.get("status")
+    if not status:
+      return ""
+    parts = [str(status)]
+    for key in ("reason", "source", "shop_status", "shop_turn_key", "captured_sp"):
+      value = payload.get(key)
+      if value in (None, "", []):
+        continue
+      parts.append(f"{key}={value}")
+    return f"  {label:13s} {' | '.join(parts)}"
+
+  def _format_planner_transition(self, transition, index):
+    if not isinstance(transition, dict):
+      return f"  {index}. {transition}"
+    step_label = transition.get("step_id") or transition.get("step_type") or f"transition_{index}"
+    status = transition.get("status") or "-"
+    timing_text = self._format_planner_transition_timing(transition)
+    parts = [f"  {index}. {step_label} [{status}]"]
+    if timing_text:
+      parts.append(timing_text)
+    note = transition.get("note") or ""
+    if note:
+      parts.append(str(note))
+    details = transition.get("details") or {}
+    detail_text = self._format_turn_metrics_step_data(details)
+    if detail_text:
+      parts.append(detail_text)
+    return "  ".join(parts)
+
+  def _format_planner_transition_timing(self, transition):
+    if not isinstance(transition, dict):
+      return ""
+    started_at = transition.get("started_at")
+    finished_at = transition.get("finished_at")
+    duration = transition.get("duration")
+    started_text = self._format_transition_timestamp(started_at)
+    finished_text = self._format_transition_timestamp(finished_at)
+    if started_text and finished_text and duration is not None:
+      return f"{started_text} -> {finished_text} ({float(duration):.3f}s)"
+    if started_text and duration is not None:
+      return f"{started_text} ({float(duration):.3f}s)"
+    if started_text:
+      return started_text
+    if duration is not None:
+      return f"{float(duration):.3f}s"
+    return ""
+
+  def _format_transition_timestamp(self, value):
+    if value is None:
+      return ""
+    try:
+      timestamp = float(value)
+    except (TypeError, ValueError):
+      return ""
+    dt = datetime.fromtimestamp(timestamp)
+    return dt.strftime("%H:%M:%S.") + f"{int(dt.microsecond / 1000):03d}"
+
+  def _format_flow_timing_section(self, title, flow):
+    if not isinstance(flow, dict) or not flow:
+      return ""
+    lines = [f"=== {title} ==="]
+    for key, value in self._iter_timing_entries(flow):
+      lines.append(f"  {key:13s} {self._format_timing_value(value)}")
+    status_line = self._format_flow_status_line(flow)
+    if status_line:
+      lines.append(status_line)
+
     open_result = flow.get("open_result") or flow.get("entry_result") or {}
     open_timing = open_result.get("timing") or {}
     if open_timing:
       lines.append("")
       lines.append("=== Open Breakdown ===")
       lines.extend(self._format_timing_mapping(open_timing))
-    # Scan breakdown (from inventory scan info log)
-    scan_timing = (
-      flow.get("scan_timing")
-      or ((flow.get("scan_result") or {}).get("scan_timing") if isinstance(flow.get("scan_result"), dict) else {})
-      or ((flow.get("scan_result") or {}).get("flow") if isinstance(flow.get("scan_result"), dict) else {})
-      or {}
-    )
+
+    scan_timing = self._extract_scan_timing(flow)
     if scan_timing:
       lines.append("")
       lines.append("=== Scan Breakdown ===")
       lines.extend(self._format_timing_mapping(scan_timing))
-    # Close breakdown
+
     close_result = flow.get("close_result") or {}
     close_timing = close_result.get("timing") or {}
     if close_timing:
@@ -1130,6 +1279,82 @@ class OperatorConsole:
       lines.append("=== Close Breakdown ===")
       lines.extend(self._format_timing_mapping(close_timing))
     return "\n".join(lines)
+
+  def _format_flow_status_line(self, flow):
+    parts = []
+    for key in (
+      "opened",
+      "already_open",
+      "entered",
+      "scanned",
+      "closed",
+      "confirmed",
+      "skipped",
+      "cached",
+      "planner_retry_suppressed",
+    ):
+      if key in flow:
+        parts.append(f"{key}={flow.get(key)}")
+    for key in ("trigger", "reason", "scan_source"):
+      value = flow.get(key)
+      if value in (None, "", []):
+        continue
+      parts.append(f"{key}={value}")
+    if not parts:
+      return ""
+    return f"  status        {' | '.join(parts)}"
+
+  def _extract_scan_timing(self, flow):
+    scan_result = flow.get("scan_result") or {}
+    if not isinstance(scan_result, dict):
+      scan_result = {}
+    shared_flow = scan_result.get("flow") or {}
+    if not isinstance(shared_flow, dict):
+      shared_flow = {}
+    return (
+      flow.get("scan_timing")
+      or scan_result.get("scan_timing")
+      or shared_flow.get("timing")
+      or shared_flow
+      or {}
+    )
+
+  def _iter_timing_entries(self, flow):
+    if not isinstance(flow, dict):
+      return []
+    preferred = [
+      "timing_open",
+      "timing_scan",
+      "timing_increments",
+      "timing_controls",
+      "timing_confirm",
+      "timing_close",
+      "timing_total",
+      "timing_reset_swipes",
+      "timing_forward_swipes",
+    ]
+    seen = set()
+    entries = []
+    for key in preferred:
+      if flow.get(key) is None:
+        continue
+      seen.add(key)
+      entries.append((key.replace("timing_", ""), flow.get(key)))
+    for key in sorted(flow.keys()):
+      if not str(key).startswith("timing_") or key in seen:
+        continue
+      value = flow.get(key)
+      if value is None:
+        continue
+      entries.append((str(key).replace("timing_", ""), value))
+    return entries
+
+  def _format_timing_value(self, value):
+    if isinstance(value, bool):
+      return str(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+      return f"{float(value):.3f}s"
+    return str(value)
 
   def _format_turn_metrics_section(self, metrics, title):
     if not isinstance(metrics, dict) or not metrics:
@@ -1199,7 +1424,57 @@ class OperatorConsole:
     detail = step.get("detail") or ""
     if detail:
       prefix += f"  {detail}"
+    data_text = self._format_turn_metrics_step_data(step.get("data") or {})
+    if data_text:
+      prefix += f"  [{data_text}]"
     return prefix
+
+  def _format_turn_metrics_step_data(self, data):
+    if not isinstance(data, dict) or not data:
+      return ""
+    parts = []
+    preferred = [
+      "timing_open",
+      "timing_scan",
+      "timing_increments",
+      "timing_controls",
+      "timing_confirm",
+      "timing_close",
+      "timing_total",
+      "cached",
+      "skipped",
+      "trigger",
+      "reason",
+      "source",
+      "execution_intent",
+    ]
+    seen = set()
+    for key in preferred:
+      value = data.get(key)
+      if value is None:
+        continue
+      seen.add(key)
+      parts.append(self._format_step_data_part(key, value))
+    for key in sorted(data.keys()):
+      if key in seen:
+        continue
+      value = data.get(key)
+      if value in (None, {}, []):
+        continue
+      if isinstance(value, (dict, list, tuple, set)):
+        continue
+      parts.append(self._format_step_data_part(key, value))
+    return " | ".join(part for part in parts if part)
+
+  def _format_step_data_part(self, key, value):
+    label = str(key).replace("timing_", "")
+    if isinstance(value, bool):
+      return f"{label}={value}"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+      if str(key).startswith("timing_"):
+        return f"{label}={float(value):.3f}s"
+      return f"{label}={value}"
+    return f"{label}={value}"
 
   def _format_planned_actions(self, snapshot):
     turn_discussion_text = snapshot.get("turn_discussion_text")

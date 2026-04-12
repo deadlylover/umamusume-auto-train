@@ -198,6 +198,61 @@ class TrackblazerShopRecoveryChecks(unittest.TestCase):
         self.assertIsNone(entry)
         self.assertTrue(any(item.get("key") == "use_training_items" and item.get("passed_threshold") for item in checks))
 
+    def test_shop_detection_accepts_shop_controls_region_marker(self):
+        with patch.object(trackblazer, "_trackblazer_ui_region", return_value=(1, 2, 3, 4)), patch.object(
+            trackblazer.device_action,
+            "screenshot",
+            return_value=object(),
+        ), patch.object(
+            trackblazer,
+            "_shop_confirm_template_keys",
+            return_value=("shop_confirm",),
+        ), patch.dict(
+            trackblazer.constants.TRACKBLAZER_ITEM_USE_TEMPLATES,
+            {
+                "use_training_items": "use_training_items_tpl",
+                "use_back": "use_back_tpl",
+            },
+            clear=False,
+        ), patch.dict(
+            trackblazer.constants.TRACKBLAZER_SHOP_UI_TEMPLATES,
+            {
+                "shop_confirm": "shop_confirm_tpl",
+                "shop_aftersale_close": "shop_aftersale_close_tpl",
+                "shop_aftersale_confirm_use_available": "shop_aftersale_confirm_use_available_tpl",
+                "shop_aftersale_confirm_use_unavailable": "shop_aftersale_confirm_use_unavailable_tpl",
+            },
+            clear=False,
+        ), patch.object(
+            trackblazer,
+            "detect_inventory_controls",
+            return_value={
+                "close": _entry("close", passed=False, score=0.32),
+                "confirm_use": _entry("shop_aftersale_confirm_use_available", passed=True, score=0.996),
+                "confirm_candidates": {
+                    "shop_confirm": _entry("shop_confirm", passed=False, score=0.41),
+                    "shop_aftersale_confirm_use_available": _entry("shop_aftersale_confirm_use_available", passed=True, score=0.996),
+                    "shop_aftersale_confirm_use_unavailable": _entry("shop_aftersale_confirm_use_unavailable", passed=False, score=0.27),
+                    "inventory_confirm_use_available": _entry("inventory_confirm_use_available", passed=False, score=0.18),
+                    "inventory_confirm_use_unavailable": _entry("inventory_confirm_use_unavailable", passed=False, score=0.16),
+                },
+            },
+        ), patch.object(
+            trackblazer,
+            "_best_match_entry",
+            side_effect=lambda template_path, **_: {
+                "use_training_items_tpl": _entry("use_training_items", passed=False, score=0.33),
+                "use_back_tpl": _entry("use_back", passed=False, score=0.29),
+                "shop_confirm_tpl": _entry("shop_confirm", passed=False, score=0.41),
+                "shop_aftersale_close_tpl": _entry("shop_aftersale_close", passed=False, score=0.35),
+            }[template_path],
+        ):
+            opened, entry, checks = trackblazer.detect_shop_screen(threshold=0.75)
+
+        self.assertTrue(opened)
+        self.assertEqual((entry or {}).get("key"), "shop_aftersale_confirm_use_available")
+        self.assertTrue(any(item.get("key") == "shop_aftersale_confirm_use_available" and item.get("passed_threshold") for item in checks))
+
     def test_shop_entry_verification_failure_blocks_execute_flow(self):
         flow = {
             "entered": False,

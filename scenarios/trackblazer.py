@@ -4375,6 +4375,7 @@ def detect_shop_screen(threshold=0.7):
     screenshot = device_action.screenshot(region_ltrb=region_ltrb)
     checks = []
     explicit_shop_entry = None
+    shop_controls_entry = None
 
     for key in (*_shop_confirm_template_keys(), "shop_aftersale_close"):
         template_path = constants.TRACKBLAZER_SHOP_UI_TEMPLATES.get(key)
@@ -4391,9 +4392,6 @@ def detect_shop_screen(threshold=0.7):
         if explicit_shop_entry is None and entry.get("passed_threshold"):
             explicit_shop_entry = entry
 
-    if explicit_shop_entry is not None:
-        return True, explicit_shop_entry, checks
-
     controls = detect_inventory_controls(threshold=max(0.6, threshold - 0.2))
     confirm_candidates = controls.get("confirm_candidates") or {}
     inventory_specific_entry = None
@@ -4404,6 +4402,20 @@ def detect_shop_screen(threshold=0.7):
         checks.append(entry)
         if inventory_specific_entry is None and entry.get("passed_threshold"):
             inventory_specific_entry = entry
+
+    for key in (*_shop_confirm_template_keys(), "shop_aftersale_confirm_use_available", "shop_aftersale_confirm_use_unavailable"):
+        entry = confirm_candidates.get(key)
+        if not entry:
+            continue
+        checks.append(entry)
+        if shop_controls_entry is None and entry.get("passed_threshold"):
+            shop_controls_entry = entry
+
+    close_entry = controls.get("close") or {}
+    if close_entry:
+        checks.append(close_entry)
+        if shop_controls_entry is None and close_entry.get("passed_threshold"):
+            shop_controls_entry = close_entry
 
     use_training_template = constants.TRACKBLAZER_ITEM_USE_TEMPLATES.get("use_training_items")
     if use_training_template:
@@ -4418,6 +4430,10 @@ def detect_shop_screen(threshold=0.7):
         if inventory_specific_entry is None and use_training_entry.get("passed_threshold"):
             inventory_specific_entry = use_training_entry
 
+    if explicit_shop_entry is not None:
+        return True, explicit_shop_entry, checks
+    if shop_controls_entry is not None:
+        return True, shop_controls_entry, checks
     if inventory_specific_entry is not None:
         return False, None, checks
 

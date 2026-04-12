@@ -80,6 +80,7 @@ class PlannerRuntimeState:
   runtime_path: str = "legacy_runtime"
   runtime_path_reason: str = ""
   runtime_path_source: str = ""
+  active_transition_starts: Dict[str, float] = field(default_factory=dict)
   transition_breadcrumbs: List[Dict[str, Any]] = field(default_factory=list)
 
   def to_dict(self) -> Dict[str, Any]:
@@ -933,6 +934,7 @@ def _format_planned_action_sections(planned, state_summary):
     ("Race Entry Gate", planned.get("race_entry_gate") or {}),
     ("Race Warning Policy", planned.get("race_warning_policy") or {}),
     ("Race Fallback Policy", planned.get("race_fallback_policy") or {}),
+    ("Execution Flow", planned.get("execution_steps") or []),
     ("Skill Check", state_summary.get("skill_purchase_check") or {}),
     ("Race Scout", planned.get("race_scout") or {}),
     ("Inventory Scan", planned.get("inventory_scan") or {}),
@@ -956,11 +958,56 @@ def _format_planned_action_sections(planned, state_summary):
       else:
         lines.append("    none")
     elif isinstance(payload, list):
-      if payload:
+      if section_name == "Execution Flow":
+        summary = _format_execution_steps(payload)
+        if summary:
+          lines.extend([f"    {line}" for line in summary])
+        else:
+          lines.append("    none")
+      elif payload:
         for line in _format_short_list(payload):
           lines.append(f"    {line}")
       else:
         lines.append("    none")
+  return lines
+
+
+def _format_execution_steps(steps):
+  lines = []
+  for index, step in enumerate(steps or [], start=1):
+    if not isinstance(step, dict):
+      continue
+    step_label = step.get("step_type") or step.get("step_id") or f"step_{index}"
+    parts = []
+    intent = step.get("intent")
+    if intent and intent != step_label:
+      parts.append(f"intent={intent}")
+    click_labels = [
+      str(label)
+      for label in list(step.get("planned_click_labels") or [])
+      if str(label or "").strip()
+    ]
+    if click_labels:
+      click_preview = " -> ".join(click_labels[:3])
+      if len(click_labels) > 3:
+        click_preview += " -> ..."
+      parts.append(f"clicks={click_preview}")
+    success_transition = step.get("success_transition")
+    failure_transition = step.get("failure_transition")
+    if success_transition or failure_transition:
+      transition_parts = []
+      if success_transition:
+        transition_parts.append(f"success={success_transition}")
+      if failure_transition:
+        transition_parts.append(f"failure={failure_transition}")
+      parts.append(", ".join(transition_parts))
+    notes = step.get("notes")
+    if notes:
+      parts.append(str(notes))
+    line = f"{index}. {step_label}"
+    if parts:
+      line += f" | {' | '.join(parts)}"
+    lines.append(line)
   return lines
 
 
@@ -1170,6 +1217,29 @@ class TurnPlan:
 
   def to_planned_actions(self) -> Dict[str, Any]:
     planned = {}
+
+    if self.step_sequence:
+      execution_steps = []
+      for step in list(self.step_sequence or []):
+        if not isinstance(step, ExecutionStep):
+          continue
+        execution_steps.append(
+          {
+            "step_id": step.step_id,
+            "step_type": step.step_type,
+            "intent": step.intent,
+            "success_transition": step.success_transition,
+            "failure_transition": step.failure_transition,
+            "notes": step.notes,
+            "planned_click_labels": [
+              click.get("label") or "click"
+              for click in list(step.planned_clicks or [])
+              if isinstance(click, dict)
+            ],
+          }
+        )
+      if execution_steps:
+        planned["execution_steps"] = execution_steps
 
     inventory_scan = copy.deepcopy(dict((self.inventory_snapshot or {}).get("scan") or {}))
     if inventory_scan:
