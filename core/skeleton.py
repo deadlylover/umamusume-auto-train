@@ -6060,6 +6060,7 @@ def career_lobby(dry_run_turn=False):
   _cached_trackblazer_inventory_turn = None
   bot.reset_turn_metrics()
   bot.clear_trackblazer_shop_check_request()
+  bot.clear_trackblazer_training_items_button_observation()
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
   constants.SCENARIO_NAME = ""
@@ -6237,6 +6238,21 @@ def career_lobby(dry_run_turn=False):
         continue
       else:
         bot.push_debug_history({"event": "state", "asset": "stable_career_screen", "result": "matched", "context": "lobby_scan"})
+        if constants.SCENARIO_NAME in ("mant", "trackblazer"):
+          try:
+            from scenarios.trackblazer import detect_training_items_button
+
+            lobby_button = detect_training_items_button(
+              screenshot=screenshot,
+              region_ltrb=constants.GAME_WINDOW_BBOX,
+            )
+            if lobby_button and lobby_button.get("matched") and lobby_button.get("click_target"):
+              bot.note_trackblazer_training_items_button_observation(
+                lobby_button,
+                source="stable_career_screen",
+              )
+          except Exception as exc:
+            warning(f"[TB_INV] Stable-lobby button observation failed: {exc}")
         bot.start_turn_metrics(
           trigger="stable_career_screen",
           context={

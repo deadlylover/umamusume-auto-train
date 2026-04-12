@@ -1649,7 +1649,7 @@ def detect_inventory_controls(threshold=0.6):
     return controls
 
 
-def detect_training_items_button(threshold=0.8):
+def detect_training_items_button(threshold=0.8, screenshot=None, region_ltrb=None):
     """Locate the lower-right lobby Training Items button.
 
     The same `training_items.png` asset can also match the small top label on
@@ -1659,8 +1659,8 @@ def detect_training_items_button(threshold=0.8):
     if not template_path:
         return None
 
-    region_ltrb = _trackblazer_ui_region()
-    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+    region_ltrb = region_ltrb or _trackblazer_ui_region()
+    screenshot = screenshot if screenshot is not None else device_action.screenshot(region_ltrb=region_ltrb)
     search_image_path = _save_training_scan_debug_image(
         screenshot,
         "trackblazer_inventory",
@@ -1770,7 +1770,7 @@ def detect_inventory_screen(threshold=0.8):
     return False, None, checks
 
 
-def open_training_items_inventory(threshold=0.8, verify_threshold=0.8, skip_precheck=False):
+def open_training_items_inventory(threshold=0.8, verify_threshold=0.8, skip_precheck=False, button_override=None):
     """Open the Trackblazer inventory screen from the lobby button."""
     t_total = _time()
     timing = {}
@@ -1794,9 +1794,15 @@ def open_training_items_inventory(threshold=0.8, verify_threshold=0.8, skip_prec
                 "action_log": action_log,
             }
 
-    t0 = _time()
-    button = detect_training_items_button(threshold=threshold)
-    timing["detect_button"] = round(_time() - t0, 4)
+    button = dict(button_override or {})
+    if button and button.get("matched") and button.get("click_target"):
+        timing["detect_button"] = 0.0
+        timing["button_source"] = str(button.get("source") or "override")
+    else:
+        t0 = _time()
+        button = detect_training_items_button(threshold=threshold)
+        timing["detect_button"] = round(_time() - t0, 4)
+        timing["button_source"] = "fresh_detect"
     if not button or not button.get("matched") or not button.get("click_target"):
         timing["total"] = round(_time() - t_total, 4)
         info(f"[TB_INV] open timing: no_button — {timing}")

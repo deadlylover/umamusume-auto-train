@@ -467,7 +467,11 @@ def collect_main_state(*, use_last_known_turn=True):
   state_object = CleanDefaultDict()
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
     try:
-      from scenarios.trackblazer import detect_inventory_screen, close_training_items_inventory
+      from scenarios.trackblazer import (
+        detect_inventory_screen,
+        close_training_items_inventory,
+        detect_training_items_button,
+      )
 
       inventory_open, inventory_entry, inventory_checks = detect_inventory_screen()
       if inventory_open:
@@ -493,6 +497,16 @@ def collect_main_state(*, use_last_known_turn=True):
         }
     except Exception as exc:
       warning(f"[TB_INV] Inventory recovery check failed during main-state collection: {exc}")
+    try:
+      lobby_button = detect_training_items_button()
+      state_object["trackblazer_lobby_training_items_button"] = lobby_button
+      if lobby_button and lobby_button.get("matched") and lobby_button.get("click_target"):
+        bot.note_trackblazer_training_items_button_observation(
+          lobby_button,
+          source="collect_main_state",
+        )
+    except Exception as exc:
+      warning(f"[TB_INV] Lobby button observation failed during main-state collection: {exc}")
 
   state_object["current_mood"] = get_mood()
   debug("Mood collection done.")
@@ -632,13 +646,23 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
   inventory_screen_open, _, precheck_entries = detect_inventory_screen()
   flow["precheck"] = precheck_entries
   lobby_open_button = detect_training_items_button()
+  cached_lobby_open_button = bot.get_trackblazer_training_items_button_observation(max_age_seconds=12.0)
   flow["lobby_open_button"] = lobby_open_button
-  flow["use_training_items_button_visible"] = bool(
+  flow["cached_lobby_open_button"] = cached_lobby_open_button
+  fresh_button_visible = bool(
     lobby_open_button and lobby_open_button.get("matched") and lobby_open_button.get("click_target")
   )
+  cached_button_visible = bool(
+    cached_lobby_open_button and cached_lobby_open_button.get("matched") and cached_lobby_open_button.get("click_target")
+  )
+  preferred_lobby_open_button = lobby_open_button if fresh_button_visible else cached_lobby_open_button
+  flow["use_training_items_button_visible"] = bool(fresh_button_visible or cached_button_visible)
+  flow["use_training_items_button_detection_source"] = (
+    "fresh_detect" if fresh_button_visible else "cached_positive_observation" if cached_button_visible else "not_visible"
+  )
   flow["use_training_items_button_match"] = (
-    list(lobby_open_button.get("match"))
-    if lobby_open_button and lobby_open_button.get("match")
+    list(preferred_lobby_open_button.get("match"))
+    if preferred_lobby_open_button and preferred_lobby_open_button.get("match")
     else None
   )
 
@@ -656,7 +680,10 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
   else:
     debug("[STATE] Opening Trackblazer training items inventory.")
     t0 = time.time()
-    open_result = open_training_items_inventory(skip_precheck=True)
+    open_result = open_training_items_inventory(
+      skip_precheck=True,
+      button_override=preferred_lobby_open_button,
+    )
     flow["timing_open"] = round(time.time() - t0, 3)
     flow["open_result"] = open_result
     flow["action_log"].extend(list(open_result.get("action_log") or []))

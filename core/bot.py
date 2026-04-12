@@ -61,6 +61,7 @@ debug_history = []          # Ring buffer of recent template match / action even
 DEBUG_HISTORY_MAX = 1000
 pending_trackblazer_shop_check = False
 pending_trackblazer_shop_check_reason = ""
+trackblazer_training_items_button_observation = {}
 review_waiting = False
 review_event = threading.Event()
 operator_console = None
@@ -664,6 +665,7 @@ def get_runtime_state():
       "execution_intent": execution_intent,
       "pending_trackblazer_shop_check": pending_trackblazer_shop_check,
       "pending_trackblazer_shop_check_reason": pending_trackblazer_shop_check_reason,
+      "trackblazer_training_items_button_observation": dict(trackblazer_training_items_button_observation or {}),
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
       "trackblazer_use_new_planner_enabled": trackblazer_use_new_planner_enabled,
       "trackblazer_scoring_mode": trackblazer_scoring_mode,
@@ -715,6 +717,42 @@ def get_debug_history():
 def clear_debug_history():
   with runtime_lock:
     debug_history.clear()
+
+
+def clear_trackblazer_training_items_button_observation():
+  global trackblazer_training_items_button_observation, runtime_updated_at
+  with runtime_lock:
+    trackblazer_training_items_button_observation = {}
+    runtime_updated_at = time.time()
+
+
+def note_trackblazer_training_items_button_observation(observation, source=""):
+  global trackblazer_training_items_button_observation, runtime_updated_at
+  payload = dict(observation or {})
+  if not payload.get("matched") or not payload.get("click_target"):
+    return {}
+  payload["source"] = str(source or payload.get("source") or "")
+  payload["observed_at"] = time.time()
+  with runtime_lock:
+    trackblazer_training_items_button_observation = payload
+    runtime_updated_at = time.time()
+    return dict(trackblazer_training_items_button_observation)
+
+
+def get_trackblazer_training_items_button_observation(max_age_seconds=None):
+  with runtime_lock:
+    observation = dict(trackblazer_training_items_button_observation or {})
+  if not observation:
+    return {}
+  if max_age_seconds is not None:
+    observed_at = float(observation.get("observed_at") or 0.0)
+    if observed_at <= 0:
+      return {}
+    age_seconds = max(0.0, time.time() - observed_at)
+    if age_seconds > float(max_age_seconds):
+      return {}
+    observation["age_seconds"] = round(age_seconds, 4)
+  return observation
 
 
 def request_trackblazer_shop_check(reason=""):
