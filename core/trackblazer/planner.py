@@ -3216,6 +3216,14 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
     reassess_kind = "reset_whistle_reroll"
   elif any(entry.get("usage_group") == "energy" for entry in list(execution_items or []) if isinstance(entry, dict)):
     reassess_kind = "energy_rescue_reassess" if item_context.get("energy_rescue") else "energy_item_reassess"
+  followup_candidates = []
+  if reassess_kind in {"energy_item_reassess", "energy_rescue_reassess"}:
+    for entry in list(deferred_use or []):
+      if not isinstance(entry, dict) or not entry.get("key"):
+        continue
+      if entry.get("usage_group") == "energy" or entry.get("key") == "reset_whistle":
+        continue
+      followup_candidates.append(copy.deepcopy(entry))
   has_execution_items = bool(execution_items)
   if has_execution_items:
     inventory_refresh = {
@@ -3296,6 +3304,13 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
       "transition_kind": reassess_kind,
       "reason": reassess_reason,
       "trigger_items": trigger_items,
+      "followup_item_replan": bool(reassess_kind in {"energy_item_reassess", "energy_rescue_reassess"}),
+      "followup_candidates": copy.deepcopy(followup_candidates),
+      "followup_note": (
+        "After the energy/fail recheck, the bot runs item planning again and can still apply deferred burst/stat items before the training click."
+        if reassess_kind in {"energy_item_reassess", "energy_rescue_reassess"} else
+        ""
+      ),
       "selected_action_invalidated": bool(effective_reassess),
       "requires_reobserve": bool(effective_reassess),
       "requires_training_rescan": bool(effective_reassess),
@@ -3378,13 +3393,42 @@ def _build_item_transition_step_planned_clicks(item_execution_payload):
   if reassess_transition.get("required"):
     transition_kind = str(reassess_transition.get("transition_kind") or "")
     if transition_kind in {"energy_item_reassess", "energy_rescue_reassess"}:
-      return [
+      followup_candidates = [
+        entry.get("name") or entry.get("key") or "item"
+        for entry in list(reassess_transition.get("followup_candidates") or [])
+        if isinstance(entry, dict) and (entry.get("name") or entry.get("key"))
+      ]
+      clicks = [
         _planned_click(
           "Refresh selected training after item use",
           region_key="GAME_WINDOW_BBOX",
-          note="Re-open training and rescan the selected training's fail chance before committing the planned training.",
+          note=(
+            "Re-open training and rescan the selected training's fail chance before committing the planned training "
+            "or any follow-up burst/stat items."
+          ),
         )
       ]
+      if followup_candidates:
+        clicks.append(
+          _planned_click(
+            "Replan deferred burst/stat items after recheck",
+            note=(
+              "After the fail recheck, the bot can still apply deferred follow-up items before the training click: "
+              f"{', '.join(followup_candidates)}."
+            ),
+          )
+        )
+      else:
+        clicks.append(
+          _planned_click(
+            "Check for follow-up burst/stat items after recheck",
+            note=(
+              "After the fail recheck, the bot runs item planning again and may add a megaphone, "
+              "Good-Luck Charm, or matching stat item before the training click."
+            ),
+          )
+        )
+      return clicks
     return [
       _planned_click(
         "Rescan trainings after item use",
@@ -4265,6 +4309,9 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
         "trigger_items": [entry.get("key") for entry in execution_items if isinstance(entry, dict) and entry.get("key")],
         "reason": (item_execution_payload.get("reassess_transition") or {}).get("reason"),
         "transition_kind": (item_execution_payload.get("reassess_transition") or {}).get("transition_kind"),
+        "followup_item_replan": bool((item_execution_payload.get("reassess_transition") or {}).get("followup_item_replan")),
+        "followup_candidates": copy.deepcopy((item_execution_payload.get("reassess_transition") or {}).get("followup_candidates") or []),
+        "followup_note": (item_execution_payload.get("reassess_transition") or {}).get("followup_note"),
       },
     },
     race_plan=copy.deepcopy(selected_race_plan),

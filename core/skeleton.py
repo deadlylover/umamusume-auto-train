@@ -2658,11 +2658,17 @@ def _planned_clicks_for_action(action):
       )
     )
     if _trackblazer_reassess_after_item_use(action):
+      reassess_note = "Item use changes board state (whistle reroll or energy reducing failure), so the follow-up action must be re-evaluated"
+      if action_func == "do_training":
+        reassess_note = (
+          "Item use changes board state. After the fail recheck, the bot can still run a second item-planning pass "
+          "and apply burst/stat follow-up items before the training click."
+        )
       pre_action_clicks.append(
         _planned_click(
           "Rescan trainings after item use",
           region_key="GAME_WINDOW_BBOX",
-          note="Item use changes board state (whistle reroll or energy reducing failure), so the follow-up action must be re-evaluated",
+          note=reassess_note,
         )
       )
   if not action_func:

@@ -923,7 +923,20 @@ def main():
             "reason": "synthetic fail-safe pairing",
           },
         ],
-        "deferred": [],
+        "deferred": [
+          {
+            "key": "empowering_megaphone",
+            "name": "Empowering Megaphone",
+            "usage_group": "training_burst",
+            "reason": "deferred until post-energy reassess",
+          },
+          {
+            "key": "speed_ankle_weights",
+            "name": "Speed Ankle Weights",
+            "usage_group": "training_burst_specific",
+            "reason": "deferred until post-energy reassess",
+          },
+        ],
       },
     ):
       energy_snapshot = build_review_snapshot(
@@ -952,6 +965,23 @@ def main():
     energy_step_sequence = [step.to_dict() for step in energy_turn_plan.step_sequence]
     energy_transition_step = next(step for step in energy_step_sequence if step.get("step_type") == "transition_reassess_after_items")
     assert energy_transition_step.get("metadata", {}).get("transition_kind") == "energy_rescue_reassess", "energy case should expose the explicit reassess transition on the planner step"
+    assert energy_transition_step.get("metadata", {}).get("followup_item_replan") is True, "energy case should mark the second-pass item replan explicitly"
+    assert [entry.get("key") for entry in energy_transition_step.get("metadata", {}).get("followup_candidates") or []] == [
+      "empowering_megaphone",
+      "speed_ankle_weights",
+    ], "energy case should surface deferred burst/stat follow-up candidates on the reassess transition"
+    assert [click.get("label") for click in energy_transition_step.get("planned_clicks") or []] == [
+      "Refresh selected training after item use",
+      "Replan deferred burst/stat items after recheck",
+    ], "energy case should preview the follow-up item replan after the fail check"
+    energy_planned_actions = energy_snapshot.get("planned_actions") or {}
+    energy_reassess_boundary = energy_planned_actions.get("reassess_boundary") or {}
+    assert energy_reassess_boundary.get("followup_item_replan") is True, "planned actions should state that energy reassess can still apply follow-up items"
+    assert [entry.get("key") for entry in energy_reassess_boundary.get("followup_candidates") or []] == [
+      "empowering_megaphone",
+      "speed_ankle_weights",
+    ], "planned actions should list the deferred follow-up burst/stat items"
+    assert "item planning again" in (energy_reassess_boundary.get("followup_note") or ""), "planned actions should explain the second-pass item window explicitly"
 
     healthy_training_state = _base_state()
     healthy_training_state["year"] = "Senior Year Early Feb"
