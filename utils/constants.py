@@ -329,6 +329,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
 }
 
 TRACKBLAZER_RESOLUTION_TEMPLATES = {
+  "inspiration_go": "assets/custom/inspiration_go.png",
   "post_race_watch_concert": "assets/trackblazer/resolution/post_race_watch_concert.png",
   "post_race_watch_concert_next": "assets/trackblazer/resolution/post_race_watch_concert_next.png",
 }
@@ -371,6 +372,8 @@ TRACKBLAZER_CLIMAX_RACE_RESULT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_CLIMAX_
 # Trackblazer post-race resolution buttons shown on the result screen after a
 # successful placement/win. These assets are native-resolution captures and
 # should bypass the global template scale.
+TRACKBLAZER_INSPIRATION_GO_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (320, 1102, -357, 85))
+TRACKBLAZER_INSPIRATION_GO_REGION = convert_xyxy_to_xywh(TRACKBLAZER_INSPIRATION_GO_BBOX)
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (113, 1178, -437, -175))
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX)
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (443, 1176, -128, -173))

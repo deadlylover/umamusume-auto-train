@@ -3970,6 +3970,68 @@ def _handle_trackblazer_post_race_watch_concert_screen(state_obj, action):
   }
 
 
+def _handle_trackblazer_inspiration_go_screen(state_obj, action):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "inspiration_go",
+      "reason": "scenario_inactive",
+      "deferred_work": [],
+    }
+
+  template_path = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("inspiration_go")
+  region_ltrb = getattr(constants, "TRACKBLAZER_INSPIRATION_GO_BBOX", None)
+  if not template_path or not region_ltrb:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "inspiration_go",
+      "reason": "template_or_region_missing",
+      "deferred_work": [],
+    }
+
+  screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+  matches = device_action.match_template(
+    template_path,
+    screenshot,
+    threshold=0.75,
+    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  )
+  if not matches:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "inspiration_go",
+      "reason": "inspiration_go_not_found",
+      "deferred_work": [],
+    }
+
+  x, y, w, h = matches[0]
+  click_target = (
+    int(region_ltrb[0] + x + (w // 2)),
+    int(region_ltrb[1] + y + (h // 2)),
+  )
+  device_action.click(
+    target=click_target,
+    text="Clicked Trackblazer inspiration Go button during post-action resolution.",
+  )
+  info("[TB_POST] Trackblazer inspiration Go button detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "click",
+    "asset": "inspiration_go.png",
+    "result": "clicked",
+    "context": "post_action_resolution",
+  })
+  return {
+    "detected": True,
+    "handled": True,
+    "popup_type": "inspiration_go",
+    "reason": "go_clicked",
+    "deferred_work": [],
+  }
+
+
 def _click_trackblazer_next_button(context_label, min_search_time=0.6):
   for label, template_path in (
     ("next", "assets/buttons/next_btn.png"),
@@ -4168,10 +4230,11 @@ _POST_ACTION_MAX_WAIT_DEFAULT = 20.0
 # 5. Trackblazer scheduled race popup
 # 6. Trackblazer climax race result screen
 # 7. Trackblazer post-race watch-concert result screen
-# 8. Trackblazer goal-complete screen
-# 9. Generic bottom-screen recovery clicks
-# 10. Safe-space tap fallback after repeated idle loops
-# 11. Timeout fallback to the generic lobby scan
+# 8. Trackblazer inspiration Go screen
+# 9. Trackblazer goal-complete screen
+# 10. Generic bottom-screen recovery clicks
+# 11. Safe-space tap fallback after repeated idle loops
+# 12. Timeout fallback to the generic lobby scan
 def _resolve_post_action_resolution(state_obj, action, max_wait=None):
   import time as _time_mod
 
@@ -4305,6 +4368,22 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
           reasoning_notes=post_race_watch_concert_result.get("reason"),
         )
         if post_race_watch_concert_result.get("handled"):
+          idle_loops = 0
+          sleep(0.8)
+          continue
+
+      inspiration_go_result = _handle_trackblazer_inspiration_go_screen(state_obj, action)
+      if inspiration_go_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Trackblazer inspiration Go screen." if inspiration_go_result.get("handled") else "Trackblazer inspiration Go screen detected but Go was not matched.",
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=inspiration_go_result.get("popup_type"),
+          deferred_work=inspiration_go_result.get("deferred_work"),
+          reasoning_notes=inspiration_go_result.get("reason"),
+        )
+        if inspiration_go_result.get("handled"):
           idle_loops = 0
           sleep(0.8)
           continue
