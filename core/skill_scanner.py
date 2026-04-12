@@ -13,6 +13,7 @@ from utils.tools import get_secs, sleep
 import core.bot as bot
 from time import time as _time
 from queue import Queue
+from collections import OrderedDict
 from functools import lru_cache
 import numpy as np
 import threading
@@ -123,9 +124,25 @@ _SKILL_OCR_STITCH_X_GAP = 190
 _SKILL_OCR_STITCH_MAX_TEXT_LENGTH = 40
 
 
-_SKILL_SHORTLIST_CACHE = {}
-_SKILL_MATCH_CACHE = {}
+_SKILL_SHORTLIST_CACHE_MAX = 64
+_SKILL_MATCH_CACHE_MAX = 256
+_SKILL_SHORTLIST_CACHE = OrderedDict()
+_SKILL_MATCH_CACHE = OrderedDict()
 _SKILL_MATCH_CACHE_LOCK = threading.Lock()
+
+
+def _cache_lookup(cache, key):
+    cached = cache.get(key)
+    if cached is not None:
+        cache.move_to_end(key)
+    return cached
+
+
+def _cache_store(cache, key, value, max_size):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_size:
+        cache.popitem(last=False)
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +812,7 @@ def _normalize_skill_text(text):
 def _normalize_skill_shortlist(skill_shortlist):
     """Pre-normalize shortlist entries once per distinct shortlist."""
     shortlist_key = tuple(skill_shortlist or [])
-    cached = _SKILL_SHORTLIST_CACHE.get(shortlist_key)
+    cached = _cache_lookup(_SKILL_SHORTLIST_CACHE, shortlist_key)
     if cached is not None:
         return cached
 
@@ -819,7 +836,7 @@ def _normalize_skill_shortlist(skill_shortlist):
         })
 
     cached = tuple(normalized)
-    _SKILL_SHORTLIST_CACHE[shortlist_key] = cached
+    _cache_store(_SKILL_SHORTLIST_CACHE, shortlist_key, cached, _SKILL_SHORTLIST_CACHE_MAX)
     return cached
 
 
@@ -1021,9 +1038,10 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
     shortlist_key = tuple(item["skill_normalized"] for item in normalized_shortlist)
     row_signature = _compute_row_signature(ocr_rows)
     cache_key = (row_signature, shortlist_key)
-    cached = _SKILL_MATCH_CACHE.get(cache_key)
-    if cached is not None:
-        return [dict(row) for row in cached]
+    with _SKILL_MATCH_CACHE_LOCK:
+        cached = _cache_lookup(_SKILL_MATCH_CACHE, cache_key)
+        if cached is not None:
+            return [dict(row) for row in cached]
 
     matched_by_skill = {}
     for row_group in _group_ocr_rows_by_physical_row(ocr_rows):
@@ -1135,7 +1153,12 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
         ),
     )
     with _SKILL_MATCH_CACHE_LOCK:
-        _SKILL_MATCH_CACHE[cache_key] = tuple(dict(row) for row in matched)
+        _cache_store(
+            _SKILL_MATCH_CACHE,
+            cache_key,
+            tuple(dict(row) for row in matched),
+            _SKILL_MATCH_CACHE_MAX,
+        )
     return matched
 
 

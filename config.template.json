@@ -1781,6 +1781,7 @@
     "verbose_logging": false,
     "verbose_actions": false,
     "verbose_ocr": false,
+    "easyocr_device": "auto",
     "device_debug": false,
     "save_debug_images": false,
     "turn_trace": {

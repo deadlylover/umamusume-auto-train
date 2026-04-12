@@ -152,6 +152,7 @@ def reload_config(print_config=True):
     load_var('VERBOSE_LOGGING', debug_config.get("verbose_logging", False))
     load_var('VERBOSE_ACTIONS', debug_config.get("verbose_actions", False))
     load_var('VERBOSE_OCR', debug_config.get("verbose_ocr", False))
+    load_var('EASYOCR_DEVICE', str(debug_config.get("easyocr_device", "auto") or "auto").strip().lower())
     load_var('DEVICE_DEBUG_LOGGING', debug_config.get("device_debug", False))
     load_var('SAVE_DEBUG_IMAGES', debug_config.get("save_debug_images", False))
     turn_trace_config = debug_config.get("turn_trace", {})

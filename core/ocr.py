@@ -6,6 +6,14 @@ from utils.log import debug, info, warning
 import core.config as config
 
 
+def _easyocr_device_preference():
+  preference = str(getattr(config, "EASYOCR_DEVICE", "auto") or "auto").strip().lower()
+  if preference not in ("auto", "cpu", "gpu"):
+    warning(f"[OCR] Unknown easyocr_device='{preference}', defaulting to auto.")
+    return "auto"
+  return preference
+
+
 def _easyocr_gpu_supported():
   try:
     import torch
@@ -23,20 +31,47 @@ def _easyocr_gpu_supported():
 
 
 def _build_easyocr_reader():
-  gpu_supported, backend = _easyocr_gpu_supported()
+  preference = _easyocr_device_preference()
+  gpu_supported, detected_backend = _easyocr_gpu_supported()
+
+  if preference == "cpu":
+    use_gpu = False
+    backend = "cpu_forced"
+  elif preference == "gpu":
+    use_gpu = True
+    backend = detected_backend if gpu_supported else "gpu_forced"
+  else:
+    use_gpu = bool(gpu_supported)
+    backend = detected_backend
+
   try:
-    reader_obj = easyocr.Reader(["en"], gpu=bool(gpu_supported), verbose=False)
-    info(f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} (backend={backend}).")
+    reader_obj = easyocr.Reader(["en"], gpu=use_gpu, verbose=False)
+    info(
+      f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} "
+      f"(backend={backend}, preference={preference})."
+    )
     return reader_obj
   except Exception as exc:
-    if gpu_supported:
+    if use_gpu:
       warning(f"[OCR] EasyOCR GPU init failed on {backend} ({exc}); falling back to CPU.")
     reader_obj = easyocr.Reader(["en"], gpu=False, verbose=False)
-    info(f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} (fallback=cpu).")
+    info(
+      f"[OCR] EasyOCR initialized on {getattr(reader_obj, 'device', 'unknown')} "
+      f"(fallback=cpu, preference={preference})."
+    )
     return reader_obj
 
 
-reader = _build_easyocr_reader()
+reader = None
+
+
+def reload_reader():
+  global reader
+  reader = _build_easyocr_reader()
+  return reader
+
+
+reader = reload_reader()
 
 def _log_ocr(tag, text, allowlist, threshold):
   if getattr(config, "VERBOSE_OCR", False):

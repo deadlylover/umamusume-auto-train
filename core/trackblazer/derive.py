@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 from typing import Any, Dict
 
 import core.config as config
@@ -19,7 +20,22 @@ from utils.log import warning
 _SUMMER_TOKENS = ("early jul", "late jul", "early aug", "late aug")
 _MEGAPHONE_KEYS = ("motivating_megaphone", "empowering_megaphone", "coaching_megaphone")
 _STAT_ITEM_PRIORITY = ("manual", "scroll", "notepad")
-_LOOKAHEAD_CACHE = {}
+_LOOKAHEAD_CACHE_MAX = 128
+_LOOKAHEAD_CACHE = OrderedDict()
+
+
+def _lookahead_cache_get(cache_key):
+  cached = _LOOKAHEAD_CACHE.get(cache_key)
+  if cached is not None:
+    _LOOKAHEAD_CACHE.move_to_end(cache_key)
+  return cached
+
+
+def _lookahead_cache_store(cache_key, value):
+  _LOOKAHEAD_CACHE[cache_key] = value
+  _LOOKAHEAD_CACHE.move_to_end(cache_key)
+  while len(_LOOKAHEAD_CACHE) > _LOOKAHEAD_CACHE_MAX:
+    _LOOKAHEAD_CACHE.popitem(last=False)
 
 
 def _safe_ratio(numerator, denominator):
@@ -117,8 +133,9 @@ def _lookahead_summary(state_obj, observed_data, policy):
   turn_key = f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}"
   selector_hash = str(hash(repr(getattr(config, "OPERATOR_RACE_SELECTOR", None))))
   cache_key = (turn_key, selector_hash)
-  if cache_key in _LOOKAHEAD_CACHE:
-    return copy.deepcopy(_LOOKAHEAD_CACHE[cache_key])
+  cached = _lookahead_cache_get(cache_key)
+  if cached is not None:
+    return copy.deepcopy(cached)
 
   lookahead = get_race_lookahead_energy_advice(
     state_obj,
@@ -168,7 +185,7 @@ def _lookahead_summary(state_obj, observed_data, policy):
     "next_g1_distance": g1_distance,
     "next_race_day_distance": next_race_day_distance,
   }
-  _LOOKAHEAD_CACHE[cache_key] = copy.deepcopy(summary)
+  _lookahead_cache_store(cache_key, copy.deepcopy(summary))
   return summary
 
 
