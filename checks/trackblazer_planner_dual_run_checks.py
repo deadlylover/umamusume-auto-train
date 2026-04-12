@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import core.config as config
 import core.trackblazer.planner as planner_module
+import core.trackblazer_item_use as item_use_module
 import utils.constants as constants
 from core.actions import Action
 from core.skeleton import build_review_snapshot
@@ -951,6 +952,89 @@ def main():
     energy_step_sequence = [step.to_dict() for step in energy_turn_plan.step_sequence]
     energy_transition_step = next(step for step in energy_step_sequence if step.get("step_type") == "transition_reassess_after_items")
     assert energy_transition_step.get("metadata", {}).get("transition_kind") == "energy_rescue_reassess", "energy case should expose the explicit reassess transition on the planner step"
+
+    healthy_training_state = _base_state()
+    healthy_training_state["year"] = "Senior Year Early Feb"
+    healthy_training_state["turn"] = 122
+    healthy_training_state["current_mood"] = "GREAT"
+    healthy_training_state["energy_level"] = 67
+    healthy_training_state["max_energy"] = 126
+    healthy_training_state["trackblazer_inventory"] = {
+      "vita_40": {"detected": True, "held_quantity": 1, "increment_target": (1, 1), "category": "energy"},
+      "speed_ankle_weights": {"detected": True, "held_quantity": 1, "increment_target": (2, 2), "category": "training_boost"},
+      "motivating_megaphone": {"detected": True, "held_quantity": 3, "increment_target": (3, 3), "category": "mood"},
+      "good_luck_charm": {"detected": True, "held_quantity": 2, "increment_target": (4, 4), "category": "support"},
+      "coaching_megaphone": {"detected": True, "held_quantity": 1, "increment_target": (5, 5), "category": "mood"},
+      "plain_cupcake": {"detected": True, "held_quantity": 1, "increment_target": (6, 6), "category": "mood"},
+    }
+    healthy_training_state["trackblazer_inventory_summary"] = {
+      "held_quantities": {
+        "vita_40": 1,
+        "speed_ankle_weights": 1,
+        "motivating_megaphone": 3,
+        "good_luck_charm": 2,
+        "coaching_megaphone": 1,
+        "plain_cupcake": 1,
+      },
+      "items_detected": [
+        "vita_40",
+        "speed_ankle_weights",
+        "motivating_megaphone",
+        "good_luck_charm",
+        "coaching_megaphone",
+        "plain_cupcake",
+      ],
+      "actionable_items": [
+        "vita_40",
+        "speed_ankle_weights",
+        "motivating_megaphone",
+        "good_luck_charm",
+        "coaching_megaphone",
+        "plain_cupcake",
+      ],
+      "by_category": {
+        "energy": ["vita_40"],
+        "training_boost": ["speed_ankle_weights"],
+        "mood": ["motivating_megaphone", "coaching_megaphone", "plain_cupcake"],
+        "support": ["good_luck_charm"],
+      },
+      "total_detected": 6,
+    }
+    healthy_training_action = Action()
+    healthy_training_action.func = "do_training"
+    healthy_training_action.available_actions = ["do_training", "do_rest", "do_race"]
+    healthy_training_action["training_name"] = "spd"
+    healthy_training_action["training_function"] = "stat_weight_training"
+    healthy_training_action["training_data"] = {
+      "name": "spd",
+      "weighted_stat_score": 58.0,
+      "score_tuple": (58.0, 0),
+      "stat_gains": {"speed": 39, "power": 19, "sp": 6},
+      "failure": 1,
+      "total_supports": 3,
+      "total_rainbow_friends": 2,
+      "total_friendship_levels": {"blue": 0, "green": 0, "yellow": 0, "max": 3},
+      "failure_bypassed_by_items": False,
+    }
+    healthy_training_action["available_trainings"] = {
+      "spd": dict(healthy_training_action["training_data"]),
+    }
+    healthy_training_plan = item_use_module.plan_item_usage(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=healthy_training_state,
+      action=healthy_training_action,
+      limit=8,
+    )
+    healthy_candidate_keys = [entry.get("key") for entry in healthy_training_plan.get("candidates") or []]
+    healthy_deferred = {
+      entry.get("key"): entry
+      for entry in healthy_training_plan.get("deferred") or []
+      if entry.get("key")
+    }
+    assert "vita_40" not in healthy_candidate_keys, "healthy >50% energy training should not stage Vita just because failure is nonzero"
+    assert set(healthy_candidate_keys[:2]) == {"motivating_megaphone", "speed_ankle_weights"}, healthy_training_plan
+    assert "vita_40" in healthy_deferred, "healthy >50% energy training should explicitly defer the held Vita"
+    assert "energy healthy" in (healthy_deferred["vita_40"].get("reason") or ""), healthy_deferred["vita_40"]
 
     rest_race_state = _base_state()
     rest_race_state["year"] = "Junior Year Late Sep"

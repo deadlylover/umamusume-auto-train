@@ -2866,11 +2866,11 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payloa
       ExecutionStep(
         step_id="replan_pre_action_items",
         step_type="replan_pre_action_items",
-        intent="recompute_pre_action_item_plan",
+        intent="validate_planner_pre_action_item_plan",
         screen_preconditions=["refreshed_inventory_snapshot_ready"],
         success_transition="pre_action_item_plan_ready",
         failure_transition="pre_action_item_plan_failed",
-        notes="Planner-owned replan against the refreshed inventory snapshot.",
+        notes="Validate the planner-owned item payload against the refreshed inventory snapshot.",
         metadata={
           "execution_items": copy.deepcopy(execution_items),
           "reassess_transition": copy.deepcopy(reassess_transition),
@@ -3146,7 +3146,7 @@ def _build_item_execution_payload(action, shop_buy_plan, execution_items, deferr
       {
         "from": "replan_items",
         "to": "execute_pre_action_items",
-        "reason": "planner-owned item execution payload is now authoritative",
+        "reason": "planner-owned item execution payload remains authoritative after inventory refresh",
         "reobserve": False,
         "trigger_items": trigger_items,
       }

@@ -4437,6 +4437,35 @@ def detect_shop_screen(threshold=0.7):
     return False, None, checks
 
 
+def _wait_for_shop_screen_open(max_wait_seconds=1.4, poll_seconds=0.2, threshold=0.7, initial_sleep=0.35):
+    """Poll briefly for the shop screen to finish opening after an entry click."""
+    attempts = []
+    start_t0 = _time()
+
+    if initial_sleep > 0:
+        sleep(initial_sleep)
+
+    while True:
+        poll_t0 = _time()
+        opened, verification_entry, verification_checks = detect_shop_screen(threshold=threshold)
+        attempts.append({
+            "opened": bool(opened),
+            "elapsed": round(_time() - start_t0, 4),
+            "poll_duration": round(_time() - poll_t0, 4),
+            "verification_key": (verification_entry or {}).get("key"),
+            "passed_keys": [
+                check.get("key")
+                for check in (verification_checks or [])
+                if check.get("passed_threshold")
+            ],
+        })
+        if opened:
+            return opened, verification_entry, verification_checks, attempts
+        if (_time() - start_t0) >= max_wait_seconds:
+            return opened, verification_entry, verification_checks, attempts
+        sleep(poll_seconds)
+
+
 def _start_trackblazer_shop_coins_ocr_task():
     """Start shop-coin OCR without blocking the rest of the shop scan."""
     result_queue = Queue(maxsize=1)
@@ -4538,17 +4567,21 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
     clicked = bool(click_metrics.get("clicked"))
 
     t0 = _time()
-    sleep(0.35)
-    timing["sleep"] = round(_time() - t0, 4)
-
-    t0 = _time()
-    shop_open, verification_entry, verification_checks = detect_shop_screen(
-        threshold=max(0.7, threshold - 0.1),
-    ) if clicked else (False, None, [])
+    shop_open = False
+    verification_entry = None
+    verification_checks = []
+    verification_attempts = []
+    if clicked:
+        shop_open, verification_entry, verification_checks, verification_attempts = _wait_for_shop_screen_open(
+            threshold=max(0.7, threshold - 0.1),
+            initial_sleep=0.35,
+        )
     timing["verify"] = round(_time() - t0, 4)
+    timing["verify_attempts"] = len(verification_attempts)
 
     followup_shop_state = None
     followup_click_metrics = None
+    followup_verification_attempts = []
     if clicked and not shop_open and method_name in {"lobby_button", "summer_lobby_button"}:
         t0 = _time()
         followup_shop_state = inspect_shop_entry_state(
@@ -4568,14 +4601,13 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
             timing["followup_click_breakdown"] = followup_click_metrics
 
             t0 = _time()
-            sleep(0.35)
-            timing["followup_sleep"] = round(_time() - t0, 4)
-
-            t0 = _time()
-            shop_open, verification_entry, verification_checks = detect_shop_screen(
-                threshold=max(0.7, threshold - 0.1),
-            ) if followup_click_metrics.get("clicked") else (False, verification_entry, verification_checks)
+            if followup_click_metrics.get("clicked"):
+                shop_open, verification_entry, verification_checks, followup_verification_attempts = _wait_for_shop_screen_open(
+                    threshold=max(0.7, threshold - 0.1),
+                    initial_sleep=0.35,
+                )
             timing["followup_verify"] = round(_time() - t0, 4)
+            timing["followup_verify_attempts"] = len(followup_verification_attempts)
     shop_coins = -1
     if shop_open and read_shop_coins:
         t0 = _time()
@@ -4601,6 +4633,8 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
         "click_metrics": click_metrics,
         "verification": verification_entry,
         "verification_checks": verification_checks,
+        "verification_attempts": verification_attempts,
+        "followup_verification_attempts": followup_verification_attempts,
         "timing": timing,
     }
 

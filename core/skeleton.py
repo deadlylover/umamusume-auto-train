@@ -9,6 +9,7 @@ from pathlib import Path
 
 from utils.tools import sleep, get_secs, click
 from core.state import APTITUDE_BOX_RATIOS, collect_main_state, collect_training_state, collect_trackblazer_inventory, clear_aptitudes_cache, refresh_selected_training_state, get_current_year, get_energy_level, get_turn
+from core.ocr import flush_gpu_cache
 from utils.shared import CleanDefaultDict
 import core.config as config
 from PIL import ImageGrab
@@ -3173,7 +3174,11 @@ def _run_skill_purchase_plan(state_obj, action, current_action_count):
 
 def _refresh_trackblazer_pre_action_inventory(state_obj, action):
   turn_plan = get_turn_plan(state_obj, action, limit=8)
-  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planner_item_execution = {}
+  if hasattr(action, "get"):
+    planner_item_execution = dict(action.get("_trackblazer_planner_item_execution_override") or {})
+  if not planner_item_execution:
+    planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
   planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
   if not planned_items:
     if hasattr(action, "options"):
@@ -3192,19 +3197,11 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
     _cache_trackblazer_inventory(state_obj, turn_key=action_count)
   else:
     _invalidate_trackblazer_inventory_cache()
-  _attach_trackblazer_pre_action_item_plan(state_obj, action)
-  turn_plan = get_turn_plan(state_obj, action, limit=8)
-  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
-  planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
-  if not planned_items:
-    if hasattr(action, "options"):
-      action.options.pop("_trackblazer_planner_item_execution_override", None)
-    return {"status": "skipped", "reason": "trackblazer_pre_action_items_cleared_after_refresh"}
   if hasattr(action, "__setitem__"):
     action["_trackblazer_planner_item_execution_override"] = copy.deepcopy(planner_item_execution)
   return {
     "status": "ready",
-    "reason": "trackblazer_pre_action_items_ready",
+    "reason": "trackblazer_pre_action_items_preserved_after_refresh",
     "turn_plan": turn_plan,
     "planner_item_execution": planner_item_execution,
     "planned_items": planned_items,
@@ -3443,18 +3440,51 @@ def _run_post_energy_item_followup(state_obj, action, sub_phase=None, ocr_debug=
   if recheck_result.get("status") != "ready":
     return recheck_result
 
-  item_plan = plan_item_usage(
-    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=state_obj,
-    action=action,
-    limit=8,
+  planner_state = plan_once(state_obj, action, limit=8) if isinstance(state_obj, dict) else {}
+  planner_turn_plan = TurnPlan.from_snapshot((planner_state or {}).get("turn_plan") or {})
+  planner_item_plan = dict(planner_turn_plan.item_plan or {})
+  planner_selected_action = dict(planner_turn_plan.review_context.get("selected_action") or {})
+  selected_func = str(planner_selected_action.get("func") or getattr(action, "func", "") or "")
+  current_func = str(getattr(action, "func", "") or "")
+  selected_training_name = str(planner_selected_action.get("training_name") or action.get("training_name") or "")
+  current_training_name = str(action.get("training_name") or "")
+  selected_race_name = str(planner_selected_action.get("race_name") or action.get("race_name") or "")
+  current_race_name = str(action.get("race_name") or "")
+  if (
+    selected_func != current_func
+    or (current_func == "do_training" and selected_training_name != current_training_name)
+    or (current_func == "do_race" and selected_race_name != current_race_name)
+  ):
+    return {
+      "status": "reassess",
+      "reason": "planner_changed_selected_action_after_energy_item_use",
+      "training_data": recheck_result.get("training_data"),
+      "turn_plan": planner_turn_plan,
+      "selected_action": planner_selected_action,
+      "planned_clicks": planner_turn_plan.to_planned_clicks(),
+    }
+
+  planner_followup_items = list(
+    planner_item_plan.get("pre_action_items")
+    or (planner_state or {}).get("pre_action_items")
+    or []
   )
-  followup_items = [
-    copy.deepcopy(entry)
-    for entry in list(item_plan.get("candidates") or [])
-    if not _trackblazer_item_requires_reassess(entry)
-  ]
-  action["trackblazer_item_use_context"] = copy.deepcopy(item_plan.get("context") or {})
+  if any(_trackblazer_item_requires_reassess(entry) for entry in planner_followup_items):
+    return {
+      "status": "reassess",
+      "reason": "planner_requested_additional_reassess_item_after_energy_item_use",
+      "training_data": recheck_result.get("training_data"),
+      "turn_plan": planner_turn_plan,
+      "selected_action": planner_selected_action,
+      "planned_clicks": planner_turn_plan.to_planned_clicks(),
+    }
+
+  followup_items = [copy.deepcopy(entry) for entry in planner_followup_items]
+  action["trackblazer_item_use_context"] = copy.deepcopy(
+    planner_item_plan.get("context")
+    or (planner_state or {}).get("item_use_context")
+    or {}
+  )
   action["trackblazer_reassess_after_item_use"] = False
 
   if not followup_items:
@@ -3594,6 +3624,7 @@ def _run_post_reset_whistle_replan(state_obj, action, sub_phase=None, ocr_debug=
   )
   previous_training_results = copy.deepcopy(state_obj.get("training_results") or {})
   state_obj = collect_training_state(state_obj, training_function)
+  flush_gpu_cache()
   refreshed_training_results = copy.deepcopy(state_obj.get("training_results") or {})
   if not refreshed_training_results:
     update_operator_snapshot(
@@ -6199,6 +6230,7 @@ def career_lobby(dry_run_turn=False):
         )
       _restore_turn_from_last_state(state_obj)
       _sync_turn_metrics_context(state_obj, action)
+      flush_gpu_cache()
 
       state_validation = strategy.validate_state_details(state_obj)
       if not state_validation.get("valid"):
@@ -6947,6 +6979,7 @@ def career_lobby(dry_run_turn=False):
           f"training_function={training_function_name}",
           f"options={len(state_obj.get('training_results') or {})}",
         )
+      flush_gpu_cache()
       update_pre_action_phase(
         state_obj,
         action,

@@ -651,7 +651,7 @@ def _build_dim_text_variants(crop):
     return [enhanced, adaptive_mean, adaptive_gaussian]
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=512)
 def _extract_key_tokens(normalized_text):
     tokens = [tok for tok in str(normalized_text or "").split() if tok]
     if not tokens:
@@ -799,17 +799,18 @@ def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
 
-    from core.ocr import reader
+    from core.ocr import get_reader
+    r = get_reader()
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#?() "
     batch_size = _SKILL_OCR_CPU_BATCH_SIZE
-    if str(getattr(reader, "device", "cpu")) != "cpu":
+    if str(getattr(r, "device", "cpu")) != "cpu":
         batch_size = _SKILL_OCR_GPU_BATCH_SIZE
     _bbox_left, bbox_top, _bbox_right, _bbox_bottom = [int(v) for v in constants.SKILL_NAME_BAND_BBOX]
 
     normal_rows = _run_skill_name_ocr_pass(
         crop,
         bbox_top,
-        reader,
+        r,
         allowlist,
         batch_size,
         ocr_variant="normal",
@@ -823,7 +824,7 @@ def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
             _run_skill_name_ocr_pass(
                 dim_crop,
                 bbox_top,
-                reader,
+                r,
                 allowlist,
                 batch_size,
                 ocr_variant="dim",
@@ -834,7 +835,7 @@ def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
     return _dedupe_ocr_rows(merged_base + stitched_rows)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=512)
 def _normalize_skill_text(text):
     """Normalize OCR/shortlist text for matching."""
     text = str(text or "")
@@ -1295,10 +1296,11 @@ def _detect_obtained_text_tokens(screenshot):
     )
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
-    from core.ocr import reader
+    from core.ocr import get_reader
+    r = get_reader()
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
     batch_size = _SKILL_OCR_CPU_BATCH_SIZE
-    if str(getattr(reader, "device", "cpu")) != "cpu":
+    if str(getattr(r, "device", "cpu")) != "cpu":
         batch_size = _SKILL_OCR_GPU_BATCH_SIZE
     _scroll_left, scroll_top, _scroll_right, _scroll_bottom = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
     ocr_inputs = [crop]
@@ -1306,7 +1308,7 @@ def _detect_obtained_text_tokens(screenshot):
     matches = []
     seen = {}
     for candidate in ocr_inputs:
-        raw_results = reader.readtext(
+        raw_results = r.readtext(
             candidate,
             allowlist=allowlist,
             detail=1,

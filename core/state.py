@@ -10,7 +10,7 @@ from PIL import Image
 from utils.log import info, warning, error, debug, debug_window, args
 
 from utils.screenshot import enhanced_screenshot, enhance_image_for_ocr, binarize_between_colors, crop_after_plus_component, clean_noise, custom_grabcut
-from core.ocr import extract_text, extract_number, extract_allowed_text, reader
+from core.ocr import extract_text, extract_number, extract_allowed_text, get_reader
 from core.recognizer import count_pixels_of_color, find_color_of_pixel, closest_color, compare_brightness
 from utils.tools import click, sleep, get_secs, check_race_suitability, get_aptitude_index
 import utils.device_action_wrapper as device_action
@@ -1344,7 +1344,7 @@ def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None, m
 
   img_np = np.array(enhanced)
   for threshold in threshold_values:
-    result = reader.readtext(img_np, allowlist=allowlist, text_threshold=threshold)
+    result = get_reader().readtext(img_np, allowlist=allowlist, text_threshold=threshold)
     # Filter by recognition confidence to discard ghost detections from
     # button edges / background noise that EasyOCR's text detector picks up
     # but the recogniser scores very low.

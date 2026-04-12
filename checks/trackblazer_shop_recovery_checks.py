@@ -20,6 +20,44 @@ def _entry(key, passed=False, score=0.0):
 
 
 class TrackblazerShopRecoveryChecks(unittest.TestCase):
+    def test_enter_shop_retries_verification_after_click(self):
+        shop_state = {
+            "best_method": {
+                "method": "lobby_button",
+                "matched": True,
+                "entry": {
+                    "click_target": (320, 1280),
+                },
+            }
+        }
+
+        with patch.object(
+            trackblazer,
+            "inspect_shop_entry_state",
+            return_value=shop_state,
+        ), patch.object(
+            trackblazer.device_action,
+            "click_with_metrics",
+            return_value={"clicked": True},
+        ), patch.object(
+            trackblazer,
+            "detect_shop_screen",
+            side_effect=[
+                (False, None, []),
+                (True, _entry("shop_confirm", passed=True, score=0.99), [_entry("shop_confirm", passed=True, score=0.99)]),
+            ],
+        ), patch.object(
+            trackblazer,
+            "sleep",
+            return_value=None,
+        ):
+            result = trackblazer.enter_shop(threshold=0.8, read_shop_coins=False)
+
+        self.assertTrue(result.get("clicked"))
+        self.assertTrue(result.get("entered"))
+        self.assertEqual(result.get("reason"), "clicked_lobby_button_shop")
+        self.assertEqual(len(result.get("verification_attempts") or []), 2)
+
     def test_execute_shop_purchase_failure_preserves_live_scan_state(self):
         shared_scan = {
             "all_items": ["stamina_manual"],

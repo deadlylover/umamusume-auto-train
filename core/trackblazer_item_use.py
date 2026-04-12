@@ -2092,16 +2092,21 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return None
     if not (context["summer_window"] or context["high_value_training"]):
       return None
-    # When fail is already 0% and energy is above half, the energy item won't
-    # change this turn's outcome — no fail to reduce, no training gain boost.
-    # Only spend energy items when they actually matter: high fail risk, or
+    # When fail is already tolerable and energy is above half, the energy item
+    # usually won't change this turn's outcome enough to justify consuming a
+    # Vita outside lower-energy commit windows. Only spend energy items when
+    # they actually matter: fail risk is above the normal allowed threshold, or
     # energy is genuinely low enough that the deficit threatens upcoming turns.
     energy_ratio = context["energy_level"] / max(context["max_energy"], 1)
-    if context["failure_rate"] <= 0 and energy_ratio > 0.5:
+    if (
+      context["failure_rate"] <= context.get("max_allowed_failure", 5)
+      and energy_ratio >= 0.5
+    ):
       return {
         "defer_reason": (
-          f"fail already 0% and energy healthy ({context['energy_level']}"
-          f"/{context['max_energy']}); item would not affect this turn"
+          f"fail already tolerable ({context['failure_rate']}% <= "
+          f"{context.get('max_allowed_failure', 5)}%) and energy healthy "
+          f"({context['energy_level']}/{context['max_energy']}); item would not affect this turn enough"
         ),
       }
     reason_parts = [f"energy deficit {context['energy_deficit']}"]

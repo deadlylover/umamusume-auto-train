@@ -1,4 +1,3 @@
-import easyocr
 from PIL import Image
 import numpy as np
 import re
@@ -31,6 +30,7 @@ def _easyocr_gpu_supported():
 
 
 def _build_easyocr_reader():
+  import easyocr
   preference = _easyocr_device_preference()
   gpu_supported, detected_backend = _easyocr_gpu_supported()
 
@@ -65,13 +65,41 @@ def _build_easyocr_reader():
 reader = None
 
 
+def get_reader():
+  """Return the EasyOCR reader, initializing on first call."""
+  global reader
+  if reader is None:
+    reader = _build_easyocr_reader()
+  return reader
+
+
 def reload_reader():
+  """Force-rebuild the EasyOCR reader (e.g. after config change)."""
   global reader
   reader = _build_easyocr_reader()
   return reader
 
 
-reader = reload_reader()
+def flush_gpu_cache():
+  """Release MPS/CUDA memory pools held by PyTorch after OCR batches.
+
+  On Apple Silicon, the MPS backend keeps multi-GB memory pools mapped into
+  the process address space even when idle.  Calling this after OCR-heavy
+  phases (state collection, training scan, skill scan) lets the OS reclaim
+  those pages so the process footprint stays closer to real RSS.
+  """
+  if reader is None:
+    return
+  try:
+    import torch
+  except Exception:
+    return
+  mps = getattr(torch.backends, "mps", None)
+  if mps is not None and mps.is_available() and hasattr(torch.mps, "empty_cache"):
+    torch.mps.empty_cache()
+  elif torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 
 def _log_ocr(tag, text, allowlist, threshold):
   if getattr(config, "VERBOSE_OCR", False):
@@ -81,23 +109,24 @@ def extract_text(pil_img: Image.Image, use_recognize=False, allowlist=None, thre
   img_np = np.array(pil_img)
   if allowlist is None:
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#? "
+  r = get_reader()
   if use_recognize:
     if threshold is not None:
-      result = reader.recognize(img_np, allowlist=allowlist, text_threshold=threshold)
+      result = r.recognize(img_np, allowlist=allowlist, text_threshold=threshold)
     else:
-      result = reader.recognize(img_np, allowlist=allowlist)
+      result = r.recognize(img_np, allowlist=allowlist)
   else:
     if threshold is not None:
-      result = reader.readtext(img_np, allowlist=allowlist, text_threshold=threshold)
+      result = r.readtext(img_np, allowlist=allowlist, text_threshold=threshold)
     else:
-      result = reader.readtext(img_np, allowlist=allowlist)
+      result = r.readtext(img_np, allowlist=allowlist)
   texts = sort_ocr_result(result)
   _log_ocr("text", texts, allowlist, threshold)
   return texts
 
 def extract_number(pil_img: Image.Image, allowlist="0123456789", threshold=0.8) -> int:
   img_np = np.array(pil_img)
-  result = reader.readtext(img_np, allowlist=allowlist, text_threshold=threshold)
+  result = get_reader().readtext(img_np, allowlist=allowlist, text_threshold=threshold)
   texts = [item[1] for item in sorted(result, key=lambda x: x[0][0][0])]
   joined_text = "".join(texts)
 
@@ -111,7 +140,7 @@ def extract_number(pil_img: Image.Image, allowlist="0123456789", threshold=0.8) 
 
 def extract_allowed_text(pil_img: Image.Image, allowlist="0123456789") -> int:
   img_np = np.array(pil_img)
-  result = reader.readtext(img_np, allowlist=allowlist)
+  result = get_reader().readtext(img_np, allowlist=allowlist)
   texts = [item[1] for item in sorted(result, key=lambda x: x[0][0][0])]
   output = " ".join(texts)
   _log_ocr("allowed_text", output, allowlist, None)
