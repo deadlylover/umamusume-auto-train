@@ -495,6 +495,46 @@ def _finalize_waterfall_summary(flow, live_index, timeout=10.0):
     flow["frame_signatures_unique"] = live_index.get_unique_signature_count()
 
 
+def _compact_target_match(row):
+    row = row if isinstance(row, dict) else {}
+    return {
+        "match_name": row.get("match_name"),
+        "match_score": row.get("match_score"),
+        "confidence": row.get("confidence"),
+        "match_type": row.get("match_type"),
+        "name_match_method": row.get("name_match_method"),
+        "ocr_variant": row.get("ocr_variant"),
+        "chosen_variant": row.get("chosen_variant"),
+        "ocr_variants_seen": list(row.get("ocr_variants_seen") or []),
+        "consensus_score": row.get("consensus_score"),
+        "token_evidence": dict(row.get("token_evidence") or {}),
+        "reject_reason": row.get("reject_reason") or "",
+        "obtained": bool(row.get("obtained")),
+        "obtained_evidence": row.get("obtained_evidence") or ("template" if row.get("obtained") else "none"),
+        "increment_match": list(row.get("increment_match")) if row.get("increment_match") else None,
+        "increment_pairing": row.get("increment_pairing"),
+        "increment_vertical_distance": row.get("increment_vertical_distance"),
+    }
+
+
+def _compact_analyzed_frame(frame):
+    frame = frame if isinstance(frame, dict) else {}
+    ocr_rows = list(frame.get("ocr_rows") or [])
+    matched_targets = list(frame.get("matched_targets") or [])
+    return {
+        "index": frame.get("index"),
+        "elapsed": frame.get("elapsed"),
+        "ocr_rows_count": frame.get("ocr_rows_count", len(ocr_rows)),
+        "ocr_text_samples": [str(row.get("text_raw") or "") for row in ocr_rows[:12] if row.get("text_raw")],
+        "matched_targets": [_compact_target_match(row) for row in matched_targets],
+        "increment_count": frame.get("increment_count", 0),
+        "scrollbar": dict(frame.get("scrollbar") or {}),
+        "row_signature": frame.get("row_signature", ""),
+        "final": bool(frame.get("final")),
+        "timing": dict(frame.get("timing") or {}),
+    }
+
+
 # ---------------------------------------------------------------------------
 # OCR extraction from the name band
 # ---------------------------------------------------------------------------
@@ -1627,9 +1667,10 @@ def _capture_skill_frames_during_scrollbar_drag(
                         frame_payload.get("screenshot"),
                         frame_summary=frame_summary,
                     )
-                analyzed_frames.append(analyzed)
+                compact_frame = _compact_analyzed_frame(analyzed)
+                analyzed_frames.append(compact_frame)
                 if live_index is not None:
-                    live_index.append(analyzed)
+                    live_index.append(compact_frame)
             finally:
                 analysis_queue.task_done()
 
@@ -2082,14 +2123,14 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
         # --- Step 3: Capture initial still frame at top ---
         info("Skill scanner: capturing initial still frame at top...")
         initial_screenshot = _capture_live_skill_screenshot()
-        initial_frame = _analyze_skill_frame({
+        initial_frame = _compact_analyzed_frame(_analyze_skill_frame({
             "index": -1,
             "elapsed": 0.0,
             "capture_elapsed": 0.0,
             "screenshot": initial_screenshot,
             "skill_shortlist": skill_shortlist,
             "normalized_shortlist": normalized_shortlist,
-        })
+        }))
         if debug_session_dir is not None:
             _save_skill_runtime_debug_frame(
                 debug_session_dir,
@@ -2132,7 +2173,7 @@ def scan_and_increment_skill(target_skill=None, skill_shortlist=None, dry_run=Tr
                 )
                 flow["bottom_completion_result"] = bottom_completion
                 for frame in extra_frames:
-                    live_index.append(frame)
+                    live_index.append(_compact_analyzed_frame(frame))
         else:
             info("Skill scanner: list is not scrollable, only initial frame available.")
             live_index.mark_done()
@@ -3002,14 +3043,14 @@ def _start_buffered_preview_scan(target_skills, save_debug_frames=False, debug_s
         scrollbar = inspect_skill_scrollbar()
 
     initial_screenshot = _capture_live_skill_screenshot()
-    initial_frame = _analyze_skill_frame({
+    initial_frame = _compact_analyzed_frame(_analyze_skill_frame({
         "index": -1,
         "elapsed": 0.0,
         "capture_elapsed": 0.0,
         "screenshot": initial_screenshot,
         "skill_shortlist": skill_shortlist,
         "normalized_shortlist": normalized_shortlist,
-    })
+    }))
     if debug_session_dir is not None:
         _save_skill_runtime_debug_frame(
             debug_session_dir,
@@ -3051,7 +3092,7 @@ def _start_buffered_preview_scan(target_skills, save_debug_frames=False, debug_s
             )
             flow["bottom_completion_result"] = bottom_completion
             for frame in extra_frames:
-                live_index.append(frame)
+                live_index.append(_compact_analyzed_frame(frame))
     else:
         live_index.mark_done()
 
@@ -3230,13 +3271,13 @@ def scan_and_increment_skills(target_skills, dry_run=False,
             scrollbar = inspect_skill_scrollbar()
 
         initial_screenshot = _capture_live_skill_screenshot()
-        initial_frame = _analyze_skill_frame({
+        initial_frame = _compact_analyzed_frame(_analyze_skill_frame({
             "index": -1,
             "elapsed": 0.0,
             "capture_elapsed": 0.0,
             "screenshot": initial_screenshot,
             "skill_shortlist": skill_shortlist,
-        })
+        }))
         if debug_session_dir is not None:
             _save_skill_runtime_debug_frame(
                 debug_session_dir,
@@ -3278,7 +3319,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                 )
                 flow["bottom_completion_result"] = bottom_completion
                 for frame in extra_frames:
-                    live_index.append(frame)
+                    live_index.append(_compact_analyzed_frame(frame))
         else:
             live_index.mark_done()
 
@@ -3436,8 +3477,9 @@ def _log_scan_debug(flow, all_frames):
     """Log a debug summary of the scan for troubleshooting."""
     all_texts = set()
     for frame in (all_frames or []):
-        for row in frame.get("ocr_rows", []):
-            all_texts.add(row.get("text_raw", ""))
+        for text in frame.get("ocr_text_samples", []):
+            if text:
+                all_texts.add(text)
     if all_texts:
         debug(f"Skill scanner: all OCR text seen ({len(all_texts)} unique): "
               f"{sorted(all_texts)[:20]}...")
