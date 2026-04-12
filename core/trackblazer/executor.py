@@ -39,7 +39,7 @@ class PlannerExecutorHooks:
 
 def _step_present(turn_plan: TurnPlan, step_type: str) -> bool:
   for step in list(turn_plan.step_sequence or []):
-    if getattr(step, "step_type", "") == step_type:
+    if getattr(step, "step_type", "") == step_type or getattr(step, "step_id", "") == step_type:
       return True
   return False
 

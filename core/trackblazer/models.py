@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 
 _SKILL_SCAN_STATES = ("queued", "capturing", "processing", "ready", "stale", "failed")
+_SHOP_SCAN_STATES = ("idle", "queued", "satisfied", "failed")
 
 
 def _is_empty_render_value(value: Any) -> bool:
@@ -39,6 +40,23 @@ class BackgroundSkillScanState:
 
 
 @dataclass
+class PendingShopScanState:
+  status: str = "idle"
+  turn_key: str = ""
+  reason: str = ""
+  source: str = ""
+  shop_status: str = ""
+  shop_turn_key: str = ""
+
+  def __post_init__(self):
+    if self.status not in _SHOP_SCAN_STATES:
+      self.status = "idle"
+
+  def to_dict(self) -> Dict[str, Any]:
+    return asdict(self)
+
+
+@dataclass
 class PlannerFreshness:
   turn_key: str = ""
   observation_id: str = ""
@@ -56,6 +74,7 @@ class PlannerRuntimeState:
   latest_observation_id: str = ""
   scan_cadence: Dict[str, Any] = field(default_factory=dict)
   pending_skill_scan: BackgroundSkillScanState = field(default_factory=BackgroundSkillScanState)
+  pending_shop_scan: PendingShopScanState = field(default_factory=PendingShopScanState)
   fallback_count: int = 0
   last_fallback_reason: str = ""
   runtime_path: str = "legacy_runtime"
@@ -66,6 +85,7 @@ class PlannerRuntimeState:
   def to_dict(self) -> Dict[str, Any]:
     payload = asdict(self)
     payload["pending_skill_scan"] = self.pending_skill_scan.to_dict()
+    payload["pending_shop_scan"] = self.pending_shop_scan.to_dict()
     return payload
 
 
@@ -735,6 +755,9 @@ def _format_shop_lines(planned, state_summary):
   status_line = f"  Scan: {status}"
   if shop_coins not in (None, ""):
     status_line += f" | coins: {shop_coins}"
+  pending_reason = shop_scan.get("pending_reason")
+  if pending_reason and status == "queued":
+    status_line += f" | reason: {pending_reason}"
   lines.append(status_line)
 
   would_buy = planned.get("would_buy") or []

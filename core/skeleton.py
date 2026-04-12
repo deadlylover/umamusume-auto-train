@@ -453,6 +453,51 @@ def _merge_trackblazer_shop_result(state_obj, shop_result):
   return state_obj
 
 
+def _set_planner_pending_shop_scan_state(state_obj, *, status, reason="", source=""):
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  pending = dict(runtime_state.get("pending_shop_scan") or {})
+  pending.update({
+    "status": str(status or "idle"),
+    "turn_key": f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}",
+    "reason": str(reason or ""),
+    "source": str(source or ""),
+  })
+  runtime_state["pending_shop_scan"] = pending
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  return pending
+
+
+def _sync_planner_pending_shop_scan_request(state_obj):
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  pending = dict(runtime_state.get("pending_shop_scan") or {})
+  current_turn_key = f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}"
+  pending_status = str(pending.get("status") or "idle")
+  pending_turn_key = str(pending.get("turn_key") or "")
+  pending_reason = str(pending.get("reason") or "")
+  active_pending_reason = bot.get_pending_trackblazer_shop_check_reason()
+  active_pending_is_planner = active_pending_reason.startswith("planner_")
+
+  if pending_status == "queued" and pending_turn_key == current_turn_key:
+    if (
+      not bot.has_pending_trackblazer_shop_check()
+      or (active_pending_is_planner and active_pending_reason != (pending_reason or "planner_refresh_missing_shop_state"))
+    ):
+      bot.request_trackblazer_shop_check(pending_reason or "planner_refresh_missing_shop_state")
+      info(
+        "[TB_SHOP] Planner queued a shop refresh before the normal lobby gate. "
+        f"reason={pending_reason or 'planner_refresh_missing_shop_state'}."
+      )
+    return pending
+
+  if active_pending_is_planner:
+    bot.clear_trackblazer_shop_check_request()
+  return pending
+
+
 def _trackblazer_turn_key(state_obj):
   if not isinstance(state_obj, dict):
     return None
@@ -6346,6 +6391,7 @@ def career_lobby(dry_run_turn=False):
             _invalidate_trackblazer_inventory_cache()
         _copy_trackblazer_inventory_snapshot(state_obj)
         current_trackblazer_turn = _trackblazer_turn_key(state_obj)
+        _sync_planner_pending_shop_scan_request(state_obj)
         pending_shop_check = bot.has_pending_trackblazer_shop_check()
         pending_shop_reason = bot.get_pending_trackblazer_shop_check_reason()
         never_scanned = last_trackblazer_shop_refresh_turn is None
@@ -6402,6 +6448,12 @@ def career_lobby(dry_run_turn=False):
           if shop_flow.get("entered") or shop_flow.get("scan_result") or shop_flow.get("closed"):
             _merge_trackblazer_shop_result(state_obj, shop_result)
           if shop_entry_result.get("clicked") and not shop_flow.get("entered"):
+            _set_planner_pending_shop_scan_state(
+              state_obj,
+              status="failed",
+              reason=shop_flow.get("reason") or "shop_verification_failed",
+              source="shop_entry_verification_failed",
+            )
             warning(
               "[TB_SHOP] Shop entry clicked but was not verified; "
               "waiting for lobby recovery before deciding whether to continue or retry."
@@ -6465,6 +6517,12 @@ def career_lobby(dry_run_turn=False):
               )
               continue
           if pending_shop_check and not shop_flow.get("entered"):
+            _set_planner_pending_shop_scan_state(
+              state_obj,
+              status="failed",
+              reason=shop_entry_reason,
+              source="shop_entry_failed",
+            )
             if _trackblazer_planner_mode_enabled():
               shop_flow["planner_retry_suppressed"] = True
               state_obj["trackblazer_shop_flow"] = shop_flow
@@ -6625,6 +6683,11 @@ def career_lobby(dry_run_turn=False):
           if state_obj.get("trackblazer_climax_race_day"):
             info("[TB_RACE] Forced Climax race day visible after shop; skipping post-shop inventory refresh.")
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+            _set_planner_pending_shop_scan_state(
+              state_obj,
+              status="satisfied",
+              source="shop_scan_completed",
+            )
             bot.clear_trackblazer_shop_check_request()
           elif ready_after_shop_scan:
             bot.push_debug_history({
@@ -6636,6 +6699,11 @@ def career_lobby(dry_run_turn=False):
               "reason": "shop_scan_only_no_purchase_state_change",
             })
             last_trackblazer_shop_refresh_turn = current_trackblazer_turn
+            _set_planner_pending_shop_scan_state(
+              state_obj,
+              status="satisfied",
+              source="shop_scan_completed",
+            )
             bot.clear_trackblazer_shop_check_request()
           elif pending_shop_check:
             bot.push_debug_history({

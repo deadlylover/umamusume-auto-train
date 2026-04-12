@@ -32,6 +32,7 @@ from core.trackblazer_shop import get_dynamic_shop_limits, get_effective_shop_it
 from core.trackblazer.models import (
   BackgroundSkillScanState,
   ExecutionStep,
+  PendingShopScanState,
   PlannerFreshness,
   PlannerRuntimeState,
   TurnPlan,
@@ -342,11 +343,13 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     or RUNTIME_PATH_LEGACY_RUNTIME
   )
   pending_skill_scan = BackgroundSkillScanState(**dict(existing.get("pending_skill_scan") or {}))
+  pending_shop_scan = PendingShopScanState(**dict(existing.get("pending_shop_scan") or {}))
   runtime = PlannerRuntimeState(
     turn_key=str(existing.get("turn_key") or _turn_key(state_obj)),
     latest_observation_id=str(existing.get("latest_observation_id") or ""),
     scan_cadence=dict(existing.get("scan_cadence") or {}),
     pending_skill_scan=pending_skill_scan,
+    pending_shop_scan=pending_shop_scan,
     fallback_count=int(existing.get("fallback_count") or 0),
     last_fallback_reason=str(existing.get("last_fallback_reason") or ""),
     runtime_path=_normalize_runtime_path(runtime_path),
@@ -3027,6 +3030,83 @@ def _shop_scan_status(shop_flow):
   return shop_status
 
 
+def _summary_turn_key(summary):
+  if not isinstance(summary, dict):
+    return ""
+  year = summary.get("year")
+  turn = summary.get("turn")
+  if not year or not turn:
+    return ""
+  return f"{year}|{turn}"
+
+
+def _resolve_pending_shop_scan_state(
+  *,
+  state_obj,
+  runtime_state,
+  decision_path,
+  shop_flow,
+  shop_summary,
+):
+  current_turn_key = _turn_key(state_obj)
+  existing = PendingShopScanState(**dict((runtime_state or {}).get("pending_shop_scan") or {}))
+  if decision_path == "legacy":
+    return PendingShopScanState(
+      status="idle",
+      turn_key=current_turn_key,
+      reason="",
+      source="planner_runtime_disabled",
+      shop_status=_shop_scan_status(shop_flow),
+      shop_turn_key=_summary_turn_key(shop_summary),
+    )
+
+  shop_status = _shop_scan_status(shop_flow)
+  shop_turn_key = _summary_turn_key(shop_summary)
+  has_shop_payload = bool(
+    (state_obj.get("trackblazer_shop_items") or [])
+    or (shop_summary or {}).get("items_detected")
+    or (shop_summary or {}).get("purchasable_items")
+    or shop_flow
+  )
+  shop_current_turn = bool(shop_turn_key and shop_turn_key == current_turn_key)
+
+  reason = ""
+  source = ""
+  status = "satisfied"
+  if shop_status == "scanned" and shop_current_turn:
+    status = "satisfied"
+    source = "shop_scan_current_turn"
+  elif shop_status == "open_failed_to_close":
+    status = "queued"
+    reason = "planner_retry_shop_close_failure"
+    source = "shop_overlay_unsettled"
+  elif shop_status == "failed":
+    status = "queued"
+    reason = "planner_retry_shop_scan_failure"
+    source = "shop_scan_failed"
+  elif shop_turn_key and not shop_current_turn:
+    status = "queued"
+    reason = "planner_refresh_stale_shop_turn"
+    source = "shop_turn_mismatch"
+  elif not has_shop_payload:
+    status = "queued"
+    reason = "planner_refresh_missing_shop_state"
+    source = "shop_state_missing"
+  elif shop_status == "skipped":
+    status = "queued"
+    reason = existing.reason or "planner_refresh_deferred_shop_scan"
+    source = "shop_scan_skipped"
+
+  return PendingShopScanState(
+    status=status,
+    turn_key=current_turn_key,
+    reason=reason,
+    source=source,
+    shop_status=shop_status,
+    shop_turn_key=shop_turn_key,
+  )
+
+
 def _action_func(action):
   return getattr(action, "func", None) if action is not None else None
 
@@ -4102,6 +4182,15 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
     available_trainings=copy.deepcopy(planner_action.get("available_trainings") or {}) if hasattr(planner_action, "get") else {},
     training_function=planner_action.get("training_function") if hasattr(planner_action, "get") else None,
   )
+  pending_shop_scan = _resolve_pending_shop_scan_state(
+    state_obj=state_obj,
+    runtime_state=runtime_state,
+    decision_path=decision_path,
+    shop_flow=shop_flow,
+    shop_summary=shop_summary,
+  )
+  runtime_state["pending_shop_scan"] = pending_shop_scan.to_dict()
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
 
   turn_plan = TurnPlan(
     version=PLANNER_VERSION,
@@ -4116,14 +4205,25 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
       "shop_summary": copy.deepcopy(shop_summary),
       "effective_shop_items": copy.deepcopy(effective_shop_items),
       "scan": {
-        "status": _shop_scan_status(shop_flow),
-        "reason": (shop_flow or {}).get("reason") or "",
+        "status": (
+          "queued"
+          if pending_shop_scan.status == "queued" else
+          _shop_scan_status(shop_flow)
+        ),
+        "reason": (
+          pending_shop_scan.reason
+          if pending_shop_scan.status == "queued" else
+          ((shop_flow or {}).get("reason") or "")
+        ),
         "shop_coins": shop_summary.get("shop_coins", state_obj.get("shop_coins")),
         "items_detected": (state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items,
         "not_purchasable": sorted(
           set((state_obj.get("trackblazer_shop_summary") or {}).get("items_detected") or shop_items or [])
           - set((state_obj.get("trackblazer_shop_summary") or {}).get("purchasable_items") or shop_items or [])
         ),
+        "pending_reason": pending_shop_scan.reason,
+        "pending_source": pending_shop_scan.source,
+        "shop_turn_key": pending_shop_scan.shop_turn_key,
       },
     },
     item_plan={
