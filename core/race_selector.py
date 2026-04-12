@@ -282,6 +282,15 @@ def get_race_gate_for_turn_label(turn_label, selector):
   return gate
 
 
+def get_selected_race_for_turn_label(turn_label, selector, require_allowed=True):
+  gate = get_race_gate_for_turn_label(turn_label, selector)
+  if not gate.get("enabled"):
+    return None
+  if require_allowed and not gate.get("race_allowed"):
+    return None
+  return gate.get("selected_race") or None
+
+
 def summarize_selector_state(selector, legacy_schedule=None, use_ui_fallback=False):
   if use_ui_fallback:
     normalized = get_selector_ui_state(selector, legacy_schedule=legacy_schedule)

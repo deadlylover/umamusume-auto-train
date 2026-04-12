@@ -644,6 +644,48 @@ def main():
     assert "Action: train stamina" in planner_text, "TurnPlan discussion should render from planner-owned selected_action context"
     assert "Race Gate Reason: synthetic planner-owned selected_action view" in planner_text, "TurnPlan discussion should render planner-owned race summary"
 
+    stale_item_state, stale_item_action = _prepare_case("training")
+    stale_item_action["trackblazer_pre_action_items"] = [
+      {
+        "key": "grilled_carrots",
+        "name": "Grilled Carrots",
+        "usage_group": "energy",
+        "reason": "synthetic stale action payload",
+      }
+    ]
+    stale_item_action["trackblazer_reassess_after_item_use"] = True
+    with patch(
+      "core.trackblazer.planner.plan_item_usage",
+      return_value={
+        "context": {
+          "training_name": "speed",
+          "training_score": 42.0,
+          "energy_rescue": False,
+          "commit_training_after_items": True,
+        },
+        "candidates": [
+          {
+            "key": "motivating_megaphone",
+            "name": "Motivating Megaphone",
+            "usage_group": "training_burst",
+            "reason": "synthetic planner-owned burst item",
+          }
+        ],
+        "deferred": [],
+      },
+    ):
+      stale_item_snapshot = build_review_snapshot(
+        stale_item_state,
+        stale_item_action,
+        reasoning_notes="synthetic stale action payload case",
+        ocr_debug=[],
+      )
+    stale_selected_action = stale_item_snapshot.get("selected_action") or {}
+    assert [entry.get("key") for entry in stale_selected_action.get("pre_action_item_use") or []] == ["motivating_megaphone"], "review snapshot should ignore stale live action items when planner mode owns the turn"
+    stale_turn_discussion = stale_item_snapshot.get("turn_discussion_text") or ""
+    assert "Action: use Motivating Megaphone -> " in stale_turn_discussion, "turn discussion should render planner-owned pre-action items"
+    assert "Action: use Grilled Carrots" not in stale_turn_discussion, "turn discussion should not leak stale live action items into planner-owned review text"
+
     freshness_state, freshness_action = _prepare_case("training")
     freshness_initial = build_review_snapshot(
       freshness_state,

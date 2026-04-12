@@ -1597,6 +1597,95 @@ def _operator_race_gate_message(gate, context="racing"):
   return message
 
 
+def _planner_pre_training_locked_race(state_obj, action, strategy):
+  if not _trackblazer_planner_mode_enabled():
+    return None
+  if not isinstance(state_obj, dict) or not hasattr(action, "__setitem__"):
+    return None
+  if state_obj.get("year") == "Junior Year Pre-Debut":
+    return None
+
+  year = state_obj.get("year")
+  if state_obj.get("trackblazer_climax_race_day"):
+    action.func = "do_race"
+    action["is_race_day"] = True
+    action["year"] = year
+    action["trackblazer_climax_race_day"] = True
+    action["trackblazer_race_decision"] = {
+      "should_race": True,
+      "reason": "Forced Climax race-day indicator detected on lobby screen",
+      "forced_race_day": True,
+      "race_available": True,
+      "rival_indicator": False,
+      "prefer_rival_race": False,
+      "g1_forced": True,
+      "race_name": "any",
+    }
+    return {
+      "reason": "forced_climax_race_day",
+      "message": "Forced Climax race day detected. Skipping training scan and preparing race entry.",
+      "review_message": "Forced Climax race day detected. Review before entering race.",
+    }
+
+  if state_obj.get("turn") == "Race Day":
+    action.func = "do_race"
+    action["is_race_day"] = True
+    action["year"] = year
+    action["trackblazer_climax_race_day"] = False
+    action["trackblazer_race_decision"] = {
+      "should_race": True,
+      "reason": "Turn OCR reports Race Day",
+      "forced_race_day": True,
+      "race_available": True,
+      "rival_indicator": False,
+      "prefer_rival_race": False,
+      "g1_forced": True,
+      "race_name": "any",
+    }
+    return {
+      "reason": "race_day",
+      "message": "Race Day detected. Skipping training scan and preparing race entry.",
+      "review_message": "Race Day detected. Review before entering race.",
+    }
+
+  action = strategy.check_scheduled_races(state_obj, action)
+  if action.get("scheduled_race"):
+    action.func = "do_race"
+    race_name = action.get("race_name") or "any"
+    source = action.get("scheduled_race_source") or "config_schedule"
+    if source == "operator_selector":
+      message = f"Selected race detected ({race_name}). Skipping training scan and preparing race entry."
+      review_message = f"Selected race {race_name} detected. Review before entering race."
+      reason = "selected_race"
+    else:
+      message = f"Scheduled race detected ({race_name}). Skipping training scan and preparing race entry."
+      review_message = f"Scheduled race {race_name} detected. Review before entering race."
+      reason = "scheduled_race"
+    return {
+      "reason": reason,
+      "message": message,
+      "review_message": review_message,
+    }
+
+  if state_obj.get("trackblazer_lobby_scheduled_race"):
+    action.func = "do_race"
+    action["scheduled_race"] = True
+    action["trackblazer_lobby_scheduled_race"] = True
+    action["race_name"] = action.get("race_name") or "any"
+    action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
+      state_obj,
+      getattr(config, "OPERATOR_RACE_SELECTOR", None),
+    )
+    action["trackblazer_race_lookahead_energy_item_key"] = None
+    return {
+      "reason": "lobby_scheduled_race",
+      "message": "Trackblazer scheduled race button detected. Skipping training scan and preparing race entry.",
+      "review_message": "Trackblazer scheduled race detected. Review before entering race.",
+    }
+
+  return None
+
+
 def _revert_optional_race_to_fallback(action):
   fallback_payload = _effective_rival_fallback_payload(action)
   if fallback_payload.get("func") in ("", None, "do_race"):
@@ -4886,13 +4975,14 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     planner_state["turn_plan"] = planner_turn_plan.to_snapshot()
     if isinstance(state_obj, dict):
       state_obj[PLANNER_STATE_KEY] = planner_state
+  review_action = action
   if (
     planner_turn_plan is not None
     and planner_turn_plan.decision_path == "planner"
     and hasattr(action, "__setitem__")
   ):
-    snapshot_action = _clone_action_for_review_snapshot(action)
-    apply_turn_plan_action_payload(snapshot_action, planner_turn_plan)
+    review_action = _clone_action_for_review_snapshot(action)
+    apply_turn_plan_action_payload(review_action, planner_turn_plan)
   planner_item_plan = dict((planner_turn_plan.item_plan if planner_turn_plan else {}) or {})
   planner_review_context = dict((planner_turn_plan.review_context if planner_turn_plan else {}) or {})
   planner_selected_action = dict(planner_review_context.get("selected_action") or {})
@@ -4972,29 +5062,29 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     **(state_obj.get("skill_purchase_check") or {}),
   }
   live_selected_action = {
-    "func": getattr(action, "func", None),
-    "training_name": action.get("training_name") if hasattr(action, "get") else None,
-    "training_function": action.get("training_function") if hasattr(action, "get") else None,
-    "race_name": action.get("race_name") if hasattr(action, "get") else None,
-    "score_tuple": action.get("training_data", {}).get("score_tuple") if hasattr(action, "get") else None,
-    "stat_gains": action.get("training_data", {}).get("stat_gains") if hasattr(action, "get") else None,
-    "failure": action.get("training_data", {}).get("failure") if hasattr(action, "get") else None,
-    "total_supports": action.get("training_data", {}).get("total_supports") if hasattr(action, "get") else None,
-    "total_rainbow_friends": action.get("training_data", {}).get("total_rainbow_friends") if hasattr(action, "get") else None,
-    "prefer_rival_race": action.get("prefer_rival_race") if hasattr(action, "get") else None,
-    "rival_scout": action.get("rival_scout") if hasattr(action, "get") else None,
+    "func": getattr(review_action, "func", None),
+    "training_name": review_action.get("training_name") if hasattr(review_action, "get") else None,
+    "training_function": review_action.get("training_function") if hasattr(review_action, "get") else None,
+    "race_name": review_action.get("race_name") if hasattr(review_action, "get") else None,
+    "score_tuple": review_action.get("training_data", {}).get("score_tuple") if hasattr(review_action, "get") else None,
+    "stat_gains": review_action.get("training_data", {}).get("stat_gains") if hasattr(review_action, "get") else None,
+    "failure": review_action.get("training_data", {}).get("failure") if hasattr(review_action, "get") else None,
+    "total_supports": review_action.get("training_data", {}).get("total_supports") if hasattr(review_action, "get") else None,
+    "total_rainbow_friends": review_action.get("training_data", {}).get("total_rainbow_friends") if hasattr(review_action, "get") else None,
+    "prefer_rival_race": review_action.get("prefer_rival_race") if hasattr(review_action, "get") else None,
+    "rival_scout": review_action.get("rival_scout") if hasattr(review_action, "get") else None,
     "pre_action_item_use": (
-      action.get("trackblazer_pre_action_items")
-      if hasattr(action, "get") and action.get("trackblazer_pre_action_items") is not None else
+      review_action.get("trackblazer_pre_action_items")
+      if hasattr(review_action, "get") and review_action.get("trackblazer_pre_action_items") is not None else
       planner_pre_action_items
     ),
     "reassess_after_item_use": (
-      action.get("trackblazer_reassess_after_item_use")
-      if hasattr(action, "get") and action.get("trackblazer_reassess_after_item_use") is not None else
+      review_action.get("trackblazer_reassess_after_item_use")
+      if hasattr(review_action, "get") and review_action.get("trackblazer_reassess_after_item_use") is not None else
       planner_reassess_after_item_use
     ),
-    "trackblazer_race_decision": action.get("trackblazer_race_decision") if hasattr(action, "get") else None,
-    "trackblazer_race_lookahead": action.get("trackblazer_race_lookahead") if hasattr(action, "get") else None,
+    "trackblazer_race_decision": review_action.get("trackblazer_race_decision") if hasattr(review_action, "get") else None,
+    "trackblazer_race_lookahead": review_action.get("trackblazer_race_lookahead") if hasattr(review_action, "get") else None,
   }
   selected_action = copy.deepcopy(planner_selected_action)
   for key, value in live_selected_action.items():
@@ -5002,9 +5092,14 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       continue
     if isinstance(value, (str, list, tuple, dict)) and not value:
       continue
+    existing_value = selected_action.get(key)
+    if existing_value is not None and not (
+      isinstance(existing_value, (str, list, tuple, dict)) and not existing_value
+    ):
+      continue
     selected_action[key] = copy.deepcopy(value)
   ranked_trainings = []
-  available_trainings = action.get("available_trainings", {}) if hasattr(action, "get") else {}
+  available_trainings = review_action.get("available_trainings", {}) if hasattr(review_action, "get") else {}
   if not available_trainings:
     available_trainings = copy.deepcopy(
       (((planner_state or {}).get("dual_run") or {}).get("observed") or {}).get("available_trainings") or {}
@@ -6724,6 +6819,48 @@ def career_lobby(dry_run_turn=False):
           else:
             action.func = None
             _clear_optional_race_action_fields(action)
+
+      planner_locked_race = _planner_pre_training_locked_race(state_obj, action, strategy)
+      if planner_locked_race is not None:
+        _push_flow_decision_debug(
+          state_obj,
+          asset="training_scan",
+          result="skipped_locked_race",
+          note=planner_locked_race.get("reason") or "locked_race",
+          context="pre_training_gate",
+          phase="collecting_training_state",
+        )
+        bot.record_turn_timing_step(
+          label="Training scan",
+          category="decision",
+          key="training_scan",
+          duration=0.0,
+          detail=_turn_metric_detail(
+            "Skipped training scan.",
+            f"reason={planner_locked_race.get('reason') or 'locked_race'}",
+          ),
+          data={"skipped": True, "reason": planner_locked_race.get("reason") or "locked_race"},
+        )
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message=planner_locked_race.get("message"),
+        )
+        planner_runtime_result = run_trackblazer_planner_turn(
+          state_obj,
+          action,
+          action_count,
+          planner_locked_race.get("review_message") or "Review proposed action before execution.",
+          executor_hooks=_trackblazer_planner_executor_hooks(),
+          runtime_hooks=_trackblazer_planner_runtime_hooks(),
+          sub_phase="preview_race_selection",
+        )
+        planner_runtime_status = planner_runtime_result.get("status")
+        if planner_runtime_status == "executed":
+          record_and_finalize_turn(state_obj, action)
+          continue
+        if planner_runtime_status in {"previewed", "reassess", "blocked", "failed"}:
+          continue
 
       training_function_name = strategy.get_training_template(state_obj)['training_function']
 

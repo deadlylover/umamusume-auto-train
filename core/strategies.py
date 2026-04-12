@@ -1,7 +1,7 @@
 import core.trainings
 import utils.constants as constants
 import core.config as config
-from core.race_selector import get_race_gate_for_turn_label
+from core.race_selector import get_race_gate_for_turn_label, get_selected_race_for_turn_label
 from core.trackblazer_race_logic import (
   get_optional_race_low_energy_override,
   get_race_lookahead_energy_advice,
@@ -388,6 +388,25 @@ class Strategy:
       return action
 
     date = state["year"]
+    selected_race_name = get_selected_race_for_turn_label(
+      date,
+      getattr(config, "OPERATOR_RACE_SELECTOR", None),
+    )
+
+    if selected_race_name:
+      if selected_race_name != action.get("race_name", ""):
+        debug(f"Selected race logic in check_scheduled_races: {action.available_actions}")
+        action.available_actions.insert(0, "do_race")
+      action["race_name"] = selected_race_name
+      action["scheduled_race"] = True
+      action["scheduled_race_source"] = "operator_selector"
+      action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
+        state,
+        getattr(config, "OPERATOR_RACE_SELECTOR", None),
+      )
+      action["trackblazer_race_lookahead_energy_item_key"] = None
+      info(f"Selected race found: {selected_race_name}")
+      return action
 
     races_on_date = constants.RACES.get(date, [])
 
@@ -418,6 +437,7 @@ class Strategy:
         action.available_actions.insert(0, "do_race")
       action["race_name"] = best_race_name
       action["scheduled_race"] = True
+      action["scheduled_race_source"] = "config_schedule"
       action["trackblazer_race_lookahead"] = get_race_lookahead_energy_advice(
         state,
         getattr(config, "OPERATOR_RACE_SELECTOR", None),

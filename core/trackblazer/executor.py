@@ -308,6 +308,22 @@ def run_planner_action_with_review(
   if _step_present(turn_plan, "refresh_inventory_for_items"):
     _transition(state_obj, "refresh_inventory_for_items", "refresh_inventory_for_items", "started")
     item_refresh_result = hooks.refresh_trackblazer_pre_action_inventory(state_obj, action)
+    refreshed_turn_plan = item_refresh_result.get("turn_plan")
+    if isinstance(refreshed_turn_plan, TurnPlan):
+      previous_planned_clicks = list(planned_clicks or [])
+      turn_plan = refreshed_turn_plan
+      item_execution_payload = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+      planned_clicks = turn_plan.to_planned_clicks()
+      if planned_clicks != previous_planned_clicks:
+        hooks.update_operator_snapshot(
+          state_obj,
+          action,
+          phase="executing_action",
+          message="Inventory refresh updated the planner-owned pre-action item plan before execution.",
+          sub_phase=sub_phase,
+          ocr_debug=ocr_debug,
+          planned_clicks=planned_clicks,
+        )
     if item_refresh_result.get("status") == "failed":
       _transition(
         state_obj,

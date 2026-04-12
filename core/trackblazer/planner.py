@@ -10,7 +10,7 @@ import core.bot as bot
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
-from core.race_selector import get_race_gate_for_turn_label
+from core.race_selector import get_race_gate_for_turn_label, get_selected_race_for_turn_label
 from core.trackblazer.compat import (
   capture_rival_fallback_payload as _capture_legacy_rival_fallback_payload,
 )
@@ -1240,7 +1240,11 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     state_obj,
     getattr(config, "OPERATOR_RACE_SELECTOR", None),
   ) or {}
-  scheduled_race_name = planner_native_scheduled_race_name(state_obj)
+  operator_selected_race_name = get_selected_race_for_turn_label(
+    state_obj.get("year"),
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  ) or ""
+  scheduled_race_name = operator_selected_race_name or planner_native_scheduled_race_name(state_obj)
   scheduled_race_active = bool(scheduled_race_name) or lobby_scheduled_race
   goal_race_active, goal_race_name = _planner_native_goal_race_active(state_obj)
 
@@ -1291,7 +1295,11 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     "branch_kind": branch_kind,
     "rival_indicator_detected": bool(state_obj.get("rival_indicator_detected")),
     "scheduled_race": scheduled_race_active,
-    "scheduled_race_source": "lobby_button" if lobby_scheduled_race else ("config_schedule" if scheduled_race_name else ""),
+    "scheduled_race_source": (
+      "lobby_button"
+      if lobby_scheduled_race else
+      ("operator_selector" if operator_selected_race_name else ("config_schedule" if scheduled_race_name else ""))
+    ),
     "forced_climax_race_day": forced_climax_race_day,
     "forced_race_day": forced_race_day,
     "pre_debut": pre_debut,
@@ -3552,9 +3560,15 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
   forced_climax_race_day = bool((state_obj or {}).get("trackblazer_climax_race_day"))
   scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
   lobby_scheduled_race = bool((state_obj or {}).get("trackblazer_lobby_scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
+  operator_selected_race_name = get_selected_race_for_turn_label(
+    (state_obj or {}).get("year"),
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  ) or ""
   scheduled_race_source = None
   if lobby_scheduled_race:
     scheduled_race_source = "lobby_button"
+  elif operator_selected_race_name:
+    scheduled_race_source = "operator_selector"
   elif scheduled_race:
     scheduled_race_source = "config_schedule"
   if rival_indicator_detected is not None or forced_climax_race_day or scheduled_race:

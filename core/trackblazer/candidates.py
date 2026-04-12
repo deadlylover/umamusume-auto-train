@@ -5,6 +5,7 @@ from typing import List
 
 import core.config as config
 import utils.constants as constants
+from core.race_selector import get_selected_race_for_turn_label
 from core.trackblazer.models import CandidateAction, DerivedTurnState, ObservedTurnState
 
 
@@ -164,6 +165,12 @@ def _append_compatibility_candidates(candidates, observed_data, derived_data):
 def planner_native_scheduled_race_name(observed_data) -> str:
   observed_data = observed_data if isinstance(observed_data, dict) else {}
   turn_label = str(observed_data.get("year") or "").strip()
+  selected_race_name = get_selected_race_for_turn_label(
+    turn_label,
+    getattr(config, "OPERATOR_RACE_SELECTOR", None),
+  )
+  if selected_race_name:
+    return selected_race_name
   races_on_date = list(constants.RACES.get(turn_label, []) or [])
   if not races_on_date or not bool(getattr(config, "USE_RACE_SCHEDULE", False)):
     return ""
