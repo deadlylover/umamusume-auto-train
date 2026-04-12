@@ -1235,7 +1235,6 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   forced_climax_race_day = bool(
     state_obj.get("trackblazer_climax_race_day")
     or _action_value(action, "trackblazer_climax_race_day")
-    or str(state_obj.get("year") or "").strip() == "Finale Underway"
   )
   forced_race_day = bool(state_obj.get("turn") == "Race Day" or _action_value(action, "is_race_day"))
   mission_race_enabled = bool(getattr(config, "DO_MISSION_RACES_IF_POSSIBLE", False) and state_obj.get("race_mission_available"))
@@ -2173,6 +2172,10 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   optional_races_blocked = bool(
     operator_race_gate.get("enabled") and not operator_race_gate.get("race_allowed")
   )
+  finale_training_turn = bool(
+    observed_data.get("trackblazer_climax")
+    and not observed_data.get("trackblazer_climax_race_day")
+  )
   energy_ratio = _safe_float(derived_data.get("energy_ratio"), None)
   if energy_ratio is None:
     energy_ratio = 0.5
@@ -2212,8 +2215,9 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       base_score = _safe_float(training.get("score"), 0.0)
       failure_pct = max(0.0, min(100.0, _safe_float(training.get("failure"), 0.0)))
       failure_bypassed = bool(dict(training.get("usage_context") or {}).get("failure_bypassed_by_items"))
+      reset_whistle_reroll = item_key == "reset_whistle"
       max_failure = max(0.0, _safe_float(getattr(config, "MAX_FAILURE", 5), 5.0))
-      if failure_pct > max_failure and not (item_key and failure_bypassed):
+      if failure_pct > max_failure and not reset_whistle_reroll and not (item_key and failure_bypassed):
         viable = False
         candidate["priority_score"] = float("-inf")
         candidate["rationale"] = (
@@ -2225,13 +2229,14 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
           "max_allowed_failure": max_failure,
           "requires_item_bypass": True,
           "item_key": item_key,
+          "reset_whistle_reroll": reset_whistle_reroll,
           "failure_bypassed_by_items": failure_bypassed,
         }
         candidate["source_facts"] = source_facts
         scored.append(candidate)
         continue
       failure_penalty = max(0.0, 1.0 - (failure_pct / 100.0))
-      if item_key and failure_bypassed:
+      if reset_whistle_reroll or (item_key and failure_bypassed):
         failure_penalty = 1.0
       rainbow_multiplier = 1.0 + (0.06 * min(3.0, _safe_float(training.get("rainbow_count"), 0.0)))
       support_count = _safe_float(training.get("support_count"), 0.0)
@@ -2246,8 +2251,20 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       if item_key:
         item_delta = _safe_float(training.get("item_assist_score_delta"), 0.0)
         opportunity_cost = 0.0
-        if item_key == "reset_whistle" and not timeline_window.get("summer_window"):
-          opportunity_cost += 100.0
+        if item_key == "reset_whistle":
+          if timeline_window.get("summer_window"):
+            pass
+          elif finale_training_turn:
+            if (
+              bool(dict(training.get("usage_context") or {}).get("weak_summer_training"))
+              and energy_ratio < 0.60
+              and failure_pct > 0.0
+            ):
+              item_delta += 80.0
+            else:
+              opportunity_cost += 20.0
+          else:
+            opportunity_cost += 100.0
         if item_key in {"vita_65", "royal_kale_juice"} and (
           timeline_window.get("summer_window")
           or _safe_float(timeline_window.get("summer_distance"), 99.0) <= 1.0
@@ -2263,6 +2280,9 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         score += item_delta - opportunity_cost
         score_components["item_delta"] = item_delta
         score_components["item_opportunity_cost"] = opportunity_cost
+      if finale_training_turn and not item_key and (energy_ratio >= 0.60 or failure_pct <= 0.0):
+        score += 70.0
+        score_components["finale_safe_training_bonus"] = 70.0
       if score > best_training_score:
         best_training_score = score
         best_training_class = str(training.get("value_class") or "weak")
@@ -2290,26 +2310,28 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     elif node_id == "race:rival":
       rival_visible = bool(race_opportunity.get("rival_visible"))
       optional_safe = bool(race_opportunity.get("optional_safe_under_lookahead"))
-      if optional_races_blocked or (not rival_visible) or (energy_ratio <= rival_min_energy):
+      if finale_training_turn or optional_races_blocked or (not rival_visible) or (energy_ratio <= rival_min_energy):
         viable = False
       score = 46.0 + (4.0 if optional_safe else -6.0)
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
         score -= 20.0
       score_components = {
         "rival_visible": rival_visible,
+        "finale_training_turn": finale_training_turn,
         "optional_safe_under_lookahead": optional_safe,
         "operator_race_gate_blocked": optional_races_blocked,
         "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
       }
     elif node_id == "race:fallback":
       rival_visible = bool(race_opportunity.get("rival_visible"))
-      if optional_races_blocked or rival_visible:
+      if finale_training_turn or optional_races_blocked or rival_visible:
         viable = False
       score = 38.0
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
         score -= 12.0
       score_components = {
         "rival_visible": rival_visible,
+        "finale_training_turn": finale_training_turn,
         "operator_race_gate_blocked": optional_races_blocked,
         "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
       }

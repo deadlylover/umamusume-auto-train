@@ -2482,8 +2482,61 @@ def _trackblazer_training_score(action):
   return get_trackblazer_training_score(action)
 
 
+def _trackblazer_training_score_from_data(training_data):
+  training_data = training_data if isinstance(training_data, dict) else {}
+  score_tuple = training_data.get("score_tuple")
+  if isinstance(score_tuple, (tuple, list)) and score_tuple:
+    try:
+      return float(score_tuple[0])
+    except (TypeError, ValueError):
+      pass
+  try:
+    weighted = float(training_data.get("weighted_stat_score"))
+  except (TypeError, ValueError):
+    weighted = None
+  try:
+    bond = float(training_data.get("bond_boost") or 0.0)
+  except (TypeError, ValueError):
+    bond = 0.0
+  if weighted is None:
+    return None
+  return weighted + bond
+
+
 def _trackblazer_training_score_threshold():
   return get_training_behavior_strong_training_score_threshold()
+
+
+def _promote_trackblazer_action_to_best_training(state_obj, action):
+  if not hasattr(action, "__setitem__"):
+    return False
+  available_trainings = copy.deepcopy(action.get("available_trainings") or {}) if hasattr(action, "get") else {}
+  if not available_trainings and isinstance(state_obj, dict):
+    available_trainings = copy.deepcopy(state_obj.get("training_results") or {})
+  if not available_trainings:
+    return False
+
+  best_name = None
+  best_data = None
+  best_score = float("-inf")
+  for training_name, training_data in available_trainings.items():
+    score = _trackblazer_training_score_from_data(training_data)
+    if score is None:
+      continue
+    if best_name is None or score > best_score:
+      best_name = training_name
+      best_data = copy.deepcopy(training_data)
+      best_score = score
+  if not best_name:
+    best_name, raw_training_data = next(iter(available_trainings.items()))
+    best_data = copy.deepcopy(raw_training_data or {})
+
+  action.func = "do_training"
+  action["training_name"] = best_name
+  action["training_data"] = best_data or {}
+  action["available_trainings"] = available_trainings
+  action["_trackblazer_rest_promoted_to_training"] = True
+  return True
 
 
 def _planned_clicks_for_action(action):
@@ -7013,6 +7066,21 @@ def career_lobby(dry_run_turn=False):
               f"training_total={race_decision.get('training_total_stats')}"
             ),
           )
+        elif race_decision.get("prefer_train_over_weak_training") and action.func != "do_training":
+          promoted = _promote_trackblazer_action_to_best_training(state_obj, action)
+          if promoted:
+            info(f"[TB_RACE] Overriding weak-training fallback to training: {race_decision['reason']}")
+            update_operator_snapshot(
+              state_obj, action,
+              phase="evaluating_strategy",
+              message=f"Trackblazer finale training override: {race_decision['reason']}",
+              sub_phase="evaluate_trackblazer_race",
+              reasoning_notes=(
+                f"training_score={race_decision.get('training_score')} | "
+                f"training_total={race_decision.get('training_total_stats')} | "
+                f"selected_training={action.get('training_name')}"
+              ),
+            )
 
         elif race_decision.get("should_race") and action.func != "do_race":
           # Save fallback in case rival scout fails and we need to revert.

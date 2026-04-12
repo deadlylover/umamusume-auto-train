@@ -201,6 +201,9 @@ def planner_native_goal_race_name(observed_data) -> str:
   criteria = str(observed_data.get("criteria") or "")
   keywords = ("fan", "Maiden", "Progress")
 
+  if bool(observed_data.get("trackblazer_climax")) and not bool(observed_data.get("trackblazer_climax_race_day")):
+    return ""
+
   try:
     numeric_turn = int(turn)
   except (TypeError, ValueError):

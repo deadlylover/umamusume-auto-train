@@ -4,6 +4,7 @@ import core.config as config
 import utils.constants as constants
 from core.actions import Action
 from core.trackblazer import planner as planner_module
+from core.trackblazer_race_logic import evaluate_trackblazer_race
 from core.trackblazer_item_use import plan_item_usage
 
 
@@ -103,13 +104,28 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     self.assertNotIn("grilled_carrots", candidate_keys)
     self.assertIn("master_cleat_hammer", candidate_keys)
 
-  def test_finale_underway_forces_climax_race_day_even_without_template_flag(self):
+  def test_finale_underway_prefers_training_with_reset_whistle_over_optional_race(self):
     state_obj = _base_state()
     state_obj["year"] = "Finale Underway"
     state_obj["turn"] = 1
     state_obj["trackblazer_climax"] = True
     state_obj["trackblazer_climax_race_day"] = False
     state_obj["trackblazer_climax_locked_race"] = False
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 36
+    state_obj["max_energy"] = 130
+    state_obj["trackblazer_inventory"]["reset_whistle"] = {
+      "detected": True,
+      "held_quantity": 2,
+      "increment_target": (3, 3),
+      "category": "condition",
+    }
+    state_obj["trackblazer_inventory_summary"]["held_quantities"]["reset_whistle"] = 2
+    state_obj["trackblazer_inventory_summary"]["items_detected"].append("reset_whistle")
+    state_obj["trackblazer_inventory_summary"]["actionable_items"].append("reset_whistle")
+    state_obj["training_results"]["speed"]["score_tuple"] = (17.0, 0)
+    state_obj["training_results"]["speed"]["weighted_stat_score"] = 17.0
+    state_obj["training_results"]["speed"]["failure"] = 8
 
     action = Action()
     action.func = "do_training"
@@ -123,11 +139,82 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     turn_plan = plan.get("turn_plan") or {}
     review_context = dict(turn_plan.get("review_context") or {})
     selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
 
-    self.assertEqual(selected_action.get("func"), "do_race")
-    self.assertTrue(selected_action.get("is_race_day"))
-    self.assertTrue(selected_action.get("trackblazer_climax_race_day"))
-    self.assertEqual((turn_plan.get("race_plan") or {}).get("branch_kind"), "forced_climax_race")
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertFalse(selected_action.get("trackblazer_climax_race_day"))
+    self.assertEqual((turn_plan.get("race_plan") or {}).get("branch_kind"), "training")
+    self.assertIn("reset_whistle", use_now)
+
+  def test_finale_underway_safe_training_stays_training_without_whistle(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 82
+    state_obj["max_energy"] = 130
+    state_obj["training_results"]["speed"]["score_tuple"] = (18.0, 0)
+    state_obj["training_results"]["speed"]["weighted_stat_score"] = 18.0
+    state_obj["training_results"]["speed"]["failure"] = 0
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "speed"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["speed"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertNotIn("reset_whistle", use_now)
+
+  def test_legacy_race_logic_suppresses_finale_optional_fallback_race(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 36
+    state_obj["max_energy"] = 130
+    state_obj["trackblazer_inventory"]["reset_whistle"] = {
+      "detected": True,
+      "held_quantity": 1,
+      "increment_target": (3, 3),
+      "category": "condition",
+    }
+    state_obj["trackblazer_inventory_summary"]["held_quantities"]["reset_whistle"] = 1
+    state_obj["trackblazer_inventory_summary"]["items_detected"].append("reset_whistle")
+    state_obj["trackblazer_inventory_summary"]["actionable_items"].append("reset_whistle")
+    state_obj["training_results"]["speed"]["score_tuple"] = (17.0, 0)
+    state_obj["training_results"]["speed"]["weighted_stat_score"] = 17.0
+    state_obj["training_results"]["speed"]["failure"] = 8
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "speed"
+    action["training_data"] = dict(state_obj["training_results"]["speed"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    decision = evaluate_trackblazer_race(state_obj, action)
+
+    self.assertFalse(decision.get("should_race"))
+    self.assertTrue(decision.get("prefer_train_over_weak_training"))
 
 
 if __name__ == "__main__":

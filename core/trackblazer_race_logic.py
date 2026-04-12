@@ -109,6 +109,28 @@ def _is_summer(year):
   return str(year or "") in _SUMMER_WINDOWS
 
 
+def _is_finale_training_turn(state_obj):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  return bool(
+    (
+      state_obj.get("trackblazer_climax")
+      or str(state_obj.get("year") or "").strip() == "Finale Underway"
+    )
+    and not state_obj.get("trackblazer_climax_race_day")
+  )
+
+
+def _finale_should_keep_training(state_obj, action):
+  state_obj = state_obj if isinstance(state_obj, dict) else {}
+  training_data = action.get("training_data") if hasattr(action, "get") else {}
+  training_data = training_data if isinstance(training_data, dict) else {}
+  failure = _safe_float(training_data.get("failure"))
+  energy_level = _safe_float(state_obj.get("energy_level")) or 0.0
+  max_energy = _safe_float(state_obj.get("max_energy")) or 0.0
+  energy_ratio = energy_level / max(max_energy, 1.0)
+  return energy_ratio >= 0.60 or (failure is not None and failure <= 0.0)
+
+
 def _optional_race_low_energy_override(state_obj):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   training_behavior = get_training_behavior_settings(
@@ -302,6 +324,7 @@ def _decision(**kwargs):
     "prefer_rival_race": bool(kwargs.get("prefer_rival_race", False)),
     "fallback_non_rival_race": bool(kwargs.get("fallback_non_rival_race", False)),
     "prefer_rest_over_weak_training": bool(kwargs.get("prefer_rest_over_weak_training", False)),
+    "prefer_train_over_weak_training": bool(kwargs.get("prefer_train_over_weak_training", False)),
     "race_tier_target": kwargs.get("race_tier_target"),
     "race_name": kwargs.get("race_name"),
     "race_available": bool(kwargs.get("race_available", False)),
@@ -431,6 +454,8 @@ def _rest_promotion_fallback_race(
   state_obj, action, training_stats, training_supports, summer, race_info,
 ):
   if getattr(action, "func", None) != "do_rest":
+    return None
+  if _is_finale_training_turn(state_obj):
     return None
   if summer:
     return None
@@ -653,6 +678,69 @@ def _weak_training_fallback_race(
   )
   if not training_behavior.get("weak_training_fallback_race_enabled"):
     return None
+
+  if _is_finale_training_turn(state_obj):
+    held_quantities = (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {}
+    held_whistles = _safe_int(held_quantities.get("reset_whistle")) or 0
+    if _finale_should_keep_training(state_obj, action):
+      return _decision(
+        should_race=False,
+        prefer_train_over_weak_training=True,
+        reason=(
+          "Finale Underway training turn: energy/fail state is safe enough to commit "
+          "the highest-rated training instead of diverting to optional race/rest"
+        ),
+        training_total_stats=training_stats,
+        training_score=training_score,
+        training_supports=training_supports,
+        is_summer=False,
+        g1_forced=False,
+        prefer_rival_race=False,
+        race_tier_target=None,
+        race_name=None,
+        race_available=False,
+        rival_indicator=False,
+        race_tier_info=race_info,
+      )
+    if held_whistles > 0:
+      return _decision(
+        should_race=False,
+        prefer_train_over_weak_training=True,
+        reason=(
+          "Finale Underway weak board: stay on training so Reset Whistle can reroll "
+          "instead of taking an optional fallback race or rest"
+        ),
+        training_total_stats=training_stats,
+        training_score=training_score,
+        training_supports=training_supports,
+        is_summer=False,
+        g1_forced=False,
+        prefer_rival_race=False,
+        race_tier_target=None,
+        race_name=None,
+        race_available=False,
+        rival_indicator=False,
+        race_tier_info=race_info,
+      )
+    return _decision(
+      should_race=False,
+      prefer_train_over_weak_training=True,
+      reason=(
+        "Finale Underway has no optional race branch here; keep the best visible "
+        "training rather than routing through fallback race/rest"
+      ),
+      training_total_stats=training_stats,
+      training_score=training_score,
+      training_supports=training_supports,
+      is_summer=False,
+      g1_forced=False,
+      prefer_rival_race=False,
+      race_tier_target=None,
+      race_name=None,
+      race_available=False,
+      rival_indicator=False,
+      race_tier_info=race_info,
+    )
 
   rest_promotion_result = _rest_promotion_fallback_race(
     state_obj, action, training_stats, training_supports, summer, race_info,

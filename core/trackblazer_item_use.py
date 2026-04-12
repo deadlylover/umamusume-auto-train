@@ -1960,6 +1960,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     if (
       not context["has_followup_failsafe"]
       and not context.get("energy_natively_sufficient")
+      and not context.get("climax_window")
     ):
       return {
         "defer_reason": "save whistle until energy or a Good-Luck Charm is available",
