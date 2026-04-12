@@ -4,6 +4,7 @@ import core.bot as bot
 import utils.constants as constants
 from utils.log import info
 from core.trackblazer_shop import PRIORITY_LEVELS, get_shop_catalog, normalize_priority, policy_context
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 
 
 _PRIORITY_INDEX = {name: index for index, name in enumerate(PRIORITY_LEVELS)}
@@ -1114,15 +1115,11 @@ def _usage_context(state_obj, action, policy=None):
   )
   matching_stat_gain = _safe_int(stat_gains.get(training_name), 0)
   weighted_stat_score = training_data.get("weighted_stat_score")
-  timeline = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
-  timeline_label = timeline.get("timeline_label") or ""
-  timeline_index = timeline.get("timeline_index")
-  climax_window = bool(timeline.get("is_climax"))
-  bond_boost_cutoff = bot.get_trackblazer_bond_boost_cutoff()
-  try:
-    past_bond_training_cutoff = constants.TIMELINE.index(timeline_label) > constants.TIMELINE.index(bond_boost_cutoff)
-  except ValueError:
-    past_bond_training_cutoff = False
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  timeline_label = timeline_policy.get("timeline_label") or ""
+  timeline_index = timeline_policy.get("timeline_index")
+  climax_window = bool(timeline_policy.get("is_climax_window"))
+  past_bond_training_cutoff = bool(timeline_policy.get("is_post_bond_cutoff"))
   score_tuple = training_data.get("score_tuple")
   if isinstance(score_tuple, (list, tuple)) and score_tuple:
     score_value = _safe_float(score_tuple[0], 0.0)
@@ -1130,12 +1127,12 @@ def _usage_context(state_obj, action, policy=None):
     score_value = _safe_float(weighted_stat_score, 0.0) + (_safe_float(training_data.get("bond_boost"), 0.0) or 0.0)
   else:
     score_value = _preview_training_score_from_gains(state_obj, training_name, training_data)
-  past_final_summer = _past_final_summer(timeline_index)
+  past_final_summer = bool(timeline_policy.get("is_post_final_summer"))
   score_over_50 = score_value > 50.0
   # Stop hoarding "save for summer" items when no summer windows remain, or
   # when the current board is already a high-value (>50) commitment.
   summer_conservation_bypass = past_final_summer or score_over_50
-  summer_window = timeline_label in _SUMMER_WINDOWS
+  summer_window = bool(timeline_policy.get("is_summer_window"))
   save_vita_for_summer = _safe_bool(
     training_behavior.get("save_vita_for_summer"),
     _DEFAULT_TRAINING_BEHAVIOR_SETTINGS["save_vita_for_summer"],
@@ -1220,7 +1217,7 @@ def _usage_context(state_obj, action, policy=None):
   reroll_signal = _summer_reroll_signal(
     state_obj,
     {
-      "summer_window": timeline_label in _SUMMER_WINDOWS,
+      "summer_window": summer_window,
     },
   )
   held_support_keys = {entry["key"] for entry in held_support_items}
@@ -1314,10 +1311,13 @@ def _usage_context(state_obj, action, policy=None):
     if hasattr(action, "get") else None
   )
   return {
+    "timeline_policy": deepcopy(timeline_policy),
     "timeline_label": timeline_label,
     "timeline_index": timeline_index,
     "past_final_summer": past_final_summer,
     "climax_window": climax_window,
+    "is_finale_underway_training_turn": bool(timeline_policy.get("is_finale_underway_training_turn")),
+    "is_forced_climax_race_day": bool(timeline_policy.get("is_forced_climax_race_day")),
     "summer_conservation_bypass": summer_conservation_bypass,
     "score_over_50": score_over_50,
     "summer_window": summer_window,
@@ -1359,6 +1359,7 @@ def _usage_context(state_obj, action, policy=None):
     "very_high_value_training": very_high_value_training,
     "committed_value_training": committed_value_training,
     "strong_burst_training": strong_burst_training,
+    "is_pre_bond_cutoff": bool(timeline_policy.get("is_pre_bond_cutoff")),
     "past_bond_training_cutoff": past_bond_training_cutoff,
     "grilled_carrots_usable": bool(
       action_func == "do_training"
@@ -1386,6 +1387,7 @@ def _usage_context(state_obj, action, policy=None):
     "held_recovery_cover_available": held_recovery_cover > 0,
     "save_vita_for_summer": save_vita_for_summer,
     "failure_rescue_vita_override": failure_rescue_vita_override,
+    "trainings_remaining_upper_bound": timeline_policy.get("trainings_remaining_upper_bound"),
   }
 
 
@@ -2201,10 +2203,13 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
 
   return {
     "context": {
+      "timeline_policy": deepcopy(context.get("timeline_policy") or {}),
       "timeline_label": context.get("timeline_label"),
       "timeline_index": context.get("timeline_index"),
       "past_final_summer": context.get("past_final_summer"),
       "climax_window": context.get("climax_window"),
+      "is_finale_underway_training_turn": context.get("is_finale_underway_training_turn"),
+      "is_forced_climax_race_day": context.get("is_forced_climax_race_day"),
       "summer_conservation_bypass": context.get("summer_conservation_bypass"),
       "score_over_50": context.get("score_over_50"),
       "summer_window": context.get("summer_window"),
@@ -2220,6 +2225,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "rainbow_count": context.get("rainbow_count"),
       "support_count": context.get("support_count"),
       "held_reset_whistles": context.get("held_reset_whistles"),
+      "is_pre_bond_cutoff": context.get("is_pre_bond_cutoff"),
       "climax_commit_score_threshold": context.get("climax_commit_score_threshold"),
       "climax_commit_matching_stat_threshold": context.get("climax_commit_matching_stat_threshold"),
       "climax_commit_total_stat_threshold": context.get("climax_commit_total_stat_threshold"),
@@ -2233,6 +2239,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "energy_natively_sufficient": context.get("energy_natively_sufficient"),
       "summer_reroll_target_name": context.get("summer_reroll_target_name"),
       "summer_reroll_target_failure": context.get("summer_reroll_target_failure"),
+      "trainings_remaining_upper_bound": context.get("trainings_remaining_upper_bound"),
       "commit_training_after_items": context.get("commit_training_after_items"),
       "trackblazer_buff_active": context.get("trackblazer_buff_active"),
     },

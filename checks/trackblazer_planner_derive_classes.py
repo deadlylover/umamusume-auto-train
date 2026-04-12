@@ -97,6 +97,7 @@ def main():
   }
   assert (derived.get("timeline_window") or {}).get("is_summer") is True
   assert (derived.get("timeline_window") or {}).get("summer_window") is True
+  assert (derived.get("timeline_policy") or {}).get("is_summer_window") is True
 
   non_summer = _derive(_state_for_energy("Senior Year Early Sep", 50))
   assert (non_summer.get("timeline_window") or {}).get("is_summer") is False
@@ -104,6 +105,7 @@ def main():
   climax = _derive(_state_for_energy("Senior Year Early Sep", 50, climax=True))
   assert (climax.get("timeline_window") or {}).get("is_climax") is True
   assert (climax.get("timeline_window") or {}).get("tsc_active") is True
+  assert (climax.get("timeline_policy") or {}).get("is_climax_window") is True
   assert (climax.get("race_opportunity") or {}).get("climax_locked") is True
 
   rival = _derive(_state_for_energy("Senior Year Early Sep", 50, rival=True))

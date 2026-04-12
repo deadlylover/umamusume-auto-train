@@ -211,6 +211,36 @@ def _format_current_stats_line(state_summary):
   return "Stats: " + " | ".join(parts)
 
 
+def _format_timeline_policy_line(state_summary, selected_action):
+  policy = (
+    (selected_action or {}).get("timeline_policy")
+    or (state_summary or {}).get("trackblazer_timeline_policy")
+    or {}
+  )
+  if not isinstance(policy, dict) or not policy:
+    return ""
+
+  parts = []
+  phase_kind = policy.get("phase_kind")
+  if phase_kind:
+    parts.append(f"phase {phase_kind}")
+  if policy.get("is_summer_window"):
+    parts.append("summer yes")
+  if policy.get("is_pre_bond_cutoff"):
+    parts.append("bond window yes")
+  if policy.get("is_post_final_summer"):
+    parts.append("post-final-summer yes")
+  optional_races_allowed = policy.get("optional_races_allowed")
+  if optional_races_allowed is not None:
+    parts.append(f"optional_races {'yes' if optional_races_allowed else 'no'}")
+  trainings_remaining = policy.get("trainings_remaining_upper_bound")
+  if trainings_remaining is not None:
+    parts.append(f"trainings<={trainings_remaining}")
+  if not parts:
+    return ""
+  return "Phase Policy: " + " | ".join(parts)
+
+
 def _format_operator_race_gate_line(state_summary):
   gate = state_summary.get("operator_race_gate") or {}
   if not isinstance(gate, dict):
@@ -254,6 +284,17 @@ def _planner_comparison_line(snapshot_context):
 
 def _format_selected_action_line(selected_action):
   action_name = selected_action.get("func") or "-"
+  if (
+    action_name != "do_training"
+    and selected_action.get("training_name")
+    and not selected_action.get("race_name")
+    and (
+      selected_action.get("score_tuple")
+      or selected_action.get("stat_gains")
+      or selected_action.get("total_supports") is not None
+    )
+  ):
+    action_name = "do_training"
   pre_action_items = selected_action.get("pre_action_item_use") or []
   pre_action_label = ""
   if pre_action_items:
@@ -951,6 +992,9 @@ def _review_summary_lines(snapshot_context, planned_actions, include_prompt=Fals
     f" | energy {_format_ratio(state_summary.get('energy_level'), state_summary.get('max_energy'))}"
     f" | backend {state_summary.get('control_backend') or '-'}"
   )
+  timeline_policy_line = _format_timeline_policy_line(state_summary, selected_action)
+  if timeline_policy_line:
+    lines.append(timeline_policy_line)
 
   stats_line = _format_current_stats_line(state_summary)
   if stats_line:

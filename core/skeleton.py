@@ -57,6 +57,7 @@ from core.trackblazer.models import (
   render_compact_summary,
   render_turn_discussion,
 )
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 from core.trackblazer.runtime import PlannerRuntimeHooks, run_trackblazer_planner_turn
 from core.trackblazer.review import build_ranked_training_snapshot as _build_trackblazer_ranked_training_snapshot
 from core.trackblazer.compat import (
@@ -5084,6 +5085,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "skill_purchase_plan": state_obj.get("skill_purchase_plan"),
   }
   if (constants.SCENARIO_NAME or "default") in ("mant", "trackblazer"):
+    timeline_policy = get_trackblazer_timeline_policy(state_obj)
     state_summary["trackblazer_inventory_summary"] = state_obj.get("trackblazer_inventory_summary")
     state_summary["trackblazer_inventory_controls"] = state_obj.get("trackblazer_inventory_controls")
     state_summary["trackblazer_inventory_flow"] = state_obj.get("trackblazer_inventory_flow")
@@ -5094,6 +5096,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     state_summary["trackblazer_climax"] = state_obj.get("trackblazer_climax")
     state_summary["trackblazer_climax_locked_race"] = state_obj.get("trackblazer_climax_locked_race")
     state_summary["trackblazer_trainings_remaining_upper_bound"] = state_obj.get("trackblazer_trainings_remaining_upper_bound")
+    state_summary["trackblazer_timeline_policy"] = timeline_policy
     shop_policy_context = policy_context(year=state_obj.get("year"), turn=state_obj.get("turn"))
     state_summary["trackblazer_shop_policy_context"] = shop_policy_context
     state_summary["trackblazer_shop_priority_preview"] = get_priority_preview(
@@ -5138,6 +5141,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     ),
     "trackblazer_race_decision": review_action.get("trackblazer_race_decision") if hasattr(review_action, "get") else None,
     "trackblazer_race_lookahead": review_action.get("trackblazer_race_lookahead") if hasattr(review_action, "get") else None,
+    "timeline_policy": get_trackblazer_timeline_policy(state_obj),
   }
   selected_action = copy.deepcopy(planner_selected_action)
   for key, value in live_selected_action.items():
@@ -6568,15 +6572,12 @@ def career_lobby(dry_run_turn=False):
 
         with _timed_turn_step("Climax race-day check", "decision", key="climax_race_day_check") as step:
           climax_detection = inspect_climax_race_day_detection(log_result=True)
-          forced_climax_year = str(state_obj.get("year") or "").strip() == "Finale Underway"
           step["detail"] = _turn_metric_detail(
-            f"detected={bool(climax_detection.get('detected') or forced_climax_year)}",
+            f"detected={bool(climax_detection.get('detected'))}",
             f"banner={bool((climax_detection.get('banner') or {}).get('passed_threshold'))}",
             f"button={bool((climax_detection.get('button') or {}).get('passed_threshold'))}",
           )
-        if forced_climax_year and not climax_detection.get("detected"):
-          info("[TB_RACE] Finale Underway year label detected without forced-race template match; forcing Climax race-day fallback.")
-        state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected") or forced_climax_year)
+        state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected"))
         state_obj["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
         state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
 

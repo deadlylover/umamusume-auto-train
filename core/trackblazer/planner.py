@@ -23,6 +23,7 @@ from core.trackblazer.derive import derive_turn_state
 from core.trackblazer_item_use import plan_item_usage
 from core.trackblazer.observe import hydrate_observed_turn_state
 from core.trackblazer.review import build_ranked_training_snapshot
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 from core.trackblazer_race_logic import (
   evaluate_trackblazer_race,
   get_race_lookahead_energy_advice,
@@ -289,12 +290,13 @@ def _warning_outcome_payload(action) -> Dict[str, Any]:
   return {}
 
 
-def _build_selected_action_review_context(action, pre_action_items=None, reassess_after_item_use=None) -> Dict[str, Any]:
+def _build_selected_action_review_context(action, pre_action_items=None, reassess_after_item_use=None, timeline_policy=None) -> Dict[str, Any]:
   if not hasattr(action, "get"):
     return {
       "func": getattr(action, "func", None),
       "pre_action_item_use": list(pre_action_items or []),
       "reassess_after_item_use": bool(reassess_after_item_use),
+      "timeline_policy": copy.deepcopy(timeline_policy or {}),
     }
   training_data = action.get("training_data") or {}
   return {
@@ -318,6 +320,7 @@ def _build_selected_action_review_context(action, pre_action_items=None, reasses
     "rival_scout": copy.deepcopy(action.get("rival_scout") or {}),
     "pre_action_item_use": copy.deepcopy(pre_action_items or []),
     "reassess_after_item_use": bool(reassess_after_item_use),
+    "timeline_policy": copy.deepcopy(timeline_policy or {}),
     "trackblazer_race_decision": copy.deepcopy(action.get("trackblazer_race_decision") or {}),
     "trackblazer_race_lookahead": copy.deepcopy(action.get("trackblazer_race_lookahead") or {}),
   }
@@ -1040,8 +1043,8 @@ def _apply_shop_deviation_rules(
     if deviation:
       deviations.append(deviation)
 
-  timeline_window = dict(derived_data.get("timeline_window") or {})
-  summer_distance = _safe_float(timeline_window.get("summer_distance"), 99.0)
+  timeline_policy = dict(derived_data.get("timeline_policy") or derived_data.get("timeline_window") or {})
+  summer_distance = _safe_float(timeline_policy.get("summer_distance"), 99.0)
   summer_reserve = sum(int(held_quantities.get(item_key) or 0) for item_key in _SUMMER_RESERVE_ITEM_KEYS)
   if summer_distance <= 1.0 and summer_reserve < 1:
     summer_candidate = next(
@@ -1225,6 +1228,7 @@ def _planner_selected_action_payload(
 
 def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_check=False):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
   base_action = _capture_action_payload(action, state_obj=state_obj)
   # Transitional race-node probes should not pull planner intent from legacy
   # fallback payloads; ranked selection rebuilds planner-owned fallback state.
@@ -1232,11 +1236,8 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
-  forced_climax_race_day = bool(
-    state_obj.get("trackblazer_climax_race_day")
-    or _action_value(action, "trackblazer_climax_race_day")
-  )
-  forced_race_day = bool(state_obj.get("turn") == "Race Day" or _action_value(action, "is_race_day"))
+  forced_climax_race_day = bool(timeline_policy.get("is_forced_climax_race_day"))
+  forced_race_day = bool(timeline_policy.get("is_race_day"))
   mission_race_enabled = bool(getattr(config, "DO_MISSION_RACES_IF_POSSIBLE", False) and state_obj.get("race_mission_available"))
   prioritize_missions = bool(getattr(config, "PRIORITIZE_MISSIONS_OVER_G1", False))
   race_lookahead = get_race_lookahead_energy_advice(
@@ -2164,18 +2165,16 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
 
   lookahead = dict(derived_data.get("lookahead_summary") or {})
   race_opportunity = dict(derived_data.get("race_opportunity") or {})
-  timeline_window = dict(derived_data.get("timeline_window") or {})
+  timeline_policy = dict(derived_data.get("timeline_policy") or derived_data.get("timeline_window") or {})
   operator_race_gate = get_race_gate_for_turn_label(
     observed_data.get("year"),
     getattr(config, "OPERATOR_RACE_SELECTOR", None),
   )
   optional_races_blocked = bool(
-    operator_race_gate.get("enabled") and not operator_race_gate.get("race_allowed")
+    (operator_race_gate.get("enabled") and not operator_race_gate.get("race_allowed"))
+    or not timeline_policy.get("optional_races_allowed", True)
   )
-  finale_training_turn = bool(
-    observed_data.get("trackblazer_climax")
-    and not observed_data.get("trackblazer_climax_race_day")
-  )
+  finale_training_turn = bool(timeline_policy.get("is_finale_underway_training_turn"))
   energy_ratio = _safe_float(derived_data.get("energy_ratio"), None)
   if energy_ratio is None:
     energy_ratio = 0.5
@@ -2240,7 +2239,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         failure_penalty = 1.0
       rainbow_multiplier = 1.0 + (0.06 * min(3.0, _safe_float(training.get("rainbow_count"), 0.0)))
       support_count = _safe_float(training.get("support_count"), 0.0)
-      bond_multiplier = 1.0 if timeline_window.get("past_bond_training_cutoff") else 1.0 + (0.02 * min(5.0, support_count))
+      bond_multiplier = 1.0 if timeline_policy.get("is_post_bond_cutoff") else 1.0 + (0.02 * min(5.0, support_count))
       score = base_score * failure_penalty * rainbow_multiplier * bond_multiplier
       score_components = {
         "base_score": base_score,
@@ -2252,7 +2251,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         item_delta = _safe_float(training.get("item_assist_score_delta"), 0.0)
         opportunity_cost = 0.0
         if item_key == "reset_whistle":
-          if timeline_window.get("summer_window"):
+          if timeline_policy.get("is_summer_window"):
             pass
           elif finale_training_turn:
             if (
@@ -2266,14 +2265,14 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
           else:
             opportunity_cost += 100.0
         if item_key in {"vita_65", "royal_kale_juice"} and (
-          timeline_window.get("summer_window")
-          or _safe_float(timeline_window.get("summer_distance"), 99.0) <= 1.0
+          timeline_policy.get("is_summer_window")
+          or _safe_float(timeline_policy.get("summer_distance"), 99.0) <= 1.0
         ):
           opportunity_cost += 8.0
         if "hammer" in item_key:
-          if timeline_window.get("tsc_active"):
+          if timeline_policy.get("is_climax_window"):
             opportunity_cost += 100.0
-          if _safe_float(timeline_window.get("climax_distance"), 99.0) <= 1.0:
+          if _safe_float(timeline_policy.get("climax_distance"), 99.0) <= 1.0:
             opportunity_cost += 35.0
         if "megaphone" in item_key and not dict(training.get("usage_context") or {}).get("commit_training_after_items"):
           opportunity_cost += 6.0
@@ -2347,14 +2346,14 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       score = 12.0
       score_components = {"skill_cadence_open": bool(derived_data.get("skill_cadence_open"))}
     elif node_id.startswith("use_reset_whistle"):
-      score = 40.0 if timeline_window.get("summer_window") else float("-inf")
-      viable = bool(timeline_window.get("summer_window"))
-      score_components = {"summer_window": bool(timeline_window.get("summer_window"))}
+      score = 40.0 if timeline_policy.get("is_summer_window") else float("-inf")
+      viable = bool(timeline_policy.get("is_summer_window"))
+      score_components = {"summer_window": bool(timeline_policy.get("is_summer_window"))}
     elif node_id.startswith("use_hammer:"):
       score = 20.0
-      if timeline_window.get("tsc_active"):
+      if timeline_policy.get("is_climax_window"):
         score -= 100.0
-      score_components = {"tsc_active": bool(timeline_window.get("tsc_active"))}
+      score_components = {"tsc_active": bool(timeline_policy.get("is_climax_window"))}
     else:
       score = 0.0
       score_components = {"unclassified": True}
@@ -3583,7 +3582,8 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
   race_entry_gate = {}
   race_scout_planned = {}
   rival_indicator_detected = (state_obj or {}).get("rival_indicator_detected")
-  forced_climax_race_day = bool((state_obj or {}).get("trackblazer_climax_race_day"))
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  forced_climax_race_day = bool(timeline_policy.get("is_forced_climax_race_day"))
   scheduled_race = bool(_action_value(action, "scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
   lobby_scheduled_race = bool((state_obj or {}).get("trackblazer_lobby_scheduled_race") or _action_value(action, "trackblazer_lobby_scheduled_race"))
   operator_selected_race_name = get_selected_race_for_turn_label(
@@ -3834,13 +3834,29 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
       available_actions=available_actions,
     )
 
+    existing_selected_action = dict((turn_plan.review_context or {}).get("selected_action") or {})
+    selected_action_context = _build_selected_action_review_context(
+      action,
+      pre_action_items=list(item_plan.get("pre_action_items") or []),
+      reassess_after_item_use=item_plan.get("reassess_after_item_use"),
+      timeline_policy=(existing_selected_action.get("timeline_policy") or {}),
+    )
+    for key, value in existing_selected_action.items():
+      if value in (None, {}, []):
+        continue
+      selected_action_context[key] = copy.deepcopy(value)
+    if (
+      selected_action_context.get("training_name")
+      and selected_action_context.get("score_tuple")
+      and not selected_action_context.get("race_name")
+    ):
+      selected_action_context["func"] = "do_training"
+    elif selected_action_context.get("race_name"):
+      selected_action_context["func"] = "do_race"
+
     turn_plan.review_context = {
       **dict(turn_plan.review_context or {}),
-      "selected_action": _build_selected_action_review_context(
-        action,
-        pre_action_items=list(item_plan.get("pre_action_items") or []),
-        reassess_after_item_use=item_plan.get("reassess_after_item_use"),
-      ),
+      "selected_action": selected_action_context,
     }
   return action
 
@@ -3949,20 +3965,17 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
     )
 
   projected_state = _project_inventory(plan_state, shop_buy_plan) if shop_buy_plan else plan_state
-  item_use_plan = plan_item_usage(
-    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-    state_obj=projected_state,
-    action=action,
-    limit=limit,
-  )
-  execution_items, deferred_use, reassess_after_item_use = _attach_execution_item_plan(item_use_plan)
+  item_use_plan = {"context": {}, "candidates": [], "deferred": []}
+  execution_items = []
+  deferred_use = []
+  reassess_after_item_use = False
   item_execution_payload = _build_item_execution_payload(
     action,
     shop_buy_plan,
     execution_items,
     deferred_use,
     reassess_after_item_use,
-    item_use_plan.get("context") or {},
+    {},
   )
   reobserve_boundaries = _build_reobserve_boundaries(item_execution_payload)
 
@@ -4055,24 +4068,6 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
     shop_summary=shop_summary,
     held_quantities=held_quantities,
   )
-  if shop_buy_plan != baseline_shop_buy_plan:
-    projected_state = _project_inventory(plan_state, shop_buy_plan) if shop_buy_plan else plan_state
-    item_use_plan = plan_item_usage(
-      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
-      state_obj=projected_state,
-      action=action,
-      limit=limit,
-    )
-    execution_items, deferred_use, reassess_after_item_use = _attach_execution_item_plan(item_use_plan)
-    item_execution_payload = _build_item_execution_payload(
-      action,
-      shop_buy_plan,
-      execution_items,
-      deferred_use,
-      reassess_after_item_use,
-      item_use_plan.get("context") or {},
-    )
-    reobserve_boundaries = _build_reobserve_boundaries(item_execution_payload)
   selected_race_plan = _apply_ranked_selection_to_race_plan(
     state_obj,
     action,
@@ -4197,6 +4192,7 @@ def plan_once(state_obj, action, limit=8, plan_options=None) -> Dict[str, Any]:
         planner_action,
         pre_action_items=execution_items,
         reassess_after_item_use=reassess_after_item_use,
+        timeline_policy=copy.deepcopy((derived.to_dict() or {}).get("timeline_policy") or {}),
       ),
       "ranked_trainings": copy.deepcopy(ranked_trainings),
       "shop_deviations": copy.deepcopy(shop_deviations),

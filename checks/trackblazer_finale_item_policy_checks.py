@@ -6,6 +6,7 @@ from core.actions import Action
 from core.trackblazer import planner as planner_module
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 from core.trackblazer_item_use import plan_item_usage
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 
 
 def _base_state():
@@ -215,6 +216,142 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
 
     self.assertFalse(decision.get("should_race"))
     self.assertTrue(decision.get("prefer_train_over_weak_training"))
+
+  def test_timeline_policy_models_finale_training_turn_without_forced_race_signal(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = "Finale Turn"
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_climax_race_day_banner"] = False
+    state_obj["trackblazer_climax_race_day_button"] = False
+
+    timeline_policy = get_trackblazer_timeline_policy(state_obj)
+
+    self.assertTrue(timeline_policy.get("is_climax_window"))
+    self.assertTrue(timeline_policy.get("is_finale_underway_training_turn"))
+    self.assertFalse(timeline_policy.get("is_forced_climax_race_day"))
+    self.assertFalse(timeline_policy.get("optional_races_allowed"))
+    self.assertEqual(timeline_policy.get("trainings_remaining_upper_bound"), 6)
+
+  def test_explicit_climax_race_signal_forces_race_branch(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = "Finale Turn"
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_climax_race_day_banner"] = True
+    state_obj["trackblazer_climax_race_day_button"] = False
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "speed"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["speed"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    decision = evaluate_trackblazer_race(state_obj, action)
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+
+    self.assertTrue(decision.get("should_race"))
+    self.assertEqual((turn_plan.get("race_plan") or {}).get("branch_kind"), "forced_climax_race")
+    self.assertEqual(selected_action.get("func"), "do_race")
+    self.assertTrue(((selected_action.get("timeline_policy") or {}).get("is_forced_climax_race_day")))
+
+  def test_summer_weak_board_keeps_existing_whistle_reroll_behavior(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Senior Year Early Jul"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_inventory"]["reset_whistle"] = {
+      "detected": True,
+      "held_quantity": 1,
+      "increment_target": (3, 3),
+      "category": "condition",
+    }
+    state_obj["trackblazer_inventory_summary"]["held_quantities"]["reset_whistle"] = 1
+    state_obj["trackblazer_inventory_summary"]["items_detected"].append("reset_whistle")
+    state_obj["trackblazer_inventory_summary"]["actionable_items"].append("reset_whistle")
+    state_obj["training_results"]["speed"]["score_tuple"] = (4.0, 0)
+    state_obj["training_results"]["speed"]["weighted_stat_score"] = 4.0
+    state_obj["training_results"]["speed"]["failure"] = 9
+    state_obj["training_results"]["speed"]["stat_gains"] = {"speed": 14, "sp": 5}
+    state_obj["training_results"]["speed"]["total_rainbow_friends"] = 0
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "speed"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["speed"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = plan_item_usage(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=state_obj,
+      action=action,
+      limit=8,
+    )
+    candidate_keys = [entry.get("key") for entry in (plan.get("candidates") or [])]
+
+    self.assertIn("reset_whistle", candidate_keys)
+    self.assertTrue((plan.get("context") or {}).get("summer_window"))
+
+  def test_pre_bond_cutoff_training_scoring_keeps_friendship_sensitive_preference(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Classic Year Early May"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = False
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_climax_race_day_banner"] = False
+    state_obj["trackblazer_climax_race_day_button"] = False
+    state_obj["training_results"] = {
+      "speed": {
+        "name": "speed",
+        "score_tuple": (30.0, 0),
+        "weighted_stat_score": 30.0,
+        "stat_gains": {"speed": 20, "sp": 8},
+        "failure": 0,
+        "total_supports": 0,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 0},
+        "failure_bypassed_by_items": False,
+      },
+      "stamina": {
+        "name": "stamina",
+        "score_tuple": (29.0, 0),
+        "weighted_stat_score": 29.0,
+        "stat_gains": {"stamina": 15, "sp": 8},
+        "failure": 0,
+        "total_supports": 4,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 1, "blue": 2, "green": 1, "yellow": 0, "max": 0},
+        "failure_bypassed_by_items": False,
+      },
+    }
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "speed"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["speed"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    timeline_policy = (selected_action.get("timeline_policy") or {})
+    candidate_ranking = list(turn_plan.get("candidate_ranking") or [])
+    training_candidates = [
+      entry for entry in candidate_ranking
+      if str(entry.get("node_id") or "").startswith("train:")
+    ]
+
+    self.assertTrue(timeline_policy.get("is_pre_bond_cutoff"))
+    self.assertGreaterEqual(len(training_candidates), 2)
+    self.assertEqual(training_candidates[0].get("node_id"), "train:stamina")
 
 
 if __name__ == "__main__":

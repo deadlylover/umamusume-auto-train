@@ -323,6 +323,7 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
   energy_ratio = derived_data.get("energy_ratio")
   rival_min_energy = float((policy or {}).get("rival_race_min_energy_ratio", 0.02) or 0.02)
   training_threshold = float((policy or {}).get("training_overrides_race_threshold", 30) or 30)
+  timeline_policy = dict(derived_data.get("timeline_policy") or derived_data.get("timeline_window") or {})
   best_training_score = None
   if training_values:
     best_training_score = max(
@@ -333,7 +334,12 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       ),
       default=None,
     )
-  if race_opportunity.get("rival_visible") and isinstance(energy_ratio, (int, float)) and energy_ratio > rival_min_energy:
+  if (
+    timeline_policy.get("optional_races_allowed", True)
+    and race_opportunity.get("rival_visible")
+    and isinstance(energy_ratio, (int, float))
+    and energy_ratio > rival_min_energy
+  ):
     _append_candidate(
       candidates,
       node_id="race:rival",
@@ -344,9 +350,10 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       source_facts=race_opportunity,
     )
   elif (
-    isinstance(energy_ratio, (int, float))
+    timeline_policy.get("optional_races_allowed", True)
+    and not timeline_policy.get("is_summer_window")
+    and isinstance(energy_ratio, (int, float))
     and energy_ratio > rival_min_energy
-    and not bool(derived_data.get("is_summer"))
     and list((constants.ALL_RACES or {}).get(observed_data.get("year"), []) or [])
     and (best_training_score is None or best_training_score < training_threshold)
   ):

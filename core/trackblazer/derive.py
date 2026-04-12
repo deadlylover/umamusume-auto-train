@@ -8,6 +8,7 @@ import utils.constants as constants
 from core.actions import Action
 from core.trackblazer_item_use import _hammer_usage_state, _usage_context
 from core.trackblazer.models import DerivedTurnState, ObservedTurnState
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 from core.trackblazer_race_logic import (
   get_optional_race_low_energy_override,
   get_race_lookahead_energy_advice,
@@ -171,19 +172,22 @@ def _lookahead_summary(state_obj, observed_data, policy):
   return summary
 
 
-def _race_opportunity(observed_data, lookahead_summary):
+def _race_opportunity(observed_data, lookahead_summary, timeline_policy):
   races_today = list(constants.RACES.get(observed_data.get("year"), []) or [])
   g1_today = any((race or {}).get("grade") == "G1" for race in races_today)
   mandatory_today = bool(
-    str(observed_data.get("turn") or "") == "Race Day"
+    bool((timeline_policy or {}).get("is_race_day"))
     or g1_today
+    or bool((timeline_policy or {}).get("is_forced_climax_race_day"))
     or observed_data.get("trackblazer_climax_locked_race")
-    or observed_data.get("trackblazer_climax_race_day")
   )
   return {
     "rival_visible": bool(observed_data.get("rival_indicator_detected")),
     "lobby_scheduled": bool(observed_data.get("trackblazer_lobby_scheduled_race")),
-    "climax_locked": bool(observed_data.get("trackblazer_climax_locked_race") or observed_data.get("trackblazer_climax_race_day")),
+    "climax_locked": bool(
+      observed_data.get("trackblazer_climax_locked_race")
+      or bool((timeline_policy or {}).get("is_forced_climax_race_day"))
+    ),
     "mandatory_today": mandatory_today,
     "optional_safe_under_lookahead": not bool(lookahead_summary.get("projected_energy_deficit")),
   }
@@ -220,24 +224,8 @@ def _item_availability(state_obj):
 
 
 def _timeline_window(observed_data, policy):
-  turn_label = str(observed_data.get("year") or "").strip()
-  current_index = _timeline_index(turn_label)
-  is_summer = any(token in str(observed_data.get("turn") or "").lower() for token in _SUMMER_TOKENS) or any(token in turn_label.lower() for token in _SUMMER_TOKENS)
-  is_climax = bool(observed_data.get("trackblazer_climax"))
-  cutoff_turn = policy.get("bond_training_cutoff_turn")
-  cutoff_index = _timeline_index(cutoff_turn) if cutoff_turn else None
-  next_summer_distance = _distance_to_labels(current_index, lambda label: any(token in label.lower() for token in _SUMMER_TOKENS))
-  return {
-    "is_summer": is_summer,
-    "is_climax": is_climax,
-    "tsc_active": is_climax,
-    "past_bond_training_cutoff": bool(cutoff_index is not None and current_index is not None and current_index > cutoff_index),
-    "past_final_summer": bool(current_index is not None and "Senior Year Late Aug" in constants.TIMELINE and current_index > constants.TIMELINE.index("Senior Year Late Aug")),
-    "summer_window": is_summer,
-    "climax_window": is_climax,
-    "summer_distance": 0 if is_summer else next_summer_distance,
-    "climax_distance": 0 if is_climax else _distance_to_labels(current_index, lambda label: "climax" in label.lower()),
-  }
+  del policy
+  return get_trackblazer_timeline_policy(observed_data)
 
 
 def _training_value(training_results, state_obj, policy):
@@ -377,21 +365,21 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
       "next_g1_distance": None,
       "next_race_day_distance": None,
     }
-  timeline_window = _timeline_window(observed_data, policy)
+  timeline_policy = _timeline_window(observed_data, policy)
   skill_purchase_check = copy.deepcopy(observed_data.get("skill_purchase_check") or {})
   skill_cadence_open = bool(skill_purchase_check.get("should_check"))
   skill_cadence_reason = str(skill_purchase_check.get("reason") or "")
   data: Dict[str, Any] = {
     "turn_key": f"{observed_data.get('year') or '?'}|{observed_data.get('turn') or '?'}",
     "timeline_label": observed_data.get("turn"),
-    "is_summer": any(token in turn_label for token in _SUMMER_TOKENS),
+    "is_summer": bool(timeline_policy.get("is_summer_window")),
     "energy_ratio": energy_ratio,
     "energy_class": _energy_class(energy_ratio, policy.get("energy_class_cutoffs") or {}),
     "observation_status": observation_status,
     "missing_inputs": missing_inputs,
     "training_value": training_value,
     "training_value_summary": _best_training_summary(training_value),
-    "race_opportunity": _race_opportunity(observed_data, lookahead_summary),
+    "race_opportunity": _race_opportunity(observed_data, lookahead_summary, timeline_policy),
     "race_available_summary": {
       "rival_indicator": bool(observed_data.get("rival_indicator_detected")),
       "race_mission_available": bool(observed_data.get("race_mission_available")),
@@ -404,7 +392,8 @@ def derive_turn_state(observed: ObservedTurnState, planner_state=None, state_obj
     "reassess_after_item_use": bool(planner_state.get("reassess_after_item_use")),
     "skill_scan_state": (((planner_state.get("turn_plan") or {}).get("planner_metadata") or {}).get("runtime") or {}).get("pending_skill_scan") or {},
     "item_availability": _item_availability(state_obj),
-    "timeline_window": timeline_window,
+    "timeline_window": copy.deepcopy(timeline_policy),
+    "timeline_policy": copy.deepcopy(timeline_policy),
     "lookahead_summary": lookahead_summary,
     "skill_cadence_open": skill_cadence_open,
     "skill_cadence_reason": skill_cadence_reason,

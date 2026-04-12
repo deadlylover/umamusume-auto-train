@@ -17,6 +17,7 @@ from core.trackblazer_item_use import (
   get_training_behavior_settings,
   get_training_behavior_strong_training_score_threshold,
 )
+from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 from utils.log import debug, info, warning
 
 
@@ -105,19 +106,10 @@ def _safe_energy_restore_item(held_quantities, current_energy, target_energy):
   }
 
 
-def _is_summer(year):
-  return str(year or "") in _SUMMER_WINDOWS
-
-
 def _is_finale_training_turn(state_obj):
   state_obj = state_obj if isinstance(state_obj, dict) else {}
-  return bool(
-    (
-      state_obj.get("trackblazer_climax")
-      or str(state_obj.get("year") or "").strip() == "Finale Underway"
-    )
-    and not state_obj.get("trackblazer_climax_race_day")
-  )
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  return bool(timeline_policy.get("is_finale_underway_training_turn"))
 
 
 def _finale_should_keep_training(state_obj, action):
@@ -837,11 +829,32 @@ def evaluate_trackblazer_race(state_obj, action):
   """
   year = state_obj.get("year", "")
   turn = state_obj.get("turn", "")
-  summer = _is_summer(year)
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  summer = bool(timeline_policy.get("is_summer_window"))
   training_stats = _total_stat_gain(action)
   training_score = _training_score(action)
   training_supports = _support_count(action)
   race_info = _detect_race_options(state_obj)
+
+  if timeline_policy.get("is_forced_climax_race_day"):
+    return _decision(
+      should_race=True,
+      reason=(
+        "Explicit Climax race-day signal is present "
+        f"({', '.join(timeline_policy.get('forced_climax_signal_sources') or ['state_flag'])})"
+      ),
+      training_total_stats=training_stats,
+      training_score=training_score,
+      training_supports=training_supports,
+      is_summer=summer,
+      g1_forced=True,
+      prefer_rival_race=False,
+      race_tier_target="any",
+      race_name=None,
+      race_available=True,
+      rival_indicator=False,
+      race_tier_info=race_info,
+    )
 
   if state_obj.get("trackblazer_climax_locked_race"):
     return _decision(
@@ -862,7 +875,7 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # --- Mandatory races (schedule-driven, no rival check needed) -----------
 
-  if turn == "Race Day":
+  if timeline_policy.get("is_race_day"):
     return _decision(
       should_race=True,
       reason="Race Day is mandatory",
