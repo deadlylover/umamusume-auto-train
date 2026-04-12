@@ -170,6 +170,10 @@ class OperatorConsole:
     self._item_policy_context_var = None
     self._item_policy_canvas = None
     self._item_policy_body = None
+    self._planner_flow_window = None
+    self._planner_flow_canvas = None
+    self._planner_flow_vars = {}
+    self._planner_flow_node_items = {}
     self._stat_weights_window = None
     self._stat_weights_entries = {}
     self._bond_boost_var = None
@@ -294,6 +298,7 @@ class OperatorConsole:
     tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     tk.Button(primary_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
+    tk.Button(primary_controls, text="Planner Flow", command=self._open_planner_flow_window).pack(side=tk.LEFT, padx=(4, 0))
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "execute"):
       tk.Radiobutton(
@@ -2941,6 +2946,415 @@ class OperatorConsole:
 
   def _get_active_planner_policy(self):
     return config.normalize_trackblazer_planner_policy(getattr(config, "TRACKBLAZER_PLANNER_POLICY", None))
+
+  # ── Planner Flow window ──────────────────────────────────────────────
+
+  _FLOW_BG = "#101418"
+  _FLOW_CANVAS_BG = "#0d1117"
+  _FLOW_DECISION_FILL = "#1c2333"
+  _FLOW_DECISION_OUTLINE = "#7cb3ff"
+  _FLOW_ACTION_COLORS = {
+    "train": ("#1a3a1a", "#4caf50"),
+    "race": ("#1a2a3a", "#42a5f5"),
+    "rest": ("#3a2a1a", "#ff9800"),
+    "rival_race": ("#1a2a3a", "#7e57c2"),
+  }
+  _FLOW_LINE_COLOR = "#4a5568"
+  _FLOW_TEXT_COLOR = "#d6dde5"
+  _FLOW_DIM_TEXT = "#8b949e"
+  _FLOW_YES_COLOR = "#4caf50"
+  _FLOW_NO_COLOR = "#ef5350"
+
+  def _open_planner_flow_window(self):
+    if self._root is None:
+      return
+    existing = self._planner_flow_window
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          self._refresh_planner_flow_values()
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    window = tk.Toplevel(self._root)
+    window.title("Planner Flow")
+    window.configure(bg=self._FLOW_BG)
+    window.geometry("920x860")
+    window.resizable(True, True)
+    window.minsize(800, 700)
+    window.bind(
+      "<Destroy>",
+      lambda event, w=window: self._clear_planner_flow_window() if event.widget is w else None,
+    )
+
+    header = tk.Frame(window, bg=self._FLOW_BG, padx=8, pady=6)
+    header.pack(fill=tk.X)
+    tk.Label(
+      header, text="Trackblazer decision flow", fg="#9aa4ad", bg=self._FLOW_BG,
+    ).pack(side=tk.LEFT)
+
+    canvas_frame = tk.Frame(window, bg=self._FLOW_BG)
+    canvas_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+    canvas_frame.rowconfigure(0, weight=1)
+    canvas_frame.columnconfigure(0, weight=1)
+
+    canvas = tk.Canvas(canvas_frame, bg=self._FLOW_CANVAS_BG, highlightthickness=0)
+    v_scroll = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=v_scroll.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    v_scroll.grid(row=0, column=1, sticky="ns")
+    self._planner_flow_canvas = canvas
+
+    behavior = self._get_active_training_behavior()
+    planner = self._get_active_planner_policy()
+    self._planner_flow_vars = {}
+    self._planner_flow_node_items = {}
+
+    self._draw_planner_flow(canvas, behavior, planner)
+
+    buttons = tk.Frame(window, bg=self._FLOW_BG, padx=8, pady=8)
+    buttons.pack(fill=tk.X)
+    tk.Button(buttons, text="Save", command=self._save_planner_flow).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Button(buttons, text="Reset Defaults", command=self._reset_planner_flow_defaults).pack(side=tk.LEFT, padx=(0, 8))
+    tk.Label(
+      buttons, text="Thresholds are editable — changes apply after Save.",
+      fg="#8b949e", bg=self._FLOW_BG,
+    ).pack(side=tk.LEFT, padx=(12, 0))
+
+    self._planner_flow_window = window
+
+  def _clear_planner_flow_window(self):
+    self._planner_flow_window = None
+    self._planner_flow_canvas = None
+    self._planner_flow_vars = {}
+    self._planner_flow_node_items = {}
+
+  def _refresh_planner_flow_values(self):
+    behavior = self._get_active_training_behavior()
+    planner = self._get_active_planner_policy()
+    var_map = {
+      "optional_race_threshold": int(planner.get(
+        "training_overrides_race_threshold",
+        behavior.get("optional_race_training_threshold", 40),
+      )),
+      "committed_training_threshold": int(behavior.get("committed_training_score_threshold", 35)),
+      "strong_training_threshold": int(behavior.get("strong_training_score_threshold", 40)),
+      "race_lookahead_exceptional": int(behavior.get("race_lookahead_exceptional_score", 40)),
+      "race_lookahead_conserve_pct": int(behavior.get("race_lookahead_conserve_threshold", 60)),
+      "weak_fallback_race_threshold": int(behavior.get("weak_training_fallback_race_score_threshold", 30)),
+      "low_energy_rest_pct": int(behavior.get("weak_training_fallback_race_low_energy_rest_pct", 2)),
+      "rest_exempt_score": int(behavior.get("weak_training_fallback_race_low_energy_rest_exempt_score", 35)),
+    }
+    for key, val in var_map.items():
+      var = self._planner_flow_vars.get(key)
+      if var is not None:
+        var.set(str(val))
+
+  def _draw_planner_flow(self, canvas, behavior, planner):
+    CW = 880
+    y = 30
+
+    def _val(key, default):
+      return int(planner.get(key, behavior.get(key, default)))
+
+    optional_race_thr = _val("training_overrides_race_threshold", behavior.get("optional_race_training_threshold", 40))
+    committed_thr = int(behavior.get("committed_training_score_threshold", 35))
+    strong_thr = int(behavior.get("strong_training_score_threshold", 40))
+    lookahead_exceptional = int(behavior.get("race_lookahead_exceptional_score", 40))
+    lookahead_conserve = int(behavior.get("race_lookahead_conserve_threshold", 60))
+    weak_fallback_thr = int(behavior.get("weak_training_fallback_race_score_threshold", 30))
+    low_energy_rest_pct = int(behavior.get("weak_training_fallback_race_low_energy_rest_pct", 2))
+    rest_exempt = int(behavior.get("weak_training_fallback_race_low_energy_rest_exempt_score", 35))
+
+    cx = CW // 2
+
+    def draw_action_box(x, y, label, action_type, w=140, h=36):
+      fill, outline = self._FLOW_ACTION_COLORS.get(action_type, ("#192028", "#9aa4ad"))
+      r = 6
+      x0, y0, x1, y1 = x - w // 2, y - h // 2, x + w // 2, y + h // 2
+      canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline=outline, width=2)
+      canvas.create_text(x, y, text=label, fill="white", font=("Helvetica", 11, "bold"))
+      return y1
+
+    def draw_decision(x, y, lines, w=260, h=52):
+      hw, hh = w // 2, h // 2
+      pts = [x, y - hh, x + hw, y, x, y + hh, x - hw, y]
+      canvas.create_polygon(pts, fill=self._FLOW_DECISION_FILL, outline=self._FLOW_DECISION_OUTLINE, width=2)
+      text = "\n".join(lines) if isinstance(lines, list) else lines
+      canvas.create_text(x, y, text=text, fill=self._FLOW_TEXT_COLOR, font=("Helvetica", 9), justify="center")
+      return y + hh
+
+    def draw_arrow(x1, y1, x2, y2, label=None, color=None):
+      line_color = color or self._FLOW_LINE_COLOR
+      canvas.create_line(x1, y1, x2, y2, fill=line_color, width=2, arrow=tk.LAST, arrowshape=(8, 10, 4))
+      if label:
+        lbl_color = self._FLOW_YES_COLOR if label.lower() == "yes" else self._FLOW_NO_COLOR if label.lower() == "no" else self._FLOW_DIM_TEXT
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        canvas.create_text(mx - 14, my, text=label, fill=lbl_color, font=("Helvetica", 8, "bold"), anchor="e")
+
+    def draw_arrow_h(x1, y1, x2, y2, label=None, color=None):
+      line_color = color or self._FLOW_LINE_COLOR
+      mid_x = (x1 + x2) / 2
+      canvas.create_line(x1, y1, mid_x, y1, fill=line_color, width=2)
+      canvas.create_line(mid_x, y1, mid_x, y2, fill=line_color, width=2)
+      canvas.create_line(mid_x, y2, x2, y2, fill=line_color, width=2, arrow=tk.LAST, arrowshape=(8, 10, 4))
+      if label:
+        lbl_color = self._FLOW_YES_COLOR if label.lower() == "yes" else self._FLOW_NO_COLOR if label.lower() == "no" else self._FLOW_DIM_TEXT
+        canvas.create_text(x1 + 10, y1 - 10, text=label, fill=lbl_color, font=("Helvetica", 8, "bold"), anchor="w")
+
+    def place_spinbox(key, x, y, default, from_=0, to_=200, width=5):
+      var = tk.StringVar(value=str(default))
+      self._planner_flow_vars[key] = var
+      spin = tk.Spinbox(
+        canvas, from_=from_, to=to_, width=width, textvariable=var,
+        bg="#192028", fg="white", buttonbackground="#2d333b", insertbackground="white",
+        font=("Helvetica", 10, "bold"), justify="center",
+      )
+      item_id = canvas.create_window(x, y, window=spin)
+      self._planner_flow_node_items[key] = item_id
+      return var
+
+    # ── Row 0: Start ──
+    draw_action_box(cx, y, "Training Selected", "train", w=180, h=32)
+    y += 32
+
+    # ── Row 1: Scheduled Race? ──
+    draw_arrow(cx, y, cx, y + 30)
+    y += 30 + 26
+    bottom = draw_decision(cx, y, "Scheduled Race?")
+    race_box_x = cx + 250
+    draw_arrow_h(cx + 130, y, race_box_x - 70, y, "Yes")
+    draw_action_box(race_box_x, y, "DO RACE", "race")
+    y = bottom + 8
+
+    # ── Row 2: Race Lookahead Conserve? ──
+    draw_arrow(cx, y, cx, y + 30)
+    y += 30 + 26
+    canvas.create_text(cx + 145, y - 8, text=f"energy < conserve %", fill=self._FLOW_DIM_TEXT, font=("Helvetica", 8), anchor="w")
+    bottom = draw_decision(cx, y, ["Race Lookahead:", "Conserve energy?"], w=280, h=56)
+    place_spinbox("race_lookahead_conserve_pct", cx + 260, y + 14, lookahead_conserve, to_=100)
+    no_x = cx + 280
+    canvas.create_text(no_x - 10, y - 22, text="No", fill=self._FLOW_NO_COLOR, font=("Helvetica", 8, "bold"), anchor="e")
+    canvas.create_line(cx + 140, y, no_x, y, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_line(no_x, y, no_x, bottom + 120, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_line(no_x, bottom + 120, cx, bottom + 120, fill=self._FLOW_LINE_COLOR, width=2, arrow=tk.LAST, arrowshape=(8, 10, 4))
+    y = bottom + 8
+
+    # ── Row 3: Exceptional training? ──
+    draw_arrow(cx, y, cx, y + 24, label="Yes")
+    y += 24 + 26
+    bottom = draw_decision(cx, y, ["Training score >=", "exceptional?"], w=260, h=52)
+    place_spinbox("race_lookahead_exceptional", cx + 10, y + 26, lookahead_exceptional)
+    train_box_x = cx + 250
+    draw_arrow_h(cx + 130, y, train_box_x - 80, y, "Yes")
+    draw_action_box(train_box_x, y, "TRAIN (+Vita)", "train", w=150)
+    y = bottom + 8
+
+    # ── Rest for race ──
+    draw_arrow(cx, y, cx, y + 24, label="No")
+    y += 24 + 16
+    draw_action_box(cx, y, "REST (conserve)", "rest", w=170)
+    y += 28
+
+    # ── Row 4: Check optional race (reconnect from No branch) ──
+    y += 16
+    canvas.create_text(cx, y, text="─── Check Optional Race ───", fill="#4a5568", font=("Helvetica", 9))
+    y += 20
+
+    # ── Row 5: Race gate blocked? ──
+    draw_arrow(cx, y, cx, y + 28)
+    y += 28 + 26
+    bottom = draw_decision(cx, y, "Race gate blocked?", w=240, h=48)
+
+    blocked_x = cx - 200
+    unblocked_x = cx + 200
+    canvas.create_line(cx - 120, y, blocked_x + 60, y, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_text(blocked_x + 70, y - 12, text="Yes", fill=self._FLOW_YES_COLOR, font=("Helvetica", 8, "bold"))
+    canvas.create_line(cx + 120, y, unblocked_x - 60, y, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_text(unblocked_x - 70, y - 12, text="No", fill=self._FLOW_NO_COLOR, font=("Helvetica", 8, "bold"))
+
+    y_branch = y + 40
+
+    # ── Left branch: blocked + score < min → REST ──
+    canvas.create_line(blocked_x, y + 24, blocked_x, y_branch + 26, fill=self._FLOW_LINE_COLOR, width=2, arrow=tk.LAST, arrowshape=(8, 10, 4))
+    draw_decision(blocked_x, y_branch + 52, ["Score <", "race threshold?"], w=220, h=48)
+    place_spinbox("optional_race_threshold", blocked_x + 10, y_branch + 78, optional_race_thr)
+
+    rest_blocked_y = y_branch + 52 + 40
+    draw_arrow(blocked_x, rest_blocked_y, blocked_x, rest_blocked_y + 30, label="Yes")
+    draw_action_box(blocked_x, rest_blocked_y + 46, "REST", "rest", w=100)
+
+    train_from_blocked_x = blocked_x - 140
+    canvas.create_line(blocked_x - 110, y_branch + 52, train_from_blocked_x + 50, y_branch + 52, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_text(train_from_blocked_x + 60, y_branch + 40, text="No", fill=self._FLOW_NO_COLOR, font=("Helvetica", 8, "bold"))
+    draw_action_box(train_from_blocked_x, y_branch + 52, "TRAIN", "train", w=90)
+
+    # ── Right branch: unblocked + score <= min → rival race or rest ──
+    canvas.create_line(unblocked_x, y + 24, unblocked_x, y_branch + 26, fill=self._FLOW_LINE_COLOR, width=2, arrow=tk.LAST, arrowshape=(8, 10, 4))
+    draw_decision(unblocked_x, y_branch + 52, ["Score <=", "race threshold?"], w=220, h=48)
+
+    rival_y = y_branch + 52 + 40
+    draw_arrow(unblocked_x, rival_y, unblocked_x, rival_y + 28, label="Yes")
+
+    # Low energy sub-check
+    low_e_y = rival_y + 28 + 26
+    draw_decision(unblocked_x, low_e_y, ["Low energy", f"(< rest %)"], w=200, h=44)
+    place_spinbox("low_energy_rest_pct", unblocked_x + 10, low_e_y + 22, low_energy_rest_pct, to_=100)
+
+    rest_low_x = unblocked_x + 160
+    draw_arrow_h(unblocked_x + 100, low_e_y, rest_low_x - 50, low_e_y, "Yes")
+    draw_action_box(rest_low_x, low_e_y, "REST", "rest", w=90)
+
+    rival_box_y = low_e_y + 40
+    draw_arrow(unblocked_x, rival_box_y - 18, unblocked_x, rival_box_y + 8, label="No")
+    draw_action_box(unblocked_x, rival_box_y + 24, "RIVAL RACE", "rival_race", w=140)
+
+    train_unblocked_x = unblocked_x + 200
+    canvas.create_line(unblocked_x + 110, y_branch + 52, train_unblocked_x - 45, y_branch + 52, fill=self._FLOW_LINE_COLOR, width=2)
+    canvas.create_text(train_unblocked_x - 55, y_branch + 40, text="No", fill=self._FLOW_NO_COLOR, font=("Helvetica", 8, "bold"))
+    draw_action_box(train_unblocked_x, y_branch + 52, "TRAIN", "train", w=90)
+
+    # ── Weak fallback race section ──
+    y_weak = rival_box_y + 60
+    canvas.create_text(cx, y_weak, text="─── Weak Training Fallback (post-Classic Sep) ───", fill="#4a5568", font=("Helvetica", 9))
+    y_weak += 20
+
+    draw_arrow(cx, y_weak, cx, y_weak + 28)
+    y_weak += 28 + 26
+    draw_decision(cx, y_weak, ["Score <", "weak fallback?"], w=240, h=48)
+    place_spinbox("weak_fallback_race_threshold", cx + 10, y_weak + 26, weak_fallback_thr)
+    sched_race_x = cx + 250
+    draw_arrow_h(cx + 120, y_weak, sched_race_x - 80, y_weak, "Yes")
+    draw_action_box(sched_race_x, y_weak, "SCHEDULE RACE", "race", w=160)
+
+    y_weak_no = y_weak + 38
+    draw_arrow(cx, y_weak_no - 12, cx, y_weak_no + 18, label="No")
+    draw_action_box(cx, y_weak_no + 34, "TRAIN", "train", w=100)
+
+    # ── Commit threshold legend ──
+    y_legend = y_weak_no + 70
+    canvas.create_text(cx, y_legend, text="─── Item-Use Commit Thresholds ───", fill="#4a5568", font=("Helvetica", 9))
+    y_legend += 24
+    canvas.create_text(cx - 160, y_legend, text="Strong training (use burst items):", fill=self._FLOW_DIM_TEXT, font=("Helvetica", 9), anchor="w")
+    place_spinbox("strong_training_threshold", cx + 100, y_legend, strong_thr)
+    y_legend += 30
+    canvas.create_text(cx - 160, y_legend, text="Commit training (rescue w/ items):", fill=self._FLOW_DIM_TEXT, font=("Helvetica", 9), anchor="w")
+    place_spinbox("committed_training_threshold", cx + 100, y_legend, committed_thr)
+    y_legend += 30
+    canvas.create_text(cx - 160, y_legend, text="Rest exempt score (low-energy fallback):", fill=self._FLOW_DIM_TEXT, font=("Helvetica", 9), anchor="w")
+    place_spinbox("rest_exempt_score", cx + 130, y_legend, rest_exempt)
+
+    # ── Legend ──
+    y_legend += 40
+    canvas.create_text(cx - 200, y_legend, text="Legend:", fill="#9aa4ad", font=("Helvetica", 9, "bold"), anchor="w")
+    legend_items = [
+      ("TRAIN", "train"),
+      ("RACE", "race"),
+      ("REST", "rest"),
+      ("RIVAL", "rival_race"),
+    ]
+    lx = cx - 120
+    for label, atype in legend_items:
+      fill, outline = self._FLOW_ACTION_COLORS[atype]
+      canvas.create_rectangle(lx, y_legend - 8, lx + 50, y_legend + 8, fill=fill, outline=outline, width=2)
+      canvas.create_text(lx + 25, y_legend, text=label, fill="white", font=("Helvetica", 8, "bold"))
+      lx += 80
+
+    total_h = y_legend + 40
+    canvas.configure(scrollregion=(0, 0, CW, total_h))
+
+  def _save_planner_flow(self):
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    current_planner = config.normalize_trackblazer_planner_policy(getattr(config, "TRACKBLAZER_PLANNER_POLICY", None))
+    training_behavior = get_default_training_behavior_settings()
+    settings = current_policy.get("settings", {}) if isinstance(current_policy.get("settings"), dict) else {}
+    behavior_settings = settings.get("training_behavior", {}) if isinstance(settings.get("training_behavior"), dict) else {}
+    training_behavior.update(behavior_settings)
+
+    def _int_var(key, default):
+      var = self._planner_flow_vars.get(key)
+      if var is None:
+        return default
+      try:
+        return max(0, int(var.get()))
+      except (TypeError, ValueError):
+        return default
+
+    optional_race_threshold = _int_var("optional_race_threshold", 40)
+    training_behavior["optional_race_training_threshold"] = optional_race_threshold
+    training_behavior["committed_training_score_threshold"] = _int_var("committed_training_threshold", 35)
+    training_behavior["strong_training_score_threshold"] = _int_var("strong_training_threshold", 40)
+    training_behavior["race_lookahead_exceptional_score"] = _int_var("race_lookahead_exceptional", 40)
+    training_behavior["race_lookahead_conserve_threshold"] = min(100, _int_var("race_lookahead_conserve_pct", 60))
+    training_behavior["weak_training_fallback_race_score_threshold"] = _int_var("weak_fallback_race_threshold", 30)
+    training_behavior["weak_training_fallback_race_low_energy_rest_pct"] = min(100, _int_var("low_energy_rest_pct", 2))
+    training_behavior["weak_training_fallback_race_low_energy_rest_exempt_score"] = _int_var("rest_exempt_score", 35)
+
+    current_planner["training_overrides_race_threshold"] = float(optional_race_threshold)
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "settings": {"training_behavior": training_behavior},
+      "items": current_policy.get("items", {}),
+    }
+    if not self._persist_config_value("trackblazer.planner_policy", current_planner):
+      self._message_value.set("Failed to save planner flow thresholds.")
+      return
+    if not self._persist_config_value("trackblazer.item_use_policy", policy):
+      self._message_value.set("Failed to save planner flow behavior.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved planner flow, but reload failed: {exc}")
+      return
+
+    self._message_value.set("Saved planner flow thresholds.")
+    self.publish()
+    if self._stat_weights_window is not None:
+      try:
+        if self._stat_weights_window.winfo_exists():
+          self._refresh_stat_weights_window()
+      except Exception:
+        pass
+
+  def _reset_planner_flow_defaults(self):
+    current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
+    default_behavior = get_default_training_behavior_settings()
+    default_planner = config.normalize_trackblazer_planner_policy({})
+
+    policy = {
+      "version": int(current_policy.get("version", 1)),
+      "settings": {"training_behavior": default_behavior},
+      "items": current_policy.get("items", {}),
+    }
+    if not self._persist_config_value("trackblazer.planner_policy", default_planner):
+      self._message_value.set("Failed to reset planner flow thresholds.")
+      return
+    if not self._persist_config_value("trackblazer.item_use_policy", policy):
+      self._message_value.set("Failed to reset planner flow behavior.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Reset planner flow, but reload failed: {exc}")
+      return
+
+    self._refresh_planner_flow_values()
+    self._message_value.set("Reset planner flow to defaults.")
+    self.publish()
+    if self._stat_weights_window is not None:
+      try:
+        if self._stat_weights_window.winfo_exists():
+          self._refresh_stat_weights_window()
+      except Exception:
+        pass
+
+  # ── Stat Weights / Training Behavior window ────────────────────────
 
   def _open_stat_weights_window(self):
     if self._root is None:
