@@ -1098,6 +1098,15 @@ def _usage_context(state_obj, action, policy=None):
   training_data = training_data if isinstance(training_data, dict) else {}
   training_name = action.get("training_name") if hasattr(action, "get") else None
   stat_gains = training_data.get("stat_gains") or {}
+  training_friendship_levels = (
+    training_data.get("total_friendship_levels")
+    if isinstance(training_data.get("total_friendship_levels"), dict)
+    else {}
+  )
+  raiseable_support_count = sum(
+    _safe_int(training_friendship_levels.get(level), 0)
+    for level in ("gray", "blue", "green")
+  )
   total_stat_gain = sum(
     _safe_int(value, 0)
     for stat_name, value in stat_gains.items()
@@ -1109,6 +1118,11 @@ def _usage_context(state_obj, action, policy=None):
   timeline_label = timeline.get("timeline_label") or ""
   timeline_index = timeline.get("timeline_index")
   climax_window = bool(timeline.get("is_climax"))
+  bond_boost_cutoff = bot.get_trackblazer_bond_boost_cutoff()
+  try:
+    past_bond_training_cutoff = constants.TIMELINE.index(timeline_label) > constants.TIMELINE.index(bond_boost_cutoff)
+  except ValueError:
+    past_bond_training_cutoff = False
   score_tuple = training_data.get("score_tuple")
   if isinstance(score_tuple, (list, tuple)) and score_tuple:
     score_value = _safe_float(score_tuple[0], 0.0)
@@ -1320,6 +1334,7 @@ def _usage_context(state_obj, action, policy=None):
     "spendable_vita_reaches_safe_energy": (energy_level + spendable_vita_restore_total) >= safe_energy_target,
     "action_func": action_func,
     "training_name": training_name,
+    "raiseable_support_count": raiseable_support_count,
     "training_score": score_value,
     "stat_gains": stat_gains,
     "matching_stat_gain": matching_stat_gain,
@@ -1344,6 +1359,12 @@ def _usage_context(state_obj, action, policy=None):
     "very_high_value_training": very_high_value_training,
     "committed_value_training": committed_value_training,
     "strong_burst_training": strong_burst_training,
+    "past_bond_training_cutoff": past_bond_training_cutoff,
+    "grilled_carrots_usable": bool(
+      action_func == "do_training"
+      and raiseable_support_count > 0
+      and not past_bond_training_cutoff
+    ),
     "weak_summer_training": weak_summer_training or weak_climax_training or bool(reroll_signal.get("needs_reroll")),
     "weak_climax_training": weak_climax_training,
     "energy_rescue": bool(reroll_signal.get("energy_rescue")),
@@ -1818,9 +1839,19 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     return None
 
   if item_key == "grilled_carrots":
+    if not context.get("grilled_carrots_usable"):
+      if context.get("action_func") != "do_training":
+        defer_reason = "bond item is skipped on non-training turns"
+      elif context.get("past_bond_training_cutoff"):
+        defer_reason = "past bond-training cutoff"
+      else:
+        defer_reason = "selected training has no raiseable support bonds"
+      return {
+        "defer_reason": defer_reason,
+      }
     return {
-      "candidate_score": 1000 + priority_score,
-      "reason": "detected in inventory; consume immediately",
+      "candidate_score": 320 + priority_score + _safe_int(context.get("raiseable_support_count"), 0) * 15,
+      "reason": "raise support bonds before the selected training",
       "reserved_quantity": reserve_quantity,
       "use_now": True,
     }

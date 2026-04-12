@@ -6515,12 +6515,15 @@ def career_lobby(dry_run_turn=False):
 
         with _timed_turn_step("Climax race-day check", "decision", key="climax_race_day_check") as step:
           climax_detection = inspect_climax_race_day_detection(log_result=True)
+          forced_climax_year = str(state_obj.get("year") or "").strip() == "Finale Underway"
           step["detail"] = _turn_metric_detail(
-            f"detected={bool(climax_detection.get('detected'))}",
+            f"detected={bool(climax_detection.get('detected') or forced_climax_year)}",
             f"banner={bool((climax_detection.get('banner') or {}).get('passed_threshold'))}",
             f"button={bool((climax_detection.get('button') or {}).get('passed_threshold'))}",
           )
-        state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected"))
+        if forced_climax_year and not climax_detection.get("detected"):
+          info("[TB_RACE] Finale Underway year label detected without forced-race template match; forcing Climax race-day fallback.")
+        state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected") or forced_climax_year)
         state_obj["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
         state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
 

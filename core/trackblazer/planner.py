@@ -1232,7 +1232,11 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
-  forced_climax_race_day = bool(state_obj.get("trackblazer_climax_race_day") or _action_value(action, "trackblazer_climax_race_day"))
+  forced_climax_race_day = bool(
+    state_obj.get("trackblazer_climax_race_day")
+    or _action_value(action, "trackblazer_climax_race_day")
+    or str(state_obj.get("year") or "").strip() == "Finale Underway"
+  )
   forced_race_day = bool(state_obj.get("turn") == "Race Day" or _action_value(action, "is_race_day"))
   mission_race_enabled = bool(getattr(config, "DO_MISSION_RACES_IF_POSSIBLE", False) and state_obj.get("race_mission_available"))
   prioritize_missions = bool(getattr(config, "PRIORITIZE_MISSIONS_OVER_G1", False))
