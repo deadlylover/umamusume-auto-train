@@ -2236,8 +2236,12 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     if node_id.startswith("train:"):
       training = dict(training_entries.get(training_name) or {})
       base_score = _safe_float(training.get("score"), 0.0)
+      total_stat_gain = _safe_float(training.get("total_stat_gain"), 0.0)
+      matching_stat_gain = _safe_float(training.get("matching_stat_gain"), 0.0)
+      support_count = _safe_float(training.get("support_count"), 0.0)
+      usage_context = dict(training.get("usage_context") or {})
       failure_pct = max(0.0, min(100.0, _safe_float(training.get("failure"), 0.0)))
-      failure_bypassed = bool(dict(training.get("usage_context") or {}).get("failure_bypassed_by_items"))
+      failure_bypassed = bool(usage_context.get("failure_bypassed_by_items"))
       reset_whistle_reroll = item_key == "reset_whistle"
       max_failure = max(0.0, _safe_float(getattr(config, "MAX_FAILURE", 5), 5.0))
       if failure_pct > max_failure and not reset_whistle_reroll and not (item_key and failure_bypassed):
@@ -2298,14 +2302,24 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
             opportunity_cost += 100.0
           if _safe_float(timeline_policy.get("climax_distance"), 99.0) <= 1.0:
             opportunity_cost += 35.0
-        if "megaphone" in item_key and not dict(training.get("usage_context") or {}).get("commit_training_after_items"):
+        if "megaphone" in item_key and not usage_context.get("commit_training_after_items"):
           opportunity_cost += 6.0
         score += item_delta - opportunity_cost
         score_components["item_delta"] = item_delta
         score_components["item_opportunity_cost"] = opportunity_cost
-      if finale_training_turn and not item_key and (energy_ratio >= 0.60 or failure_pct <= 0.0):
-        score += 70.0
-        score_components["finale_safe_training_bonus"] = 70.0
+      finale_commit_worthy_training = bool(
+        base_score >= 18.0
+        or total_stat_gain >= 20.0
+        or matching_stat_gain >= 15.0
+        or support_count >= 2.0
+      )
+      if finale_training_turn and finale_commit_worthy_training:
+        if not item_key and (energy_ratio >= 0.60 or failure_pct <= 0.0):
+          score += 70.0
+          score_components["finale_safe_training_bonus"] = 70.0
+        elif item_key and (failure_bypassed or usage_context.get("commit_training_after_items")):
+          score += 55.0
+          score_components["finale_item_commit_bonus"] = 55.0
       if score > best_training_score:
         best_training_score = score
         best_training_class = str(training.get("value_class") or "weak")

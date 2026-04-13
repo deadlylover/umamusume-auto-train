@@ -32,6 +32,12 @@ _FINAL_SUMMER_INDEX = (
 _CLIMAX_COMMIT_SCORE_THRESHOLD = 35.0
 _CLIMAX_COMMIT_MATCHING_STAT_THRESHOLD = 22
 _CLIMAX_COMMIT_TOTAL_STAT_THRESHOLD = 32
+_LATE_FINALE_COMMIT_SCORE_THRESHOLD = 20.0
+_LATE_FINALE_COMMIT_MATCHING_STAT_THRESHOLD = 15
+_LATE_FINALE_COMMIT_TOTAL_STAT_THRESHOLD = 24
+_LATE_FINALE_OVERSTOCK_COMMIT_SCORE_THRESHOLD = 16.0
+_LATE_FINALE_OVERSTOCK_COMMIT_MATCHING_STAT_THRESHOLD = 12
+_LATE_FINALE_OVERSTOCK_COMMIT_TOTAL_STAT_THRESHOLD = 18
 _TRAINING_LABELS = {
   "spd": "speed",
   "sta": "stamina",
@@ -284,8 +290,21 @@ def _safe_float(value, default=0.0):
     return default
 
 
-def _climax_commit_thresholds(held_reset_whistles):
+def _climax_commit_thresholds(held_reset_whistles, trainings_remaining_upper_bound=None, held_megaphone_total=0):
   _safe_int(held_reset_whistles, 0)
+  remaining_turns = _safe_int(trainings_remaining_upper_bound, None)
+  if remaining_turns is not None and remaining_turns <= 3:
+    if remaining_turns > 0 and _safe_int(held_megaphone_total, 0) > remaining_turns:
+      return {
+        "score": _LATE_FINALE_OVERSTOCK_COMMIT_SCORE_THRESHOLD,
+        "matching": _LATE_FINALE_OVERSTOCK_COMMIT_MATCHING_STAT_THRESHOLD,
+        "total": _LATE_FINALE_OVERSTOCK_COMMIT_TOTAL_STAT_THRESHOLD,
+      }
+    return {
+      "score": _LATE_FINALE_COMMIT_SCORE_THRESHOLD,
+      "matching": _LATE_FINALE_COMMIT_MATCHING_STAT_THRESHOLD,
+      "total": _LATE_FINALE_COMMIT_TOTAL_STAT_THRESHOLD,
+    }
   return {
     "score": _CLIMAX_COMMIT_SCORE_THRESHOLD,
     "matching": _CLIMAX_COMMIT_MATCHING_STAT_THRESHOLD,
@@ -1167,11 +1186,33 @@ def _usage_context(state_obj, action, policy=None):
     )
     spendable_vita_restore_total += restore_value * spendable_quantity
   held_reset_whistles = _current_held_quantity("reset_whistle", inventory, held_quantities)
+  trainings_remaining_upper_bound = _safe_int(
+    timeline_policy.get("trainings_remaining_upper_bound"),
+    _safe_int(state_obj.get("trackblazer_trainings_remaining_upper_bound"), None),
+  )
+  held_megaphone_total = sum(
+    _current_held_quantity(item_key, inventory, held_quantities)
+    for item_key in _MEGAPHONE_KEYS
+  )
+  late_finale_training_window = bool(
+    climax_window
+    and trainings_remaining_upper_bound is not None
+    and trainings_remaining_upper_bound <= 3
+  )
+  megaphone_overstock = bool(
+    late_finale_training_window
+    and trainings_remaining_upper_bound
+    and held_megaphone_total > trainings_remaining_upper_bound
+  )
   held_recovery_cover = (
     _current_held_quantity("miracle_cure", inventory, held_quantities)
     + _current_held_quantity("rich_hand_cream", inventory, held_quantities)
   )
-  climax_commit_thresholds = _climax_commit_thresholds(held_reset_whistles)
+  climax_commit_thresholds = _climax_commit_thresholds(
+    held_reset_whistles,
+    trainings_remaining_upper_bound=trainings_remaining_upper_bound,
+    held_megaphone_total=held_megaphone_total,
+  )
   climax_committed_training = bool(
     action_func == "do_training"
     and climax_window
@@ -1318,6 +1359,9 @@ def _usage_context(state_obj, action, policy=None):
     "climax_window": climax_window,
     "is_finale_underway_training_turn": bool(timeline_policy.get("is_finale_underway_training_turn")),
     "is_forced_climax_race_day": bool(timeline_policy.get("is_forced_climax_race_day")),
+    "late_finale_training_window": late_finale_training_window,
+    "megaphone_overstock": megaphone_overstock,
+    "held_megaphone_total": held_megaphone_total,
     "summer_conservation_bypass": summer_conservation_bypass,
     "score_over_50": score_over_50,
     "summer_window": summer_window,
@@ -1387,7 +1431,7 @@ def _usage_context(state_obj, action, policy=None):
     "held_recovery_cover_available": held_recovery_cover > 0,
     "save_vita_for_summer": save_vita_for_summer,
     "failure_rescue_vita_override": failure_rescue_vita_override,
-    "trainings_remaining_upper_bound": timeline_policy.get("trainings_remaining_upper_bound"),
+    "trainings_remaining_upper_bound": trainings_remaining_upper_bound,
   }
 
 
@@ -2021,6 +2065,17 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     }
 
   if usage_group == "energy":
+    finale_liberal_training = bool(
+      context.get("late_finale_training_window")
+      and context["action_func"] == "do_training"
+      and context.get("training_name") != "wit"
+      and (
+        _safe_float(context.get("training_score"), 0.0) >= _LATE_FINALE_COMMIT_SCORE_THRESHOLD
+        or _safe_int(context.get("matching_stat_gain"), 0) >= _LATE_FINALE_COMMIT_MATCHING_STAT_THRESHOLD
+        or _safe_int(context.get("total_stat_gain"), 0) >= _LATE_FINALE_COMMIT_TOTAL_STAT_THRESHOLD
+        or _safe_int(context.get("support_count"), 0) >= 2
+      )
+    )
     scheduled_race_vita_item_key = context.get("scheduled_race_low_energy_vita_item_key")
     if scheduled_race_vita_item_key:
       if item_key != scheduled_race_vita_item_key:
@@ -2083,6 +2138,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       and not context["summer_window"]
       and not context.get("summer_conservation_bypass")
       and not context.get("failure_rescue_vita_override")
+      and not finale_liberal_training
       and context.get("save_vita_for_summer", True)
     ):
       return {
@@ -2090,8 +2146,19 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       }
     if context["energy_deficit"] < 20:
       return None
-    if not (context["summer_window"] or context["high_value_training"]):
+    if not (context["summer_window"] or context["high_value_training"] or finale_liberal_training):
       return None
+    if (
+      finale_liberal_training
+      and context["failure_rate"] <= context.get("max_allowed_failure", 5)
+      and energy_ratio >= 0.85
+    ):
+      return {
+        "defer_reason": (
+          f"late finale stock-spend not needed with healthy energy "
+          f"({context['energy_level']}/{context['max_energy']})"
+        ),
+      }
     # When fail is already tolerable and energy is above half, the energy item
     # usually won't change this turn's outcome enough to justify consuming a
     # Vita outside lower-energy commit windows. Only spend energy items when
@@ -2101,6 +2168,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     if (
       context["failure_rate"] <= context.get("max_allowed_failure", 5)
       and energy_ratio >= 0.5
+      and not finale_liberal_training
     ):
       return {
         "defer_reason": (
@@ -2114,8 +2182,10 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       reason_parts.append("summer burst window")
     if context["high_value_training"]:
       reason_parts.append("strong training turn")
+    if finale_liberal_training:
+      reason_parts.append("late finale horizon; spend energy stock aggressively")
     return {
-      "candidate_score": 260 + priority_score + context["energy_deficit"],
+      "candidate_score": 260 + priority_score + context["energy_deficit"] + (45 if finale_liberal_training else 0),
       "reason": "; ".join(reason_parts),
       "reserved_quantity": reserve_quantity,
       "use_now": True,
@@ -2230,6 +2300,9 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "rainbow_count": context.get("rainbow_count"),
       "support_count": context.get("support_count"),
       "held_reset_whistles": context.get("held_reset_whistles"),
+      "late_finale_training_window": context.get("late_finale_training_window"),
+      "megaphone_overstock": context.get("megaphone_overstock"),
+      "held_megaphone_total": context.get("held_megaphone_total"),
       "is_pre_bond_cutoff": context.get("is_pre_bond_cutoff"),
       "climax_commit_score_threshold": context.get("climax_commit_score_threshold"),
       "climax_commit_matching_stat_threshold": context.get("climax_commit_matching_stat_threshold"),

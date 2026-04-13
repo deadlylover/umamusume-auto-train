@@ -184,6 +184,107 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     self.assertEqual(selected_action.get("func"), "do_training")
     self.assertNotIn("reset_whistle", use_now)
 
+  def test_finale_underway_prefers_item_committed_training_over_safe_wit(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_trainings_remaining_upper_bound"] = 3
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK"
+    state_obj["energy_level"] = 54
+    state_obj["max_energy"] = 131
+    state_obj["current_mood"] = "GREAT"
+    state_obj["current_stats"] = {
+      "spd": 1182,
+      "sta": 691,
+      "pwr": 992,
+      "guts": 408,
+      "wit": 612,
+      "sp": 637,
+    }
+    state_obj["training_results"] = {
+      "sta": {
+        "name": "sta",
+        "score_tuple": (25.2, 0),
+        "weighted_stat_score": 25.2,
+        "stat_gains": {"sta": 21, "guts": 7, "sp": 4},
+        "failure": 15,
+        "total_supports": 2,
+        "total_rainbow_friends": 1,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 1, "max": 0},
+        "failure_bypassed_by_items": True,
+        "trackblazer_failure_bypass_items": ["royal_kale_juice"],
+      },
+      "pwr": {
+        "name": "pwr",
+        "score_tuple": (24.0, 0),
+        "weighted_stat_score": 24.0,
+        "stat_gains": {"sta": 9, "pwr": 15, "sp": 3},
+        "failure": 17,
+        "total_supports": 1,
+        "total_rainbow_friends": 1,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 1},
+        "failure_bypassed_by_items": True,
+        "trackblazer_failure_bypass_items": ["royal_kale_juice"],
+      },
+      "wit": {
+        "name": "wit",
+        "score_tuple": (8.0, 0),
+        "weighted_stat_score": 8.0,
+        "stat_gains": {"spd": 2, "wit": 8, "sp": 0},
+        "failure": 0,
+        "total_supports": 0,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 0},
+      },
+    }
+    state_obj["trackblazer_inventory"] = {
+      "royal_kale_juice": {"detected": True, "held_quantity": 2, "increment_target": (1, 1), "category": "energy"},
+      "motivating_megaphone": {"detected": True, "held_quantity": 1, "increment_target": (2, 2), "category": "training_boost"},
+      "stamina_ankle_weights": {"detected": True, "held_quantity": 1, "increment_target": (3, 3), "category": "training_boost"},
+    }
+    state_obj["trackblazer_inventory_summary"] = {
+      "held_quantities": {
+        "royal_kale_juice": 2,
+        "motivating_megaphone": 1,
+        "stamina_ankle_weights": 1,
+      },
+      "items_detected": ["royal_kale_juice", "motivating_megaphone", "stamina_ankle_weights"],
+      "actionable_items": ["royal_kale_juice", "motivating_megaphone", "stamina_ankle_weights"],
+      "by_category": {
+        "energy": ["royal_kale_juice"],
+        "training_boost": ["motivating_megaphone", "stamina_ankle_weights"],
+      },
+      "total_detected": 3,
+    }
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "wit"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["wit"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+    deferred_use = [
+      entry.get("key")
+      for entry in list(item_plan.get("deferred_use") or [])
+    ]
+
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertNotEqual(selected_action.get("training_name"), "wit")
+    self.assertIn("royal_kale_juice", use_now)
+    self.assertIn("motivating_megaphone", deferred_use)
+
   def test_legacy_race_logic_suppresses_finale_optional_fallback_race(self):
     state_obj = _base_state()
     state_obj["year"] = "Finale Underway"
