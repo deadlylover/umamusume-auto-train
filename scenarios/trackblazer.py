@@ -4459,8 +4459,13 @@ def detect_shop_screen(threshold=0.7):
     return False, None, checks
 
 
-def _wait_for_shop_screen_open(max_wait_seconds=1.4, poll_seconds=0.2, threshold=0.7, initial_sleep=0.35):
-    """Poll briefly for the shop screen to finish opening after an entry click."""
+def _wait_for_shop_screen_open(max_wait_seconds=2.4, poll_seconds=0.2, threshold=0.7, initial_sleep=0.35):
+    """Poll briefly for the shop screen to finish opening after an entry click.
+
+    The lobby-button path can take an extra beat over ADB because the entry
+    click may hand off into the refresh dialog before the full shop controls
+    finish settling. Keep the poll window long enough to survive that handoff.
+    """
     attempts = []
     start_t0 = _time()
 
@@ -4605,6 +4610,9 @@ def enter_shop(threshold=0.8, read_shop_coins=True, year=None, allow_summer_lobb
     followup_click_metrics = None
     followup_verification_attempts = []
     if clicked and not shop_open and method_name in {"lobby_button", "summer_lobby_button"}:
+        t0 = _time()
+        sleep(0.25)
+        timing["followup_settle"] = round(_time() - t0, 4)
         t0 = _time()
         followup_shop_state = inspect_shop_entry_state(
             threshold=threshold,

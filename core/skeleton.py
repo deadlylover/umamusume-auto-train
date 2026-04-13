@@ -4945,6 +4945,61 @@ def _wait_for_lobby_after_shop_purchase(max_wait=8.0):
   return False
 
 
+def _recover_trackblazer_overlay_from_lobby_scan(stable_anchor_counts):
+  """Close a leftover Trackblazer overlay when lobby scan sees zero anchors.
+
+  A shop-entry verification miss can drop the bot back into the generic lobby
+  scan while the shop or training-items overlay is still open. In that state
+  the normal lobby anchors stay at zero forever, so recover the overlay
+  explicitly instead of spinning until the bot looks hung.
+  """
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return {"attempted": False, "overlay": "", "closed": False}
+  if not isinstance(stable_anchor_counts, dict):
+    return {"attempted": False, "overlay": "", "closed": False}
+
+  anchor_total = sum(
+    int(value or 0)
+    for value in stable_anchor_counts.values()
+    if isinstance(value, (int, float))
+  )
+  if anchor_total > 0:
+    return {"attempted": False, "overlay": "", "closed": False}
+
+  from scenarios.trackblazer import (
+    close_trackblazer_shop,
+    close_training_items_inventory,
+    detect_inventory_screen,
+    detect_shop_screen,
+  )
+
+  device_action.flush_screenshot_cache()
+  shop_open, _, _ = detect_shop_screen(threshold=0.75)
+  if shop_open:
+    warning("[TB_SHOP] Lobby scan found a leftover shop overlay; attempting recovery close.")
+    close_result = close_trackblazer_shop()
+    return {
+      "attempted": True,
+      "overlay": "shop",
+      "closed": bool(close_result.get("closed")),
+      "close_result": close_result,
+    }
+
+  device_action.flush_screenshot_cache()
+  inventory_open, _, _ = detect_inventory_screen(threshold=0.75)
+  if inventory_open:
+    warning("[TB_INV] Lobby scan found a leftover training-items overlay; attempting recovery close.")
+    close_result = close_training_items_inventory()
+    return {
+      "attempted": True,
+      "overlay": "inventory",
+      "closed": bool(close_result.get("closed")),
+      "close_result": close_result,
+    }
+
+  return {"attempted": False, "overlay": "", "closed": False}
+
+
 def _run_trackblazer_shop_purchases(state_obj, action):
   # Recompute against the current state so execute mode does not use a stale
   # pre-review shop plan after a refresh, recovery, or overlay mismatch.
@@ -6211,6 +6266,17 @@ def career_lobby(dry_run_turn=False):
           continue
 
       if not _has_stable_career_screen(stable_anchor_counts):
+        overlay_recovery = _recover_trackblazer_overlay_from_lobby_scan(stable_anchor_counts)
+        if overlay_recovery.get("attempted"):
+          bot.push_debug_history({
+            "event": "trackblazer_overlay_recovery",
+            "asset": overlay_recovery.get("overlay") or "unknown",
+            "result": "closed" if overlay_recovery.get("closed") else "close_failed",
+            "context": "lobby_scan",
+          })
+          non_match_count = 0
+          sleep(0.3)
+          continue
         update_startup_scan_snapshot(
           message="Stable career screen not confirmed yet.",
           sub_phase="scan_lobby_waiting_for_tazuna",

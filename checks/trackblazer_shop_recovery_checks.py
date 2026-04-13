@@ -288,6 +288,43 @@ class TrackblazerShopRecoveryChecks(unittest.TestCase):
         self.assertEqual(run_result.get("reason"), "shop_verification_failed")
         self.assertEqual(state_obj.get("trackblazer_shop_flow"), flow)
 
+    def test_lobby_scan_recovers_leftover_shop_overlay_when_anchors_are_zero(self):
+        with patch.object(skeleton.constants, "SCENARIO_NAME", "trackblazer"), patch.object(
+            skeleton.device_action,
+            "flush_screenshot_cache",
+        ), patch(
+            "scenarios.trackblazer.detect_shop_screen",
+            return_value=(True, _entry("shop_confirm", passed=True, score=0.99), []),
+        ), patch(
+            "scenarios.trackblazer.close_trackblazer_shop",
+            return_value={"closed": True},
+        ) as close_shop_mock, patch(
+            "scenarios.trackblazer.detect_inventory_screen",
+            return_value=(False, None, []),
+        ):
+            result = skeleton._recover_trackblazer_overlay_from_lobby_scan(
+                {"training_button": 0, "rest_button": 0, "details_button": 0}
+            )
+
+        self.assertTrue(result.get("attempted"))
+        self.assertEqual(result.get("overlay"), "shop")
+        self.assertTrue(result.get("closed"))
+        close_shop_mock.assert_called_once()
+
+    def test_lobby_scan_does_not_attempt_overlay_recovery_when_anchors_exist(self):
+        with patch.object(skeleton.constants, "SCENARIO_NAME", "trackblazer"), patch(
+            "scenarios.trackblazer.detect_shop_screen",
+        ) as detect_shop_mock, patch(
+            "scenarios.trackblazer.detect_inventory_screen",
+        ) as detect_inventory_mock:
+            result = skeleton._recover_trackblazer_overlay_from_lobby_scan(
+                {"training_button": 1, "rest_button": 0, "details_button": 0}
+            )
+
+        self.assertFalse(result.get("attempted"))
+        detect_shop_mock.assert_not_called()
+        detect_inventory_mock.assert_not_called()
+
     def test_run_action_refreshes_planner_payload_after_shop_failure(self):
         state_obj = {"trackblazer_shop_items": [], "trackblazer_shop_summary": {"purchasable_items": []}}
         action = type("ActionStub", (), {})()
