@@ -2148,6 +2148,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return None
     if not (context["summer_window"] or context["high_value_training"] or finale_liberal_training):
       return None
+    energy_ratio = context["energy_level"] / max(context["max_energy"], 1)
     if (
       finale_liberal_training
       and context["failure_rate"] <= context.get("max_allowed_failure", 5)
@@ -2164,7 +2165,6 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     # Vita outside lower-energy commit windows. Only spend energy items when
     # they actually matter: fail risk is above the normal allowed threshold, or
     # energy is genuinely low enough that the deficit threatens upcoming turns.
-    energy_ratio = context["energy_level"] / max(context["max_energy"], 1)
     if (
       context["failure_rate"] <= context.get("max_allowed_failure", 5)
       and energy_ratio >= 0.5
