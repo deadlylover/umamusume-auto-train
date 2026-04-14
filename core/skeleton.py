@@ -3750,6 +3750,98 @@ def _run_post_energy_item_followup(state_obj, action, sub_phase=None, ocr_debug=
   }
 
 
+def _reseed_action_from_trackblazer_training_scan(state_obj, action, training_function):
+  if not hasattr(action, "__setitem__"):
+    return {"rebuilt": False, "reason": "invalid_action"}
+
+  training_function = str(training_function or "stat_weight_training")
+  rebuilt_action = None
+  rebuild_reason = ""
+
+  try:
+    import core.trainings as training_module
+
+    training_callable = getattr(training_module, training_function, None)
+    if callable(training_callable):
+      training_template = copy.deepcopy(Strategy().get_training_template(state_obj) or {})
+      if not isinstance(training_template, dict):
+        training_template = {}
+      training_template["training_function"] = training_function
+
+      seed_action = Action()
+      seed_action.available_actions = list(getattr(action, "available_actions", []) or [])
+      seed_action["training_function"] = training_function
+      if isinstance(state_obj, dict) and state_obj.get("year") is not None:
+        seed_action["year"] = state_obj.get("year")
+
+      rebuilt_action = training_callable(state_obj, training_template, seed_action)
+      if not isinstance(rebuilt_action, Action):
+        rebuilt_action = seed_action
+    else:
+      rebuild_reason = f"missing_training_function:{training_function}"
+  except Exception as exc:
+    rebuild_reason = f"training_reseed_failed:{exc}"
+    warning(f"[TB_ITEM] Reset Whistle replan could not rebuild scored trainings: {exc}")
+
+  _clear_optional_race_action_fields(action)
+  _clear_legacy_consecutive_warning_fields(action)
+  for stale_key in (
+    "training_name",
+    "training_data",
+    "available_trainings",
+    "min_scores",
+    "race_name",
+    "race_image_path",
+    "race_grade_target",
+    "prefer_rival_race",
+    "fallback_non_rival_race",
+    "scheduled_race",
+    "trackblazer_lobby_scheduled_race",
+    "race_mission_available",
+    "is_race_day",
+    "trackblazer_climax_race_day",
+    "trackblazer_race_decision",
+    "trackblazer_race_lookahead",
+    "trackblazer_race_lookahead_energy_item_key",
+    "planner_race_warning_policy",
+    "planner_warning_outcome",
+    "trackblazer_planner_race",
+    "rival_scout",
+    "_trackblazer_rest_promoted_to_training",
+  ):
+    _action_option_pop(action, stale_key)
+
+  action.func = getattr(rebuilt_action, "func", None) if rebuilt_action is not None else None
+  action["training_function"] = training_function
+  if isinstance(state_obj, dict) and state_obj.get("year") is not None:
+    action["year"] = state_obj.get("year")
+
+  rebuilt_training_name = ""
+  rebuilt_available_trainings = {}
+  if isinstance(rebuilt_action, Action):
+    rebuilt_training_name = str(rebuilt_action.get("training_name") or "")
+    rebuilt_training_data = copy.deepcopy(rebuilt_action.get("training_data") or {})
+    rebuilt_available_trainings = copy.deepcopy(rebuilt_action.get("available_trainings") or {})
+    rebuilt_min_scores = copy.deepcopy(rebuilt_action.get("min_scores") or {})
+    if rebuilt_training_name:
+      action["training_name"] = rebuilt_training_name
+    if rebuilt_training_data:
+      action["training_data"] = rebuilt_training_data
+    if rebuilt_available_trainings:
+      action["available_trainings"] = rebuilt_available_trainings
+    if rebuilt_min_scores:
+      action["min_scores"] = rebuilt_min_scores
+    if getattr(rebuilt_action, "available_actions", None):
+      action.available_actions = list(getattr(rebuilt_action, "available_actions", []) or [])
+
+  return {
+    "rebuilt": bool(rebuilt_available_trainings),
+    "reason": rebuild_reason,
+    "training_name": rebuilt_training_name,
+    "training_count": len(rebuilt_available_trainings),
+  }
+
+
 def _run_post_reset_whistle_replan(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
   if (constants.SCENARIO_NAME or "default") not in ("mant", "trackblazer"):
     return {"status": "blocked", "reason": "reset_whistle_replan_wrong_scenario"}
@@ -3786,6 +3878,7 @@ def _run_post_reset_whistle_replan(state_obj, action, sub_phase=None, ocr_debug=
   action["trackblazer_pre_action_items"] = []
   action["trackblazer_reassess_after_item_use"] = False
   action["trackblazer_shop_buy_plan"] = []
+  _reseed_action_from_trackblazer_training_scan(state_obj, action, training_function)
 
   try:
     _, turn_plan = set_turn_plan_decision_path(
