@@ -3714,8 +3714,10 @@ class OperatorConsole:
 
     active = self._get_active_stat_weights()
     self._stat_weights_entries = {}
+    stat_weights_frame = tk.Frame(body, bg="#101418")
+    stat_weights_frame.pack(fill=tk.X)
     tk.Label(
-      body,
+      stat_weights_frame,
       text="Stat weights for stat_focused scoring (gain × weight)",
       fg="#d6dde5",
       bg="#101418",
@@ -3725,10 +3727,10 @@ class OperatorConsole:
     for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
       label = self._STAT_LABELS.get(stat, stat)
       tk.Label(
-        body, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
+        stat_weights_frame, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
       ).grid(row=row_idx + 1, column=0, sticky="w", pady=2)
       var = tk.StringVar(value=str(active.get(stat, 1.0)))
-      entry = tk.Entry(body, textvariable=var, width=8, bg="#192028", fg="white", insertbackground="white")
+      entry = tk.Entry(stat_weights_frame, textvariable=var, width=8, bg="#192028", fg="white", insertbackground="white")
       entry.grid(row=row_idx + 1, column=1, sticky="w", padx=(8, 0), pady=2)
       self._stat_weights_entries[stat] = var
 

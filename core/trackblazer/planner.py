@@ -2635,20 +2635,55 @@ def _rank_candidates_for_selection(candidates, observed_data, derived_data, poli
     ),
     {},
   )
-  selected_candidate = next(
-    (
-      dict(candidate)
-      for candidate in ranked_native
-      if str(candidate.get("node_id") or "") != "skill_purchase"
-      if _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
-    ),
-    {},
-  )
-  if selected_candidate:
-    selection_rationale = (
-      f"selected {selected_candidate.get('node_id')} via planner scoring "
-      f"(score={_safe_float(selected_candidate.get('priority_score'), 0.0):.3f})"
+  selected_candidate = {}
+  planner_race_plan = planner_race_plan if isinstance(planner_race_plan, dict) else {}
+  selected_action = dict(planner_race_plan.get("selected_action") or {})
+  forced_node_id = ""
+  if str(planner_race_plan.get("branch_kind") or "") == "warning_cancel_fallback":
+    forced_func = str(selected_action.get("func") or "")
+    if forced_func == "do_rest":
+      forced_node_id = "rest"
+    elif forced_func == "do_recreation":
+      forced_node_id = "recreation"
+    elif forced_func == "do_infirmary":
+      forced_node_id = "infirmary"
+    elif forced_func == "do_training":
+      training_name = str(selected_action.get("training_name") or "").strip()
+      if training_name:
+        forced_node_id = f"train:{training_name}"
+
+  if forced_node_id:
+    selected_candidate = next(
+      (
+        dict(candidate)
+        for candidate in ranked_native
+        if str(candidate.get("node_id") or "") == forced_node_id
+        and _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
+      ),
+      {},
     )
+
+  if not selected_candidate:
+    selected_candidate = next(
+      (
+        dict(candidate)
+        for candidate in ranked_native
+        if str(candidate.get("node_id") or "") != "skill_purchase"
+        if _safe_float(candidate.get("priority_score"), float("-inf")) != float("-inf")
+      ),
+      {},
+    )
+  if selected_candidate:
+    if forced_node_id and str(selected_candidate.get("node_id") or "") == forced_node_id:
+      selection_rationale = (
+        f"selected {selected_candidate.get('node_id')} via planner warning-cancel fallback "
+        f"(score={_safe_float(selected_candidate.get('priority_score'), 0.0):.3f})"
+      )
+    else:
+      selection_rationale = (
+        f"selected {selected_candidate.get('node_id')} via planner scoring "
+        f"(score={_safe_float(selected_candidate.get('priority_score'), 0.0):.3f})"
+      )
     if top_parallel_candidate:
       selection_rationale += (
         f"; kept skill_purchase as a parallel gate candidate "

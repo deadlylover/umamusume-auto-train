@@ -5494,9 +5494,6 @@ def scout_rival_race():
     if not check_rival_race_indicator():
         return _no_rival
 
-    from utils.screenshot import are_screenshots_same
-    from core.actions import go_to_racebox_top
-
     # Open race list.
     races_btn = device_action.locate_and_click(
         "assets/buttons/races_btn.png",
@@ -5521,6 +5518,39 @@ def scout_rival_race():
         )
     sleep(1)
 
+    scout_result = scan_open_race_list_for_rival_matches()
+
+    # Always back out.
+    device_action.locate_and_click(
+        "assets/buttons/back_btn.png",
+        min_search_time=get_secs(2),
+        region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+    )
+    sleep(0.5)
+
+    found = bool(scout_result.get("rival_found"))
+    if found:
+        info(
+            f"[TB_RIVAL] Scout found {len(scout_result.get('all_matches') or [])} rival race(s) with 2 aptitudes "
+            f"({scout_result.get('rivals_without_aptitude', 0)} rival(s) without aptitude match)."
+        )
+    else:
+        info(
+            f"[TB_RIVAL] Scout: no suitable rival race. "
+            f"({scout_result.get('rivals_without_aptitude', 0)} rival(s) seen but without 2-aptitude match)."
+        )
+    return scout_result
+
+
+def scan_open_race_list_for_rival_matches():
+    """Scan the currently open race list for rival races with good aptitudes.
+
+    Unlike `scout_rival_race()`, this assumes the race list is already open and
+    leaves the UI in-place for planner-owned preflight/commit flows.
+    """
+    from utils.screenshot import are_screenshots_same
+    from core.actions import go_to_racebox_top
+
     go_to_racebox_top()
 
     all_matches = []
@@ -5530,17 +5560,17 @@ def scout_rival_race():
         page_results = find_rival_races_with_aptitude(screenshot)
         all_matches.extend(page_results)
 
-        # Also count rival labels that didn't pair, for logging.
         rival_template = constants.TRACKBLAZER_RACE_TEMPLATES["rival_racer"]
         rival_only = device_action.match_template(
-            rival_template, screenshot,
+            rival_template,
+            screenshot,
             threshold=_RIVAL_RACE_MATCH_THRESHOLD,
             template_scaling=_INVERSE_GLOBAL_SCALE,
         )
         rivals_without_aptitude += max(0, len(rival_only) - len(page_results))
 
         if all_matches:
-            break  # Found at least one good rival, no need to scroll further.
+            break
 
         screenshot_before = screenshot
         device_action.swipe(
@@ -5551,29 +5581,10 @@ def scout_rival_race():
         sleep(0.25)
         screenshot_after = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
         if are_screenshots_same(screenshot_before, screenshot_after, diff_threshold=15):
-            break  # Reached end of list.
+            break
 
-    # Always back out.
-    device_action.locate_and_click(
-        "assets/buttons/back_btn.png",
-        min_search_time=get_secs(2),
-        region_ltrb=constants.SCREEN_BOTTOM_BBOX,
-    )
-    sleep(0.5)
-
-    found = len(all_matches) > 0
-    if found:
-        info(
-            f"[TB_RIVAL] Scout found {len(all_matches)} rival race(s) with 2 aptitudes "
-            f"({rivals_without_aptitude} rival(s) without aptitude match)."
-        )
-    else:
-        info(
-            f"[TB_RIVAL] Scout: no suitable rival race. "
-            f"({rivals_without_aptitude} rival(s) seen but without 2-aptitude match)."
-        )
     return {
-        "rival_found": found,
+        "rival_found": len(all_matches) > 0,
         "match": all_matches[0] if all_matches else None,
         "all_matches": all_matches,
         "rivals_without_aptitude": rivals_without_aptitude,

@@ -40,12 +40,14 @@ from core.trackblazer.planner import (
   apply_selected_action_payload,
   decision_path_for_runtime_path,
   apply_turn_plan_action_payload,
+  clear_planner_consecutive_warning_outcome,
   clear_planner_fallback,
   get_trackblazer_runtime_path,
   get_turn_plan,
   mark_planner_fallback,
   plan_once,
   ensure_planner_runtime_state,
+  set_planner_consecutive_warning_outcome,
   set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
   sync_turn_plan_execution_contract,
@@ -1874,75 +1876,18 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   race_scout = dict(race_plan.get("race_scout") or {})
   if not race_scout.get("required"):
     return None
-
-  warning_policy = dict(
-    (turn_plan.warning_plan or {})
-    or _action_value(action, "planner_race_warning_policy")
-    or {}
-  )
-  if warning_policy.get("warning_expected") and warning_policy.get("accept_warning") is False:
-    # Do not resolve the consecutive-race warning during preflight. The warning
-    # only exists after the race menu is opened, so short-circuiting here skips
-    # the exact runtime branch the preview promised to exercise.
-    update_operator_snapshot(
-      state_obj,
-      action,
-      phase="executing_action",
-      message=(
-        "Planner warning policy will be resolved at race entry. "
-        "Skipping rival scout until the race menu is opened."
-      ),
-      sub_phase=sub_phase,
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
-    return None
-
-  from scenarios.trackblazer import scout_rival_race
-
-  update_operator_snapshot(
+  probe_result = _planner_probe_race_entry(
     state_obj,
     action,
-    phase="scouting_rival_race",
-    message="Planner race preflight: scouting race list for a rival race.",
+    turn_plan=turn_plan,
+    scout_required=True,
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
   )
-  scout_result = scout_rival_race()
-  action["rival_scout"] = scout_result
-  if scout_result.get("rival_found"):
-    update_operator_snapshot(
-      state_obj,
-      action,
-      phase="executing_action",
-      message="Planner rival scout confirmed the race branch.",
-      sub_phase=sub_phase,
-      ocr_debug=ocr_debug,
-      planned_clicks=planned_clicks,
-    )
-    return None
-
-  # Do not silently swap the action into a stored fallback here. Any path
-  # change must be routed through the planner runtime retry loop so the
-  # operator review surface is regenerated from the refreshed TurnPlan
-  # before execution continues. Returning "failed" lets
-  # run_trackblazer_planner_turn pick the rival_scout_failed entry from
-  # fallback_policy.chain, apply it as a retry, and refresh the review.
-  update_operator_snapshot(
-    state_obj,
-    action,
-    phase="recovering",
-    status="warning",
-    message=(
-      "Planner rival scout found no suitable race. "
-      "Routing back to the planner runtime for a replanned review."
-    ),
-    sub_phase=sub_phase,
-    ocr_debug=ocr_debug,
-    planned_clicks=planned_clicks,
-  )
-  return "failed"
+  if probe_result.get("status") in {"failed", "blocked", "reassess", "previewed", "executed"}:
+    return probe_result.get("status")
+  return None
 
 
 def _wait_for_lobby_departure_after_action(action_name, baseline_screenshot=None, max_wait=4.0):
@@ -2128,6 +2073,164 @@ def _run_planner_warning_cancel_fallback_subroutine(
   return "executed"
 
 
+def _planner_back_out_from_race_list():
+  closed = device_action.locate_and_click(
+    "assets/buttons/back_btn.png",
+    min_search_time=get_secs(2),
+    region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+  )
+  sleep(0.5)
+  return bool(closed)
+
+
+def _planner_probe_race_entry(
+  state_obj,
+  action,
+  *,
+  turn_plan=None,
+  scout_required=False,
+  sub_phase=None,
+  ocr_debug=None,
+  planned_clicks=None,
+):
+  if not _trackblazer_planner_mode_enabled() or _action_func(action) != "do_race":
+    return {"status": "completed", "reason": "planner_race_probe_not_applicable"}
+  if bool(_action_value(action, "planner_race_list_ready")):
+    return {"status": "completed", "reason": "race_list_already_ready"}
+
+  warning_plan = dict(getattr(turn_plan, "warning_plan", {}) or {})
+  if not warning_plan:
+    warning_plan = dict(_action_value(action, "planner_race_warning_policy") or {})
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="executing_action" if not scout_required else "scouting_rival_race",
+    message=(
+      "Planner preflight: opening race menu for rival scout."
+      if scout_required else
+      "Planner preflight: probing race entry before committing to race."
+    ),
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  if not device_action.locate_and_click(
+    "assets/buttons/races_btn.png",
+    min_search_time=get_secs(10),
+    region_ltrb=constants.SCREEN_BOTTOM_BBOX,
+  ):
+    return {"status": "blocked", "reason": "planner_race_menu_open_failed"}
+
+  sleep(1)
+  consecutive_cancel_btn = device_action.locate(
+    "assets/buttons/cancel_btn.png",
+    min_search_time=get_secs(1),
+    region_ltrb=constants.GAME_WINDOW_BBOX,
+  )
+  if consecutive_cancel_btn:
+    accept_warning = bool(warning_plan.get("accept_warning"))
+    if not accept_warning:
+      cancel_reason = str(warning_plan.get("cancel_reason_key") or "consecutive_warning_cancelled")
+      warning_outcome = {
+        "cancelled": True,
+        "force_rest": bool(warning_plan.get("force_rest_on_cancel")),
+        "reason": cancel_reason,
+      }
+      action["planner_warning_outcome"] = copy.deepcopy(warning_outcome)
+      _clear_legacy_consecutive_warning_fields(action)
+      set_planner_consecutive_warning_outcome(
+        state_obj,
+        warning_outcome,
+        reason=cancel_reason,
+      )
+      device_action.locate_and_click(
+        "assets/buttons/cancel_btn.png",
+        min_search_time=get_secs(1),
+        region_ltrb=constants.GAME_WINDOW_BBOX,
+        text="[INFO] Planner preflight cancelled the consecutive-race warning and returned to lobby.",
+      )
+      action.options.pop("planner_race_list_ready", None)
+      update_operator_snapshot(
+        state_obj,
+        action,
+        phase="recovering",
+        status="warning",
+        message="Planner preflight cancelled the consecutive-race warning; replanning fallback action.",
+        sub_phase=sub_phase,
+        ocr_debug=ocr_debug,
+        planned_clicks=planned_clicks,
+      )
+      return {"status": "failed", "reason": f"consecutive_warning_cancelled:{cancel_reason}"}
+
+    warning_ok_template = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_warning_consecutive_ok")
+    clicked_warning_ok = False
+    if warning_ok_template:
+      clicked_warning_ok = device_action.locate_and_click(
+        warning_ok_template,
+        min_search_time=get_secs(1),
+        region_ltrb=constants.GAME_WINDOW_BBOX,
+        text="[INFO] Planner preflight accepted the consecutive-race warning via warning-specific OK.",
+      )
+    if not clicked_warning_ok and not device_action.locate_and_click(
+      "assets/buttons/ok_btn.png",
+      min_search_time=get_secs(1),
+      region_ltrb=constants.GAME_WINDOW_BBOX,
+      text="[INFO] Planner preflight accepted the consecutive-race warning via fallback OK.",
+    ):
+      _planner_back_out_from_race_list()
+      return {"status": "blocked", "reason": "planner_race_warning_ok_not_found"}
+    sleep(1)
+
+  clear_planner_consecutive_warning_outcome(state_obj)
+  action["planner_race_list_ready"] = True
+
+  if not scout_required:
+    return {"status": "completed", "reason": "race_list_ready"}
+
+  from scenarios.trackblazer import scan_open_race_list_for_rival_matches
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="scouting_rival_race",
+    message="Planner preflight: scanning open race list for a rival race.",
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  scout_result = scan_open_race_list_for_rival_matches()
+  action["rival_scout"] = scout_result
+  if scout_result.get("rival_found"):
+    update_operator_snapshot(
+      state_obj,
+      action,
+      phase="executing_action",
+      message="Planner rival scout confirmed the race branch; race list is ready to commit.",
+      sub_phase=sub_phase,
+      ocr_debug=ocr_debug,
+      planned_clicks=planned_clicks,
+    )
+    return {"status": "completed", "reason": "rival_scout_confirmed"}
+
+  _planner_back_out_from_race_list()
+  action.options.pop("planner_race_list_ready", None)
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="recovering",
+    status="warning",
+    message=(
+      "Planner rival scout found no suitable race. "
+      "Routing back to the planner runtime for a replanned review."
+    ),
+    sub_phase=sub_phase,
+    ocr_debug=ocr_debug,
+    planned_clicks=planned_clicks,
+  )
+  return {"status": "failed", "reason": "rival_scout_failed"}
+
+
 def _resolve_consecutive_race_warning_for_executor(
   state_obj,
   action,
@@ -2139,32 +2242,22 @@ def _resolve_consecutive_race_warning_for_executor(
 ):
   if not _trackblazer_planner_mode_enabled() or _action_func(action) != "do_race":
     return {"status": "completed", "reason": "warning_policy_not_applicable"}
+  if bool(_action_value(action, "planner_race_list_ready")):
+    return {"status": "completed", "reason": "warning_policy_resolved_in_preflight"}
   warning_plan = dict(getattr(turn_plan, "warning_plan", {}) or {})
   if not warning_plan:
     warning_plan = dict(_action_value(action, "planner_race_warning_policy") or {})
   if not warning_plan:
     return {"status": "completed", "reason": "warning_policy_missing"}
-
-  warning_plan["planner_owned"] = True
-  action["planner_race_warning_policy"] = copy.deepcopy(warning_plan)
-  action["planner_warning_outcome"] = {
-    "cancelled": False,
-    "force_rest": bool(warning_plan.get("force_rest_on_cancel")),
-    "reason": "",
-    "resolved": False,
-    "policy_source": "executor_step",
-  }
-  _clear_legacy_consecutive_warning_fields(action)
-  update_operator_snapshot(
+  return _planner_probe_race_entry(
     state_obj,
     action,
-    phase="executing_action",
-    message="Planner warning policy is armed for race entry.",
+    turn_plan=turn_plan,
+    scout_required=False,
     sub_phase=sub_phase or SUB_PHASE_RESOLVE_CONSECUTIVE_RACE_WARNING,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
   )
-  return {"status": "completed", "reason": "warning_policy_prepared"}
 
 
 def _strategy_decision_note(state_obj, action):

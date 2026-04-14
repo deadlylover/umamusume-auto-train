@@ -5,6 +5,7 @@ import utils.constants as constants
 from core.actions import Action
 from core.trackblazer.planner import (
   _build_planner_race_plan,
+  plan_once,
   set_planner_consecutive_warning_outcome,
 )
 
@@ -58,15 +59,21 @@ def main():
   with patch("core.trackblazer.planner.get_trackblazer_timeline_policy", return_value={}):
     with patch("core.trackblazer.planner.get_race_lookahead_energy_advice", return_value={}):
       with patch("core.trackblazer.planner.evaluate_trackblazer_race", return_value={"should_race": True, "prefer_rival_race": True}):
-        race_plan = _build_planner_race_plan(state_obj, action)
+        with patch("core.trackblazer.planner.get_effective_shop_items", return_value=[]):
+          race_plan = _build_planner_race_plan(state_obj, action)
+          planner_state = plan_once(state_obj, action, limit=8)
 
   selected_action = dict(race_plan.get("selected_action") or {})
+  turn_plan = dict(planner_state.get("turn_plan") or {})
+  turn_plan_selected = dict(((turn_plan.get("race_plan") or {}).get("selected_action") or {}))
   assert selected_action.get("func") == "do_rest", selected_action
   assert selected_action.get("planner_warning_outcome", {}).get("cancelled") is True, selected_action
+  assert turn_plan_selected.get("func") == "do_rest", turn_plan_selected
   print(json.dumps({
     "status": "ok",
     "branch_kind": race_plan.get("branch_kind"),
     "selected_action": selected_action.get("func"),
+    "turn_plan_selected_action": turn_plan_selected.get("func"),
     "warning_reason": selected_action.get("planner_warning_outcome", {}).get("reason"),
   }, indent=2, sort_keys=True))
 
