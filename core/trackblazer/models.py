@@ -705,6 +705,14 @@ def _format_candidate_list(items, include_reason=False):
   return ", ".join(rendered) if rendered else "none"
 
 
+def _append_item_reason(details, item):
+  if not isinstance(item, dict):
+    return
+  reason = item.get("reason")
+  if reason:
+    details.append(f"reason={reason}")
+
+
 def _format_inventory_lines(planned):
   inventory_scan = planned.get("inventory_scan") or {}
   lines = []
@@ -865,10 +873,7 @@ def _format_short_list(payload):
       cost = item.get("cost")
       if cost not in (None, ""):
         details.append(f"cost {cost}")
-      if not details:
-        reason = item.get("reason")
-        if reason:
-          details.append(reason)
+      _append_item_reason(details, item)
       if details:
         entry += f" | {'; '.join(str(detail) for detail in details)}"
       lines.append(entry)
@@ -897,7 +902,7 @@ def _format_item_plan_subgraph_lines(payload):
 
   execution_items = list(payload.get("execution_items") or [])
   if execution_items:
-    lines.append(f"use_now: {_format_candidate_list(execution_items)}")
+    lines.append(f"use_now: {_format_candidate_list(execution_items, include_reason=True)}")
 
   deferred_items = list(payload.get("deferred_items") or [])
   if deferred_items:

@@ -2151,6 +2151,15 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
     energy_ratio = context["energy_level"] / max(context["max_energy"], 1)
     if (
       finale_liberal_training
+      and context["failure_rate"] <= 0
+    ):
+      return {
+        "defer_reason": (
+          "late finale stock-spend requires nonzero fail before staging an energy item"
+        ),
+      }
+    if (
+      finale_liberal_training
       and context["failure_rate"] <= context.get("max_allowed_failure", 5)
       and energy_ratio >= 0.85
     ):

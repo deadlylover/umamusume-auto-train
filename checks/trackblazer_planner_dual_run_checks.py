@@ -982,6 +982,9 @@ def main():
       "speed_ankle_weights",
     ], "planned actions should list the deferred follow-up burst/stat items"
     assert "item planning again" in (energy_reassess_boundary.get("followup_note") or ""), "planned actions should explain the second-pass item window explicitly"
+    energy_turn_discussion = energy_snapshot.get("turn_discussion_text") or ""
+    assert "Vita 20 | group=energy; reason=synthetic energy rescue" in energy_turn_discussion, "planned actions text should surface the planner-owned item rationale, not just policy metadata"
+    assert "use_now: Vita 20 (synthetic energy rescue), Good-Luck Charm (synthetic fail-safe pairing)" in energy_turn_discussion, "item-plan subgraph should surface planner-owned execution reasons"
 
     healthy_training_state = _base_state()
     healthy_training_state["year"] = "Senior Year Early Feb"

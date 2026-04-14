@@ -184,6 +184,74 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     self.assertEqual(selected_action.get("func"), "do_training")
     self.assertNotIn("reset_whistle", use_now)
 
+  def test_finale_underway_liberal_vita_requires_nonzero_fail(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_trainings_remaining_upper_bound"] = 3
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 108
+    state_obj["max_energy"] = 130
+    state_obj["current_mood"] = "GOOD"
+    state_obj["current_stats"] = {
+      "spd": 1126,
+      "sta": 868,
+      "pwr": 969,
+      "guts": 633,
+      "wit": 652,
+      "sp": 407,
+    }
+    state_obj["training_results"] = {
+      "pwr": {
+        "name": "pwr",
+        "score_tuple": (38.2, 0),
+        "weighted_stat_score": 38.2,
+        "stat_gains": {"pwr": 20, "sta": 13, "sp": 5},
+        "failure": 0,
+        "total_supports": 2,
+        "total_rainbow_friends": 2,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 2},
+        "failure_bypassed_by_items": False,
+      },
+    }
+    state_obj["trackblazer_inventory"] = {
+      "vita_40": {"detected": True, "held_quantity": 1, "increment_target": (1, 1), "category": "energy"},
+    }
+    state_obj["trackblazer_inventory_summary"] = {
+      "held_quantities": {"vita_40": 1},
+      "items_detected": ["vita_40"],
+      "actionable_items": ["vita_40"],
+      "by_category": {"energy": ["vita_40"]},
+      "total_detected": 1,
+    }
+
+    action = Action()
+    action.func = "do_training"
+    action["training_name"] = "pwr"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["pwr"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+    deferred_entries = list(item_plan.get("deferred_use") or [])
+    deferred_by_key = {
+      entry.get("key"): entry
+      for entry in deferred_entries
+      if isinstance(entry, dict) and entry.get("key")
+    }
+
+    self.assertNotIn("vita_40", use_now)
+    self.assertIn("vita_40", deferred_by_key)
+    self.assertIn("nonzero fail", deferred_by_key["vita_40"].get("reason") or "")
+
   def test_finale_underway_prefers_item_committed_training_over_safe_wit(self):
     state_obj = _base_state()
     state_obj["year"] = "Finale Underway"
