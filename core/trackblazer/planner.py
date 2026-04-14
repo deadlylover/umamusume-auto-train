@@ -170,6 +170,7 @@ def _turn_key(state_obj) -> str:
 
 
 def _state_signature(state_obj) -> Dict[str, Any]:
+  runtime_state = (state_obj or {}).get(PLANNER_RUNTIME_KEY) or {}
   return {
     "year": (state_obj or {}).get("year"),
     "turn": (state_obj or {}).get("turn"),
@@ -192,6 +193,7 @@ def _state_signature(state_obj) -> Dict[str, Any]:
     "trackblazer_trainings_remaining_upper_bound": (state_obj or {}).get("trackblazer_trainings_remaining_upper_bound"),
     "race_mission_available": (state_obj or {}).get("race_mission_available"),
     "rival_indicator_detected": (state_obj or {}).get("rival_indicator_detected"),
+    "planner_runtime_warning_outcome": copy.deepcopy(runtime_state.get("consecutive_warning_outcome") or {}),
   }
 
 
@@ -351,6 +353,7 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     scan_cadence=dict(existing.get("scan_cadence") or {}),
     pending_skill_scan=pending_skill_scan,
     pending_shop_scan=pending_shop_scan,
+    consecutive_warning_outcome=dict(existing.get("consecutive_warning_outcome") or {}),
     fallback_count=int(existing.get("fallback_count") or 0),
     last_fallback_reason=str(existing.get("last_fallback_reason") or ""),
     runtime_path=_normalize_runtime_path(runtime_path),
@@ -377,6 +380,43 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     "turn_key": _turn_key(state_obj),
   }
   return runtime_payload
+
+
+def get_planner_consecutive_warning_outcome(state_obj) -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = state_obj.get(PLANNER_RUNTIME_KEY) or {}
+  outcome = copy.deepcopy(runtime_state.get("consecutive_warning_outcome") or {})
+  if str(outcome.get("turn_key") or "") != _turn_key(state_obj):
+    return {}
+  return outcome
+
+
+def clear_planner_consecutive_warning_outcome(state_obj):
+  if not isinstance(state_obj, dict):
+    return {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  runtime_state["consecutive_warning_outcome"] = {}
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  state_obj.pop(PLANNER_STATE_KEY, None)
+  return {}
+
+
+def set_planner_consecutive_warning_outcome(state_obj, outcome, *, reason=""):
+  if not isinstance(state_obj, dict):
+    return {}
+  outcome = dict(outcome or {}) if isinstance(outcome, dict) else {}
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  payload = {
+    "turn_key": _turn_key(state_obj),
+    "cancelled": bool(outcome.get("cancelled")),
+    "force_rest": bool(outcome.get("force_rest")),
+    "reason": str(outcome.get("reason") or reason or ""),
+  }
+  runtime_state["consecutive_warning_outcome"] = payload
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  state_obj.pop(PLANNER_STATE_KEY, None)
+  return payload
 
 
 def _clone_action(action):
@@ -1278,6 +1318,14 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
 
   existing_rival_scout = copy.deepcopy(_action_value(action, "rival_scout", {}) or {})
   warning_outcome = _warning_outcome_payload(action)
+  if not warning_outcome:
+    runtime_warning_outcome = get_planner_consecutive_warning_outcome(state_obj)
+    if runtime_warning_outcome.get("cancelled"):
+      warning_outcome = {
+        "cancelled": True,
+        "force_rest": bool(runtime_warning_outcome.get("force_rest")),
+        "reason": str(runtime_warning_outcome.get("reason") or ""),
+      }
   warning_cancelled = bool(warning_outcome.get("cancelled"))
   warning_cancel_reason = str(warning_outcome.get("reason") or "")
   existing_planner_race = copy.deepcopy(_planner_race_payload(action))
@@ -1412,6 +1460,36 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
       "selected_match_count": existing_rival_scout.get("match_count"),
       "selected_grade": existing_rival_scout.get("grade"),
     }
+  elif warning_cancelled and bool(warning_outcome.get("force_rest")):
+    branch_kind = "warning_cancel_fallback"
+    warning_plan = {
+      "planner_owned": True,
+      "provisional": True,
+      "outcome": "cancelled",
+      "cancel_reason_key": warning_cancel_reason,
+      "cancel_target": "do_rest",
+      "cancel_target_label": "rest",
+      "cancel_target_node_id": "rest",
+      "force_rest_on_cancel": True,
+    }
+    selected_action_payload = _planner_selected_action_payload(
+      action,
+      func="do_rest",
+      race_decision={
+        "should_race": False,
+        "branch_kind": branch_kind,
+        "reason": warning_cancel_reason or "Consecutive-race warning cancelled the race branch.",
+      },
+      warning_policy=warning_plan,
+      fallback_action=base_fallback,
+      branch_kind=branch_kind,
+    )
+    selected_action_payload["planner_warning_outcome"] = copy.deepcopy(warning_outcome)
+    race_scout.update({
+      "executed": bool(existing_rival_scout),
+      "rival_found": existing_rival_scout.get("rival_found"),
+      "status": "warning_cancelled_to_rest",
+    })
   elif warning_cancelled and _action_func(action) != "do_race":
     branch_kind = "warning_cancel_fallback"
     warning_plan = {

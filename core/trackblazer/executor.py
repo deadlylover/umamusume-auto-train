@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from core.trackblazer.models import TurnPlan
-from core.trackblazer.planner import append_planner_runtime_transition
+from core.trackblazer.planner import (
+  append_planner_runtime_transition,
+  set_planner_consecutive_warning_outcome,
+)
 from utils.log import info, warning
 
 
@@ -718,6 +721,16 @@ def run_planner_action_with_review(
         "warning_reason": warning_reason,
       },
     )
+    if warning_cancelled:
+      set_planner_consecutive_warning_outcome(
+        state_obj,
+        {
+          "cancelled": True,
+          "force_rest": bool(warning_outcome.get("force_rest")),
+          "reason": warning_reason,
+        },
+        reason=warning_reason or "consecutive_warning_cancelled",
+      )
     hooks.update_operator_snapshot(
       state_obj,
       action,

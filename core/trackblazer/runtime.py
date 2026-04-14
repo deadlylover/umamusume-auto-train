@@ -14,7 +14,7 @@ from core.trackblazer.planner import (
   append_planner_runtime_transition,
   build_turn_plan_execution_action,
   get_turn_plan,
-  set_planner_forced_action,
+  set_planner_consecutive_warning_outcome,
   set_trackblazer_runtime_path,
   set_turn_plan_decision_path,
 )
@@ -233,20 +233,16 @@ def run_trackblazer_planner_turn(
           "force_rest": True,
           "reason": "consecutive_warning_cancelled",
         }
-      set_planner_forced_action(
+      set_planner_consecutive_warning_outcome(
         state_obj,
-        {
-          "func": "do_rest",
-          "planner_warning_outcome": copy.deepcopy(warning_outcome),
-        },
+        warning_outcome,
         reason=warning_outcome.get("reason") or "consecutive_warning_cancelled",
       )
       retry_entries = [
         {
           "trigger": "consecutive_warning_cancel",
-          "target_func": "do_rest",
+          "target_func": "planner_replan",
           "target_payload": {
-            "func": "do_rest",
             "planner_warning_outcome": copy.deepcopy(warning_outcome),
           },
           "target_label": "rest",
@@ -282,13 +278,13 @@ def run_trackblazer_planner_turn(
       retry_payload = dict(retry_entry.get("target_payload") or {})
       if retry_key in attempted_retry_keys:
         continue
-      if not retry_payload.get("func"):
+      if not (retry_payload.get("func") or retry_payload.get("planner_warning_outcome")):
         continue
 
       attempted_retry_keys.append(retry_key)
       info(
         "[TB_PLANNER] Retrying via planner runtime fallback: "
-        f"{retry_entry.get('trigger') or 'retry_next'} -> {retry_payload.get('func')}"
+        f"{retry_entry.get('trigger') or 'retry_next'} -> {retry_payload.get('func') or 'planner_replan'}"
       )
       _apply_retry_payload(state_obj, execution_action, retry_payload, runtime_hooks)
       skill_result = _attach_skill_plan_for_attempt(state_obj, execution_action, action_count, runtime_hooks)

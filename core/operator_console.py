@@ -3648,15 +3648,19 @@ class OperatorConsole:
     window = tk.Toplevel(self._root)
     window.title("Training Behavior")
     window.configure(bg="#101418")
-    window.geometry("760x720")
-    window.resizable(False, False)
+    window.geometry("820x760")
+    window.minsize(720, 560)
+    window.rowconfigure(1, weight=1)
+    window.columnconfigure(0, weight=1)
     window.bind(
       "<Destroy>",
       lambda event, root_window=window: self._clear_stat_weights_window() if event.widget is root_window else None,
     )
+    window.bind("<Command-s>", lambda event: self._save_stat_weights())
+    window.bind("<Control-s>", lambda event: self._save_stat_weights())
 
     header = tk.Frame(window, bg="#101418", padx=8, pady=8)
-    header.pack(fill=tk.X)
+    header.grid(row=0, column=0, sticky="ew")
     tk.Label(
       header,
       text="Training behavior settings",
@@ -3664,8 +3668,49 @@ class OperatorConsole:
       bg="#101418",
     ).pack(side=tk.LEFT)
 
-    body = tk.Frame(window, bg="#101418", padx=16, pady=4)
-    body.pack(fill=tk.BOTH, expand=True)
+    body_frame = tk.Frame(window, bg="#101418")
+    body_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    body_frame.rowconfigure(0, weight=1)
+    body_frame.columnconfigure(0, weight=1)
+
+    canvas = tk.Canvas(body_frame, bg="#101418", highlightthickness=0)
+    scrollbar = tk.Scrollbar(body_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+
+    body = tk.Frame(canvas, bg="#101418", padx=16, pady=4)
+    body_window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+    body.bind(
+      "<Configure>",
+      lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    canvas.bind(
+      "<Configure>",
+      lambda event, window_id=body_window_id: canvas.itemconfigure(window_id, width=event.width),
+    )
+
+    def _bind_mousewheel(_event):
+      def _on_mousewheel(event):
+        if event.delta:
+          canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        elif getattr(event, "num", None) == 4:
+          canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+          canvas.yview_scroll(1, "units")
+
+      canvas._mousewheel_handler = _on_mousewheel
+      canvas.bind_all("<MouseWheel>", _on_mousewheel)
+      canvas.bind_all("<Button-4>", _on_mousewheel)
+      canvas.bind_all("<Button-5>", _on_mousewheel)
+
+    def _unbind_mousewheel(_event):
+      canvas.unbind_all("<MouseWheel>")
+      canvas.unbind_all("<Button-4>")
+      canvas.unbind_all("<Button-5>")
+
+    canvas.bind("<Enter>", _bind_mousewheel)
+    canvas.bind("<Leave>", _unbind_mousewheel)
 
     active = self._get_active_stat_weights()
     self._stat_weights_entries = {}
@@ -3688,7 +3733,7 @@ class OperatorConsole:
       self._stat_weights_entries[stat] = var
 
     training_behavior = self._get_active_training_behavior()
-    behavior_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    behavior_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     behavior_frame.pack(fill=tk.X)
     tk.Label(
       behavior_frame,
@@ -3782,7 +3827,7 @@ class OperatorConsole:
       wraplength=640,
     ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
-    planner_behavior_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    planner_behavior_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     planner_behavior_frame.pack(fill=tk.X)
     tk.Label(
       planner_behavior_frame,
@@ -3848,7 +3893,7 @@ class OperatorConsole:
       wraplength=700,
     ).grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 0))
 
-    optional_race_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    optional_race_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     optional_race_frame.pack(fill=tk.X)
     tk.Label(
       optional_race_frame,
@@ -3870,6 +3915,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(anchor="w")
     self._zero_energy_optional_race_vita_var = tk.BooleanVar(
       value=bool(training_behavior.get("allow_zero_energy_optional_race_with_vita", True))
@@ -3883,6 +3931,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(anchor="w")
     self._zero_energy_optional_race_recovery_var = tk.BooleanVar(
       value=bool(training_behavior.get("allow_zero_energy_optional_race_with_recovery_items", True))
@@ -3896,6 +3947,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(anchor="w")
     tk.Label(
       optional_race_frame,
@@ -3907,7 +3961,7 @@ class OperatorConsole:
       wraplength=700,
     ).pack(anchor="w", pady=(4, 0))
 
-    fallback_race_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    fallback_race_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     fallback_race_frame.pack(fill=tk.X)
     tk.Label(
       fallback_race_frame,
@@ -3929,6 +3983,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).grid(row=1, column=0, columnspan=8, sticky="w")
     tk.Label(
       fallback_race_frame,
@@ -4019,7 +4076,7 @@ class OperatorConsole:
       wraplength=700,
     ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(4, 0))
 
-    race_lookahead_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    race_lookahead_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     race_lookahead_frame.pack(fill=tk.X)
     tk.Label(
       race_lookahead_frame,
@@ -4041,6 +4098,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).grid(row=1, column=0, columnspan=6, sticky="w")
     tk.Label(
       race_lookahead_frame,
@@ -4092,7 +4152,7 @@ class OperatorConsole:
       wraplength=700,
     ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
 
-    scheduled_race_vita_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    scheduled_race_vita_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     scheduled_race_vita_frame.pack(fill=tk.X)
     tk.Label(
       scheduled_race_vita_frame,
@@ -4114,6 +4174,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).grid(row=1, column=0, columnspan=6, sticky="w")
     tk.Label(
       scheduled_race_vita_frame,
@@ -4145,7 +4208,7 @@ class OperatorConsole:
       wraplength=700,
     ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
 
-    vita_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    vita_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     vita_frame.pack(fill=tk.X)
     tk.Label(
       vita_frame,
@@ -4167,6 +4230,9 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(anchor="w")
     tk.Label(
       vita_frame,
@@ -4182,7 +4248,7 @@ class OperatorConsole:
       wraplength=700,
     ).pack(anchor="w", pady=(4, 0))
 
-    bond_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    bond_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     bond_frame.pack(fill=tk.X)
     self._bond_boost_var = tk.BooleanVar(value=bot.get_trackblazer_bond_boost_enabled())
     tk.Checkbutton(
@@ -4195,9 +4261,12 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(side=tk.LEFT)
 
-    cutoff_frame = tk.Frame(window, bg="#101418", padx=16, pady=0)
+    cutoff_frame = tk.Frame(body, bg="#101418", padx=16, pady=0)
     cutoff_frame.pack(fill=tk.X)
     tk.Label(
       cutoff_frame, text="Active until:", fg="#9aa4ad", bg="#101418",
@@ -4213,7 +4282,7 @@ class OperatorConsole:
     cutoff_menu["menu"].configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white")
     cutoff_menu.pack(side=tk.LEFT, padx=(4, 0))
 
-    buff_override_frame = tk.Frame(window, bg="#101418", padx=16, pady=4)
+    buff_override_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     buff_override_frame.pack(fill=tk.X)
     self._buff_override_var = tk.BooleanVar(value=bot.get_trackblazer_allow_buff_override())
     tk.Checkbutton(
@@ -4226,10 +4295,13 @@ class OperatorConsole:
       selectcolor="#192028",
       activebackground="#101418",
       activeforeground="white",
+      wraplength=640,
+      justify="left",
+      anchor="w",
     ).pack(side=tk.LEFT)
 
     buttons = tk.Frame(window, bg="#101418", padx=8, pady=8)
-    buttons.pack(fill=tk.X)
+    buttons.grid(row=2, column=0, sticky="ew")
     tk.Button(buttons, text="Save", command=self._save_stat_weights).pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(buttons, text="Reset Defaults", command=self._reset_stat_weights_defaults).pack(side=tk.LEFT, padx=(0, 8))
 

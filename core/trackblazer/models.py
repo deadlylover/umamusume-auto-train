@@ -75,6 +75,7 @@ class PlannerRuntimeState:
   scan_cadence: Dict[str, Any] = field(default_factory=dict)
   pending_skill_scan: BackgroundSkillScanState = field(default_factory=BackgroundSkillScanState)
   pending_shop_scan: PendingShopScanState = field(default_factory=PendingShopScanState)
+  consecutive_warning_outcome: Dict[str, Any] = field(default_factory=dict)
   fallback_count: int = 0
   last_fallback_reason: str = ""
   runtime_path: str = "legacy_runtime"

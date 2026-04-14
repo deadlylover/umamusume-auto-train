@@ -104,11 +104,19 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
   planner_race_payload = planner_race_payload if isinstance(planner_race_payload, dict) else {}
   planner_warning_outcome = (selected_action or {}).get("planner_warning_outcome") or {}
   planner_warning_outcome = planner_warning_outcome if isinstance(planner_warning_outcome, dict) else {}
+  runtime_warning_outcome = ((planner_state.get("runtime") or {}).get("consecutive_warning_outcome") or {})
+  runtime_warning_outcome = runtime_warning_outcome if isinstance(runtime_warning_outcome, dict) else {}
+  if str(runtime_warning_outcome.get("turn_key") or "") != f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}":
+    runtime_warning_outcome = {}
   planner_warning_owned = bool(planner_race_payload or ((selected_action or {}).get("planner_race_warning_policy") or {}))
   if planner_warning_outcome.get("cancelled"):
     consecutive_warning_cancelled = True
     consecutive_warning_force_rest = bool(planner_warning_outcome.get("force_rest"))
     consecutive_warning_cancel_reason = planner_warning_outcome.get("reason")
+  elif runtime_warning_outcome.get("cancelled"):
+    consecutive_warning_cancelled = True
+    consecutive_warning_force_rest = bool(runtime_warning_outcome.get("force_rest"))
+    consecutive_warning_cancel_reason = runtime_warning_outcome.get("reason")
   elif planner_warning_owned:
     consecutive_warning_cancelled = False
     consecutive_warning_force_rest = False
