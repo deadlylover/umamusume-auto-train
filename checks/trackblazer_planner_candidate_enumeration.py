@@ -90,6 +90,47 @@ def main():
   _, _, rival_candidates = _run(rival_state)
   assert "race:rival" in _node_ids(rival_candidates)
 
+  rejected_rival_state = _base_state()
+  rejected_rival_state["rival_indicator_detected"] = True
+  rejected_rival_state["trackblazer_race_scout"] = {
+    "turn_key": f"{rejected_rival_state['year']}|{rejected_rival_state['turn']}",
+    "executed": True,
+    "scout_kind": "rival_aptitude",
+    "race_found": False,
+    "rival_found": False,
+    "rivals_without_aptitude": 1,
+    "reason": "race_recommend_2_aptitudes_not_matched",
+    "blocks_optional_race": True,
+    "blocks_optional_rival_race": True,
+    "no_double_aptitude_match": True,
+  }
+  _, rejected_derived, rejected_candidates = _run(rejected_rival_state)
+  assert rejected_derived.get("race_opportunity", {}).get("race_scout_rejected") is True
+  assert "race:rival" not in _node_ids(rejected_candidates)
+
+  rejected_fallback_state = _base_state()
+  rejected_fallback_state["year"] = "Classic Year Late Sep"
+  rejected_fallback_state["energy_level"] = 46
+  rejected_fallback_state["max_energy"] = 126
+  rejected_fallback_state["training_results"]["speed"]["score_tuple"] = (24.0, 0)
+  rejected_fallback_state["training_results"]["speed"]["weighted_stat_score"] = 24.0
+  _, _, fallback_candidates = _run(rejected_fallback_state)
+  assert "race:fallback" in _node_ids(fallback_candidates)
+  rejected_fallback_state["trackblazer_race_scout"] = {
+    "turn_key": f"{rejected_fallback_state['year']}|{rejected_fallback_state['turn']}",
+    "executed": True,
+    "scout_kind": "optional_aptitude",
+    "race_found": False,
+    "rival_found": False,
+    "match_count": 0,
+    "reason": "race_recommend_2_aptitudes_not_matched",
+    "blocks_optional_race": True,
+    "no_double_aptitude_match": True,
+  }
+  _, rejected_fallback_derived, rejected_fallback_candidates = _run(rejected_fallback_state)
+  assert rejected_fallback_derived.get("race_opportunity", {}).get("race_scout_rejected") is True
+  assert "race:fallback" not in _node_ids(rejected_fallback_candidates)
+
   low_energy_rival_state = _base_state()
   low_energy_rival_state["rival_indicator_detected"] = True
   low_energy_rival_state["energy_level"] = 1

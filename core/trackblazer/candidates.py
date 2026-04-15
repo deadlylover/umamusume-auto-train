@@ -175,7 +175,16 @@ def planner_native_scheduled_race_name(observed_data) -> str:
   if not races_on_date or not bool(getattr(config, "USE_RACE_SCHEDULE", False)):
     return ""
 
-  scheduled_races_on_date = list(getattr(config, "RACE_SCHEDULE", {}).get(turn_label, []) or [])
+  raw_schedule = getattr(config, "RACE_SCHEDULE", {}) or {}
+  if isinstance(raw_schedule, dict):
+    scheduled_races_on_date = list(raw_schedule.get(turn_label, []) or [])
+  else:
+    scheduled_races_on_date = [
+      race
+      for race in list(raw_schedule or [])
+      if isinstance(race, dict)
+      and f"{race.get('year') or ''} {race.get('date') or ''}".strip() == turn_label
+    ]
   best_race_name = ""
   best_fans_gained = None
   for race in scheduled_races_on_date:
@@ -337,6 +346,7 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
   if (
     timeline_policy.get("optional_races_allowed", True)
     and race_opportunity.get("rival_visible")
+    and not (race_opportunity.get("race_scout_rejected") or race_opportunity.get("rival_scout_rejected"))
     and isinstance(energy_ratio, (int, float))
     and energy_ratio > rival_min_energy
   ):
@@ -351,6 +361,7 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
     )
   elif (
     timeline_policy.get("optional_races_allowed", True)
+    and not (race_opportunity.get("race_scout_rejected") or race_opportunity.get("rival_scout_rejected"))
     and not timeline_policy.get("is_summer_window")
     and isinstance(energy_ratio, (int, float))
     and energy_ratio > rival_min_energy

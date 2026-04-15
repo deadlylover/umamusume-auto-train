@@ -46,6 +46,7 @@ from core.trackblazer.planner import (
   get_turn_plan,
   mark_planner_fallback,
   plan_once,
+  record_planner_race_scout_result,
   ensure_planner_runtime_state,
   set_planner_consecutive_warning_outcome,
   set_trackblazer_runtime_path,
@@ -1876,11 +1877,15 @@ def _run_planner_race_preflight(state_obj, action, sub_phase=None, ocr_debug=Non
   race_scout = dict(race_plan.get("race_scout") or {})
   if not race_scout.get("required"):
     return None
+  scout_kind = str(race_scout.get("scout_kind") or "")
+  if not scout_kind:
+    scout_kind = "rival_aptitude" if _action_value(action, "prefer_rival_race") else "optional_aptitude"
   probe_result = _planner_probe_race_entry(
     state_obj,
     action,
     turn_plan=turn_plan,
     scout_required=True,
+    scout_kind=scout_kind,
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
@@ -2089,6 +2094,7 @@ def _planner_probe_race_entry(
   *,
   turn_plan=None,
   scout_required=False,
+  scout_kind="",
   sub_phase=None,
   ocr_debug=None,
   planned_clicks=None,
@@ -2105,9 +2111,9 @@ def _planner_probe_race_entry(
   update_operator_snapshot(
     state_obj,
     action,
-    phase="executing_action" if not scout_required else "scouting_rival_race",
+    phase="executing_action" if not scout_required else "scouting_race_list",
     message=(
-      "Planner preflight: opening race menu for rival scout."
+      "Planner preflight: opening race menu for optional race scout."
       if scout_required else
       "Planner preflight: probing race entry before committing to race."
     ),
@@ -2188,30 +2194,43 @@ def _planner_probe_race_entry(
   if not scout_required:
     return {"status": "completed", "reason": "race_list_ready"}
 
-  from scenarios.trackblazer import scan_open_race_list_for_rival_matches
+  scout_kind = str(scout_kind or ("rival_aptitude" if _action_value(action, "prefer_rival_race") else "optional_aptitude"))
+  if scout_kind == "rival_aptitude":
+    from scenarios.trackblazer import scan_open_race_list_for_rival_matches as _scan_open_race_list
+    scan_label = "rival race"
+  else:
+    from scenarios.trackblazer import scan_open_race_list_for_aptitude_matches as _scan_open_race_list
+    scan_label = "aptitude-backed race"
 
   update_operator_snapshot(
     state_obj,
     action,
-    phase="scouting_rival_race",
-    message="Planner preflight: scanning open race list for a rival race.",
+    phase="scouting_race_list",
+    message=f"Planner preflight: scanning open race list for a {scan_label}.",
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
   )
-  scout_result = scan_open_race_list_for_rival_matches()
+  scout_result = _scan_open_race_list()
+  scout_result = record_planner_race_scout_result(
+    state_obj,
+    scout_result,
+    source="planner_race_preflight",
+    scout_kind=scout_kind,
+  )
+  action["race_scout"] = scout_result
   action["rival_scout"] = scout_result
-  if scout_result.get("rival_found"):
+  if scout_result.get("race_found", scout_result.get("rival_found")):
     update_operator_snapshot(
       state_obj,
       action,
       phase="executing_action",
-      message="Planner rival scout confirmed the race branch; race list is ready to commit.",
+      message=f"Planner race scout confirmed the {scan_label} branch; race list is ready to commit.",
       sub_phase=sub_phase,
       ocr_debug=ocr_debug,
       planned_clicks=planned_clicks,
     )
-    return {"status": "completed", "reason": "rival_scout_confirmed"}
+    return {"status": "completed", "reason": "race_scout_confirmed"}
 
   _planner_back_out_from_race_list()
   action.options.pop("planner_race_list_ready", None)
@@ -2221,14 +2240,14 @@ def _planner_probe_race_entry(
     phase="recovering",
     status="warning",
     message=(
-      "Planner rival scout found no suitable race. "
+      "Planner race scout found no suitable aptitude-backed race. "
       "Routing back to the planner runtime for a replanned review."
     ),
     sub_phase=sub_phase,
     ocr_debug=ocr_debug,
     planned_clicks=planned_clicks,
   )
-  return {"status": "failed", "reason": "rival_scout_failed"}
+  return {"status": "failed", "reason": "race_scout_failed"}
 
 
 def _resolve_consecutive_race_warning_for_executor(
@@ -5429,6 +5448,8 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
       limit=10,
     )
     state_summary["rival_indicator_detected"] = state_obj.get("rival_indicator_detected")
+    state_summary["trackblazer_race_scout"] = state_obj.get("trackblazer_race_scout")
+    state_summary["trackblazer_rival_scout"] = state_obj.get("trackblazer_rival_scout")
     state_summary["trackblazer_runtime_path"] = get_trackblazer_runtime_path(
       state_obj,
       default=RUNTIME_PATH_LEGACY_RUNTIME,
@@ -5451,6 +5472,7 @@ def build_review_snapshot(state_obj, action, reasoning_notes=None, sub_phase=Non
     "total_supports": review_action.get("training_data", {}).get("total_supports") if hasattr(review_action, "get") else None,
     "total_rainbow_friends": review_action.get("training_data", {}).get("total_rainbow_friends") if hasattr(review_action, "get") else None,
     "prefer_rival_race": review_action.get("prefer_rival_race") if hasattr(review_action, "get") else None,
+    "race_scout": review_action.get("race_scout") if hasattr(review_action, "get") else None,
     "rival_scout": review_action.get("rival_scout") if hasattr(review_action, "get") else None,
     "pre_action_item_use": (
       review_action.get("trackblazer_pre_action_items")

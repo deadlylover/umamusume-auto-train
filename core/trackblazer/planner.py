@@ -45,6 +45,8 @@ PLANNER_STATE_KEY = "trackblazer_planner_state"
 PLANNER_RUNTIME_KEY = "trackblazer_planner_runtime"
 PLANNER_FORCE_FALLBACK_KEY = "_trackblazer_planner_force_fallback"
 PLANNER_FORCED_ACTION_KEY = "_trackblazer_planner_forced_action"
+PLANNER_RACE_SCOUT_KEY = "trackblazer_race_scout"
+PLANNER_RIVAL_SCOUT_KEY = "trackblazer_rival_scout"
 TRACKBLAZER_RUNTIME_PATH_KEY = "trackblazer_runtime_path"
 TRACKBLAZER_RUNTIME_PATH_META_KEY = "trackblazer_runtime_path_meta"
 RUNTIME_PATH_PLANNER_RUNTIME = "planner_runtime"
@@ -193,6 +195,8 @@ def _state_signature(state_obj) -> Dict[str, Any]:
     "trackblazer_trainings_remaining_upper_bound": (state_obj or {}).get("trackblazer_trainings_remaining_upper_bound"),
     "race_mission_available": (state_obj or {}).get("race_mission_available"),
     "rival_indicator_detected": (state_obj or {}).get("rival_indicator_detected"),
+    PLANNER_RACE_SCOUT_KEY: (state_obj or {}).get(PLANNER_RACE_SCOUT_KEY),
+    PLANNER_RIVAL_SCOUT_KEY: (state_obj or {}).get(PLANNER_RIVAL_SCOUT_KEY),
     "planner_runtime_warning_outcome": copy.deepcopy(runtime_state.get("consecutive_warning_outcome") or {}),
   }
 
@@ -225,6 +229,7 @@ def _action_signature(action) -> Dict[str, Any]:
     "trackblazer_planner_race": planner_race,
     "planner_warning_outcome": warning_outcome,
     "rival_fallback": fallback_payload,
+    "race_scout": action.get("race_scout"),
     "rival_scout": action.get("rival_scout"),
     "is_race_day": action.get("is_race_day"),
     "date_event_available": action.get("date_event_available"),
@@ -321,6 +326,7 @@ def _build_selected_action_review_context(action, pre_action_items=None, reasses
     "total_supports": training_data.get("total_supports"),
     "total_rainbow_friends": training_data.get("total_rainbow_friends"),
     "prefer_rival_race": action.get("prefer_rival_race"),
+    "race_scout": copy.deepcopy(action.get("race_scout") or {}),
     "rival_scout": copy.deepcopy(action.get("rival_scout") or {}),
     "pre_action_item_use": copy.deepcopy(pre_action_items or []),
     "reassess_after_item_use": bool(reassess_after_item_use),
@@ -354,6 +360,8 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     pending_skill_scan=pending_skill_scan,
     pending_shop_scan=pending_shop_scan,
     consecutive_warning_outcome=dict(existing.get("consecutive_warning_outcome") or {}),
+    race_scout_result=dict(existing.get("race_scout_result") or existing.get("rival_scout_result") or {}),
+    rival_scout_result=dict(existing.get("rival_scout_result") or {}),
     fallback_count=int(existing.get("fallback_count") or 0),
     last_fallback_reason=str(existing.get("last_fallback_reason") or ""),
     runtime_path=_normalize_runtime_path(runtime_path),
@@ -380,6 +388,112 @@ def ensure_planner_runtime_state(state_obj) -> Dict[str, Any]:
     "turn_key": _turn_key(state_obj),
   }
   return runtime_payload
+
+
+def _turn_scoped_payload(state_obj, payload) -> Dict[str, Any]:
+  payload = copy.deepcopy(payload if isinstance(payload, dict) else {})
+  if not payload:
+    return {}
+  payload_turn_key = str(payload.get("turn_key") or "")
+  if payload_turn_key and payload_turn_key != _turn_key(state_obj):
+    return {}
+  return payload
+
+
+def get_planner_race_scout_result(state_obj) -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  top_level = _turn_scoped_payload(
+    state_obj,
+    state_obj.get(PLANNER_RACE_SCOUT_KEY) or state_obj.get(PLANNER_RIVAL_SCOUT_KEY) or {},
+  )
+  if top_level:
+    return top_level
+  runtime_state = state_obj.get(PLANNER_RUNTIME_KEY) or {}
+  return _turn_scoped_payload(
+    state_obj,
+    runtime_state.get("race_scout_result") or runtime_state.get("rival_scout_result") or {},
+  )
+
+
+def get_planner_rival_scout_result(state_obj) -> Dict[str, Any]:
+  return get_planner_race_scout_result(state_obj)
+
+
+def record_planner_race_scout_result(state_obj, scout_result, *, source="planner_race_preflight", scout_kind="") -> Dict[str, Any]:
+  if not isinstance(state_obj, dict):
+    return {}
+  scout_result = copy.deepcopy(scout_result if isinstance(scout_result, dict) else {})
+  all_matches = list(scout_result.get("all_matches") or [])
+  scout_kind = str(scout_kind or scout_result.get("scout_kind") or "optional_aptitude")
+  race_found = bool(scout_result.get("race_found", scout_result.get("rival_found")))
+  rival_found = bool(scout_result.get("rival_found", race_found))
+  try:
+    match_count = int(scout_result.get("match_count") if scout_result.get("match_count") is not None else len(all_matches))
+  except (TypeError, ValueError):
+    match_count = len(all_matches)
+  try:
+    rivals_without_aptitude = int(scout_result.get("rivals_without_aptitude") or 0)
+  except (TypeError, ValueError):
+    rivals_without_aptitude = 0
+  payload = {
+    **scout_result,
+    "turn_key": _turn_key(state_obj),
+    "source": str(source or scout_result.get("source") or "planner_race_preflight"),
+    "scout_kind": scout_kind,
+    "executed": True,
+    "race_found": race_found,
+    "rival_found": rival_found,
+    "match_count": match_count,
+    "rivals_without_aptitude": rivals_without_aptitude,
+  }
+  if not payload.get("reason"):
+    payload["reason"] = (
+      "race_scout_confirmed"
+      if race_found else
+      (
+        "race_recommend_2_aptitudes_not_matched"
+        if payload.get("rivals_without_aptitude") or scout_kind == "optional_aptitude" else
+        "rival_scout_no_matching_race"
+      )
+    )
+  payload["blocks_optional_race"] = bool(not race_found)
+  payload["blocks_optional_rival_race"] = bool(not race_found)
+  payload["no_double_aptitude_match"] = bool(
+    not race_found
+    and (
+      payload.get("rivals_without_aptitude")
+      or payload.get("reason") == "race_recommend_2_aptitudes_not_matched"
+    )
+  )
+  runtime_state = ensure_planner_runtime_state(state_obj)
+  runtime_state["race_scout_result"] = copy.deepcopy(payload)
+  runtime_state["rival_scout_result"] = copy.deepcopy(payload)
+  state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+  state_obj[PLANNER_RACE_SCOUT_KEY] = copy.deepcopy(payload)
+  state_obj[PLANNER_RIVAL_SCOUT_KEY] = copy.deepcopy(payload)
+  state_obj.pop(PLANNER_STATE_KEY, None)
+  bot.push_debug_history({
+    "event": "trackblazer_race_scout",
+    "asset": "race_recommend_2_aptitudes",
+    "result": "found" if race_found else "not_found",
+    "context": "planner_race_preflight",
+    "turn_key": payload.get("turn_key"),
+    "scout_kind": payload.get("scout_kind"),
+    "reason": payload.get("reason"),
+    "match_count": payload.get("match_count"),
+    "rivals_without_aptitude": payload.get("rivals_without_aptitude"),
+  })
+  return payload
+
+
+def record_planner_rival_scout_result(state_obj, scout_result, *, source="planner_race_preflight") -> Dict[str, Any]:
+  return record_planner_race_scout_result(
+    state_obj,
+    scout_result,
+    source=source,
+    scout_kind="rival_aptitude",
+  )
 
 
 def get_planner_consecutive_warning_outcome(state_obj) -> Dict[str, Any]:
@@ -1316,7 +1430,13 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   scheduled_race_active = bool(scheduled_race_name) or lobby_scheduled_race
   goal_race_active, goal_race_name = _planner_native_goal_race_active(state_obj)
 
-  existing_rival_scout = copy.deepcopy(_action_value(action, "rival_scout", {}) or {})
+  existing_rival_scout = copy.deepcopy(
+    get_planner_race_scout_result(state_obj)
+    or _action_value(action, "race_scout", {})
+    or _action_value(action, "rival_scout", {})
+    or {}
+  )
+  existing_rival_scout = _turn_scoped_payload(state_obj, existing_rival_scout)
   warning_outcome = _warning_outcome_payload(action)
   if not warning_outcome:
     runtime_warning_outcome = get_planner_consecutive_warning_outcome(state_obj)
@@ -1419,13 +1539,14 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
       selected_action_payload["planner_warning_outcome"] = copy.deepcopy(forced_payload.get("planner_warning_outcome") or {})
     race_scout.update({
       "executed": bool(existing_rival_scout),
+      "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
       "rival_found": existing_rival_scout.get("rival_found"),
       "status": "forced_fallback_applied",
     })
   elif (
     existing_planner_branch
     and not warning_cancelled
-    and existing_rival_scout.get("rival_found") is not False
+    and existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")) is not False
   ):
     branch_kind = existing_planner_branch
     warning_plan = copy.deepcopy(
@@ -1453,8 +1574,10 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     )
     race_scout = {
       "planner_owned": True,
-      "required": bool(branch_kind == "optional_rival_race"),
+      "required": bool(branch_kind in {"optional_rival_race", "optional_fallback_race"}),
+      "scout_kind": "rival_aptitude" if branch_kind == "optional_rival_race" else "optional_aptitude",
       "executed": bool(existing_rival_scout),
+      "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
       "rival_found": existing_rival_scout.get("rival_found"),
       "selected_race_name": existing_rival_scout.get("race_name"),
       "selected_match_count": existing_rival_scout.get("match_count"),
@@ -1487,6 +1610,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     selected_action_payload["planner_warning_outcome"] = copy.deepcopy(warning_outcome)
     race_scout.update({
       "executed": bool(existing_rival_scout),
+      "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
       "rival_found": existing_rival_scout.get("rival_found"),
       "status": "warning_cancelled_to_rest",
     })
@@ -1512,22 +1636,24 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     )
     race_scout.update({
       "executed": bool(existing_rival_scout),
+      "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
       "rival_found": existing_rival_scout.get("rival_found"),
       "status": "warning_cancelled",
     })
-  elif existing_rival_scout.get("rival_found") is False and _action_func(action) != "do_race":
-    branch_kind = "rival_scout_fallback"
+  elif existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")) is False and _action_func(action) != "do_race":
+    branch_kind = "race_scout_fallback"
     warning_plan = {
       "planner_owned": False,
       "provisional": True,
     }
+    scout_reason = str(existing_rival_scout.get("reason") or "race_scout_failed")
     selected_action_payload = _planner_selected_action_payload(
       action,
       func=_action_func(action),
       race_decision={
         "should_race": False,
         "branch_kind": branch_kind,
-        "reason": "Planner rival scout failed; reverting to the stored fallback action.",
+        "reason": f"Planner race scout failed ({scout_reason}); re-ranking non-race actions.",
       },
       warning_policy=warning_plan,
       fallback_action=base_fallback,
@@ -1536,6 +1662,8 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     race_scout.update({
       "required": True,
       "executed": True,
+      "scout_kind": existing_rival_scout.get("scout_kind") or "optional_aptitude",
+      "race_found": False,
       "rival_found": False,
       "status": "fallback_applied",
       "selected_match_count": existing_rival_scout.get("match_count"),
@@ -1686,7 +1814,8 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
         branch_kind = "optional_fallback_race" if race_decision.get("fallback_non_rival_race") else "optional_rival_race"
         race_scout = {
           "planner_owned": True,
-          "required": bool(branch_kind == "optional_rival_race"),
+          "required": bool(branch_kind in {"optional_rival_race", "optional_fallback_race"}),
+          "scout_kind": "rival_aptitude" if branch_kind == "optional_rival_race" else "optional_aptitude",
           "executed": False,
           "status": "pending",
           "failure_transition": "",
@@ -1763,6 +1892,8 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     race_scout = {
       **dict(race_scout or {}),
       "executed": True,
+      "scout_kind": existing_rival_scout.get("scout_kind") or race_scout.get("scout_kind"),
+      "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
       "rival_found": existing_rival_scout.get("rival_found"),
       "selected_race_name": existing_rival_scout.get("race_name"),
       "selected_match_count": existing_rival_scout.get("match_count"),
@@ -2147,6 +2278,7 @@ def _planner_owned_fallback_chain_from_ranked(
         raw_chain.append(_entry_from_candidate("race_gate_blocked", non_race[0]))
     elif selected_node_id == "race:fallback":
       if non_race:
+        raw_chain.append(_entry_from_candidate("race_scout_failed", non_race[0]))
         raw_chain.append(_entry_from_candidate("race_gate_blocked", non_race[0]))
     elif branch_kind in {"goal_race", "mission_race"}:
       if non_race:
@@ -2264,9 +2396,15 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   }
   training_threshold = _safe_float(policy.get("training_overrides_race_threshold"), 40.0)
   rival_min_energy = _safe_float(policy.get("rival_race_min_energy_ratio"), 0.02)
+  energy_cutoffs = policy.get("energy_class_cutoffs") if isinstance(policy.get("energy_class_cutoffs"), dict) else {}
+  scout_failed_train_energy_ratio = _safe_float(
+    policy.get("race_scout_failed_train_energy_ratio", policy.get("rival_scout_failed_train_energy_ratio")),
+    _safe_float(energy_cutoffs.get("ok"), 0.70),
+  )
 
   lookahead = dict(derived_data.get("lookahead_summary") or {})
   race_opportunity = dict(derived_data.get("race_opportunity") or {})
+  race_scout_rejected = bool(race_opportunity.get("race_scout_rejected") or race_opportunity.get("rival_scout_rejected"))
   timeline_policy = dict(derived_data.get("timeline_policy") or derived_data.get("timeline_window") or {})
   operator_race_gate = get_race_gate_for_turn_label(
     observed_data.get("year"),
@@ -2425,7 +2563,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     elif node_id == "race:rival":
       rival_visible = bool(race_opportunity.get("rival_visible"))
       optional_safe = bool(race_opportunity.get("optional_safe_under_lookahead"))
-      if finale_training_turn or optional_races_blocked or (not rival_visible) or (energy_ratio <= rival_min_energy):
+      if finale_training_turn or optional_races_blocked or race_scout_rejected or (not rival_visible) or (energy_ratio <= rival_min_energy):
         viable = False
       score = 46.0 + (4.0 if optional_safe else -6.0)
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
@@ -2436,10 +2574,12 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         "optional_safe_under_lookahead": optional_safe,
         "operator_race_gate_blocked": optional_races_blocked,
         "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
+        "race_scout_rejected": race_scout_rejected,
+        "race_scout_rejection_reason": race_opportunity.get("race_scout_rejection_reason") or race_opportunity.get("rival_scout_rejection_reason"),
       }
     elif node_id == "race:fallback":
       rival_visible = bool(race_opportunity.get("rival_visible"))
-      if finale_training_turn or optional_races_blocked or rival_visible:
+      if finale_training_turn or optional_races_blocked or race_scout_rejected or rival_visible:
         viable = False
       score = 38.0
       if _safe_float(lookahead.get("next_n_turns_races_count"), 0.0) >= 2.0:
@@ -2449,6 +2589,8 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         "finale_training_turn": finale_training_turn,
         "operator_race_gate_blocked": optional_races_blocked,
         "operator_race_gate_selected_race": operator_race_gate.get("selected_race"),
+        "race_scout_rejected": race_scout_rejected,
+        "race_scout_rejection_reason": race_opportunity.get("race_scout_rejection_reason") or race_opportunity.get("rival_scout_rejection_reason"),
       }
     elif _candidate_is_forced_race(node_id):
       forced_bias = {
@@ -2482,6 +2624,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       "policy": {
         "training_overrides_race_threshold": training_threshold,
         "rival_race_min_energy_ratio": rival_min_energy,
+        "race_scout_failed_train_energy_ratio": scout_failed_train_energy_ratio,
       },
     }
     candidate["source_facts"] = source_facts
@@ -2578,6 +2721,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   if (
     not forced_viable
     and bool(race_opportunity.get("rival_visible"))
+    and not race_scout_rejected
     and best_training_base_score >= training_threshold
     and rest_entry
   ):
@@ -2593,6 +2737,23 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         f"{rest_entry.get('rationale') or ''}; final cap keeps rest below strong rival-visible "
         f"training because score {best_training_base_score:.2f} >= override threshold "
         f"{training_threshold:.2f}"
+      ).strip("; ")
+
+  if (
+    not forced_viable
+    and race_scout_rejected
+    and scout_failed_train_energy_ratio is not None
+    and energy_ratio >= scout_failed_train_energy_ratio
+    and best_training_score != float("-inf")
+    and rest_entry
+  ):
+    rest_score = _safe_float(rest_entry.get("priority_score"), float("-inf"))
+    if rest_score != float("-inf") and rest_score >= best_training_score:
+      rest_entry["priority_score"] = best_training_score - 1.0
+      rest_entry["rationale"] = (
+        f"{rest_entry.get('rationale') or ''}; capped below best viable training after "
+        f"failed rival scout because energy ratio {energy_ratio:.2f} >= "
+        f"{scout_failed_train_energy_ratio:.2f}"
       ).strip("; ")
 
   ranked = sorted(
@@ -2802,6 +2963,18 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
     **race_decision,
     "branch_kind": branch_kind,
   }
+  if selected_func != "do_race":
+    race_scout = get_planner_race_scout_result(state_obj)
+    if race_scout.get("executed") and race_scout.get("race_found", race_scout.get("rival_found")) is False:
+      scout_reason = str(race_scout.get("reason") or "race_scout_failed")
+      race_decision = {
+        **race_decision,
+        "should_race": False,
+        "reason": (
+          f"Planner race scout failed ({scout_reason}); "
+          "selected the non-race candidate from planner ranking."
+        ),
+      }
 
   fallback_action = {}
   warning_plan = {}
@@ -2895,11 +3068,13 @@ def _apply_ranked_selection_to_race_plan(
     if selected_payload.get("trackblazer_lobby_scheduled_race") else
     ("config_schedule" if selected_payload.get("scheduled_race") else "")
   )
-  race_check["scout_required"] = bool(branch_kind == "optional_rival_race")
+  race_check["scout_required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race"})
 
   race_scout = copy.deepcopy(planner_race_plan.get("race_scout") or {})
   race_scout["planner_owned"] = True
-  race_scout["required"] = bool(branch_kind == "optional_rival_race")
+  race_scout["required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race"})
+  if race_scout["required"]:
+    race_scout["scout_kind"] = "rival_aptitude" if branch_kind == "optional_rival_race" else "optional_aptitude"
   if selected_payload.get("func") != "do_race":
     race_scout["required"] = False
 
@@ -3083,9 +3258,9 @@ def _build_step_sequence(state_obj, action, shop_buy_plan, item_execution_payloa
         ExecutionStep(
           step_id="execute_rival_scout",
           step_type="execute_rival_scout",
-          intent="verify_rival_race_before_commit",
+          intent="verify_optional_race_aptitude_before_commit",
           screen_preconditions=["race_list_accessible"],
-          success_transition="rival_race_confirmed",
+          success_transition="race_scout_confirmed",
           failure_transition=(race_scout_plan.get("failure_transition") or "revert_to_fallback_action"),
           notes=race_scout_plan.get("reason") or "",
         )
@@ -3848,7 +4023,7 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
     }
 
   race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
-  rival_scout = _action_value(action, "rival_scout", {}) or {}
+  rival_scout = _action_value(action, "race_scout", {}) or _action_value(action, "rival_scout", {}) or {}
   race_planned = {}
   race_check = {}
   race_entry_gate = {}
@@ -3952,13 +4127,15 @@ def build_review_planned_actions(state_obj, action, planner_state=None) -> Dict[
     }
   if isinstance(rival_scout, dict) and rival_scout:
     race_scout_planned = {
-      "phase": "scouting_rival_race",
+      "phase": "scouting_race_list",
       "executed": True,
+      "scout_kind": rival_scout.get("scout_kind"),
+      "race_found": rival_scout.get("race_found", rival_scout.get("rival_found")),
       "rival_found": rival_scout.get("rival_found"),
       "selected_race_name": rival_scout.get("race_name"),
       "selected_match_count": rival_scout.get("match_count"),
       "selected_grade": rival_scout.get("grade"),
-      "reverted_to_training": bool(rival_scout.get("rival_found") is False),
+      "reverted_to_training": bool(rival_scout.get("race_found", rival_scout.get("rival_found")) is False),
     }
   elif _action_value(action, "prefer_rival_race"):
     race_scout_planned = {

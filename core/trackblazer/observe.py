@@ -31,6 +31,20 @@ def _derive_missing_inputs(observation_status):
   )
 
 
+def _turn_key(state_obj):
+  return f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}"
+
+
+def _turn_scoped_payload(state_obj, payload):
+  payload = copy.deepcopy(payload if isinstance(payload, dict) else {})
+  if not payload:
+    return {}
+  payload_turn_key = str(payload.get("turn_key") or "")
+  if payload_turn_key and payload_turn_key != _turn_key(state_obj):
+    return {}
+  return payload
+
+
 def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> ObservedTurnState:
   state_obj = state_obj if isinstance(state_obj, dict) else {}
   planner_state = planner_state if isinstance(planner_state, dict) else {}
@@ -108,6 +122,20 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
   runtime_warning_outcome = runtime_warning_outcome if isinstance(runtime_warning_outcome, dict) else {}
   if str(runtime_warning_outcome.get("turn_key") or "") != f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}":
     runtime_warning_outcome = {}
+  runtime_rival_scout = (
+    ((planner_state.get("runtime") or {}).get("race_scout_result") or {})
+    or ((planner_state.get("runtime") or {}).get("rival_scout_result") or {})
+  )
+  runtime_rival_scout = _turn_scoped_payload(state_obj, runtime_rival_scout)
+  state_rival_scout = _turn_scoped_payload(
+    state_obj,
+    state_obj.get("trackblazer_race_scout") or state_obj.get("trackblazer_rival_scout") or {},
+  )
+  action_rival_scout = _turn_scoped_payload(
+    state_obj,
+    (selected_action or {}).get("race_scout") or (selected_action or {}).get("rival_scout") or {},
+  )
+  rival_scout = state_rival_scout or runtime_rival_scout or action_rival_scout
   planner_warning_owned = bool(planner_race_payload or ((selected_action or {}).get("planner_race_warning_policy") or {}))
   if planner_warning_outcome.get("cancelled"):
     consecutive_warning_cancelled = True
@@ -142,6 +170,8 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
     "criteria": state_obj.get("criteria"),
     "date_event_available": state_obj.get("date_event_available"),
     "race_mission_available": state_obj.get("race_mission_available"),
+    "race_scout": copy.deepcopy(rival_scout),
+    "rival_scout": copy.deepcopy(rival_scout),
     "aptitudes": copy.deepcopy(state_obj.get("aptitudes") or {}),
     "status_effect_names": list(state_obj.get("status_effect_names") or []),
     "state_validation": copy.deepcopy(state_obj.get("state_validation") or {}),
@@ -202,7 +232,8 @@ def hydrate_observed_turn_state(state_obj, action=None, planner_state=None) -> O
       ),
       "trackblazer_race_decision": copy.deepcopy(selected_action.get("trackblazer_race_decision") or {}) if selected_action else {},
       "trackblazer_race_lookahead": copy.deepcopy(selected_action.get("trackblazer_race_lookahead") or {}) if selected_action else {},
-      "rival_scout": copy.deepcopy(selected_action.get("rival_scout") or {}) if selected_action else {},
+      "race_scout": copy.deepcopy(rival_scout),
+      "rival_scout": copy.deepcopy(rival_scout),
       "available_actions": list(getattr(action, "available_actions", []) or []),
     },
     "planner_state": {

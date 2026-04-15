@@ -5476,6 +5476,31 @@ def find_rival_races_with_aptitude(screenshot=None):
     return results
 
 
+def find_race_aptitude_matches(screenshot=None):
+    """Scan the visible race list for 2-aptitude recommendation stars."""
+    aptitude_template = constants.TRACKBLAZER_RACE_TEMPLATES["race_recommend_2_aptitudes"]
+
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+
+    aptitude_matches = device_action.match_template(
+        aptitude_template,
+        screenshot,
+        threshold=_APTITUDE_MATCH_THRESHOLD,
+        template_scaling=_INVERSE_GLOBAL_SCALE,
+    )
+
+    results = []
+    for apt in aptitude_matches:
+        apt_cx = apt[0] + apt[2] // 2
+        apt_cy = apt[1] + apt[3] // 2
+        results.append({
+            "aptitude": apt,
+            "click_target": (apt_cx, apt_cy),
+        })
+    return results
+
+
 def scout_rival_race():
     """Open the race list, scan for a rival race with good aptitudes, back out.
 
@@ -5584,8 +5609,54 @@ def scan_open_race_list_for_rival_matches():
             break
 
     return {
+        "scout_kind": "rival_aptitude",
+        "race_found": len(all_matches) > 0,
         "rival_found": len(all_matches) > 0,
         "match": all_matches[0] if all_matches else None,
         "all_matches": all_matches,
+        "match_count": len(all_matches),
         "rivals_without_aptitude": rivals_without_aptitude,
+    }
+
+
+def scan_open_race_list_for_aptitude_matches():
+    """Scan the currently open race list for any 2-aptitude recommendation.
+
+    This is used by planner-owned optional non-rival race attempts. It leaves
+    the race list open on the page where a matching aptitude asset was found.
+    """
+    from utils.screenshot import are_screenshots_same
+    from core.actions import go_to_racebox_top
+
+    go_to_racebox_top()
+
+    all_matches = []
+    for _ in range(10):
+        screenshot = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        page_results = find_race_aptitude_matches(screenshot)
+        all_matches.extend(page_results)
+
+        if all_matches:
+            break
+
+        screenshot_before = screenshot
+        device_action.swipe(
+            constants.RACE_SCROLL_BOTTOM_MOUSE_POS,
+            constants.RACE_SCROLL_TOP_MOUSE_POS,
+        )
+        device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
+        sleep(0.25)
+        screenshot_after = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        if are_screenshots_same(screenshot_before, screenshot_after, diff_threshold=15):
+            break
+
+    return {
+        "scout_kind": "optional_aptitude",
+        "race_found": len(all_matches) > 0,
+        "rival_found": len(all_matches) > 0,
+        "match": all_matches[0] if all_matches else None,
+        "all_matches": all_matches,
+        "match_count": len(all_matches),
+        "rivals_without_aptitude": 0,
+        "reason": "race_recommend_2_aptitudes_matched" if all_matches else "race_recommend_2_aptitudes_not_matched",
     }

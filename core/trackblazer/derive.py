@@ -192,6 +192,13 @@ def _lookahead_summary(state_obj, observed_data, policy):
 def _race_opportunity(observed_data, lookahead_summary, timeline_policy):
   races_today = list(constants.RACES.get(observed_data.get("year"), []) or [])
   g1_today = any((race or {}).get("grade") == "G1" for race in races_today)
+  race_scout = copy.deepcopy(observed_data.get("race_scout") or observed_data.get("rival_scout") or {})
+  race_found = race_scout.get("race_found", race_scout.get("rival_found"))
+  race_scout_rejected = bool(
+    race_scout.get("executed")
+    and race_found is False
+    and race_scout.get("blocks_optional_race", race_scout.get("blocks_optional_rival_race", True))
+  )
   mandatory_today = bool(
     bool((timeline_policy or {}).get("is_race_day"))
     or g1_today
@@ -200,6 +207,14 @@ def _race_opportunity(observed_data, lookahead_summary, timeline_policy):
   )
   return {
     "rival_visible": bool(observed_data.get("rival_indicator_detected")),
+    "race_scout": race_scout,
+    "race_scout_rejected": race_scout_rejected,
+    "race_scout_rejection_reason": str(race_scout.get("reason") or "") if race_scout_rejected else "",
+    "race_scout_no_double_aptitude_match": bool(race_scout_rejected and race_scout.get("no_double_aptitude_match")),
+    "rival_scout": race_scout,
+    "rival_scout_rejected": race_scout_rejected,
+    "rival_scout_rejection_reason": str(race_scout.get("reason") or "") if race_scout_rejected else "",
+    "rival_scout_no_double_aptitude_match": bool(race_scout_rejected and race_scout.get("no_double_aptitude_match")),
     "lobby_scheduled": bool(observed_data.get("trackblazer_lobby_scheduled_race")),
     "climax_locked": bool(
       observed_data.get("trackblazer_climax_locked_race")

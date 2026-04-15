@@ -12,6 +12,7 @@ TRACKBLAZER_PLANNER_POLICY = {
   "training_value_class_cutoffs": {"weak": 35, "adequate": 40, "strong": 50, "very_strong": 60},
   "training_overrides_race_threshold": 30,
   "rival_race_min_energy_ratio": 0.02,
+  "race_scout_failed_train_energy_ratio": 0.70,
   "lookahead_horizon_turns": 3,
   "max_fallback_depth": 3,
   "bond_training_cutoff_turn": None,
@@ -38,6 +39,12 @@ def normalize_trackblazer_planner_policy(raw_policy=None):
     },
     "training_overrides_race_threshold": float(raw_policy.get("training_overrides_race_threshold", defaults["training_overrides_race_threshold"])),
     "rival_race_min_energy_ratio": float(raw_policy.get("rival_race_min_energy_ratio", defaults["rival_race_min_energy_ratio"])),
+    "race_scout_failed_train_energy_ratio": float(
+      raw_policy.get(
+        "race_scout_failed_train_energy_ratio",
+        raw_policy.get("rival_scout_failed_train_energy_ratio", defaults["race_scout_failed_train_energy_ratio"]),
+      )
+    ),
     "lookahead_horizon_turns": int(raw_policy.get("lookahead_horizon_turns", defaults["lookahead_horizon_turns"])),
     "max_fallback_depth": int(raw_policy.get("max_fallback_depth", defaults["max_fallback_depth"])),
     "bond_training_cutoff_turn": raw_policy.get("bond_training_cutoff_turn", defaults["bond_training_cutoff_turn"]),

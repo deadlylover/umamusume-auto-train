@@ -803,6 +803,108 @@ def main():
     assert cached_only_race_check.get("cached_only") is True, "read-only race check should flag cached-only mode when rival cache is missing"
     assert cached_only_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, "cached-only race guard should preserve planner comparison parity"
 
+    scout_rejected_state, scout_rejected_action = _prepare_case("race")
+    scout_rejected_state["energy_level"] = 80
+    scout_rejected_state["max_energy"] = 100
+    scout_rejected_state["trackblazer_race_scout"] = {
+      "turn_key": f"{scout_rejected_state['year']}|{scout_rejected_state['turn']}",
+      "source": "synthetic_check",
+      "executed": True,
+      "scout_kind": "rival_aptitude",
+      "race_found": False,
+      "rival_found": False,
+      "rivals_without_aptitude": 1,
+      "reason": "race_recommend_2_aptitudes_not_matched",
+      "blocks_optional_race": True,
+      "blocks_optional_rival_race": True,
+      "no_double_aptitude_match": True,
+    }
+    scout_rejected_snapshot = build_review_snapshot(
+      scout_rejected_state,
+      scout_rejected_action,
+      reasoning_notes="synthetic rival scout rejected case",
+      ocr_debug=[],
+    )
+    scout_rejected_turn_plan = TurnPlan.from_snapshot(
+      (scout_rejected_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    )
+    scout_rejected_race_plan = dict(scout_rejected_turn_plan.race_plan or {})
+    scout_rejected_selected = dict(scout_rejected_race_plan.get("selected_action") or {})
+    scout_rejected_ranking = list(scout_rejected_turn_plan.candidate_ranking or [])
+    scout_rejected_rival = next(
+      (entry for entry in scout_rejected_ranking if entry.get("node_id") == "race:rival"),
+      {},
+    )
+    assert scout_rejected_selected.get("func") == "do_training", scout_rejected_selected
+    assert "race scout failed" in (scout_rejected_selected.get("trackblazer_race_decision", {}).get("reason") or ""), scout_rejected_selected
+    assert (scout_rejected_race_plan.get("race_scout") or {}).get("race_found") is False, scout_rejected_race_plan
+    assert scout_rejected_rival.get("priority_score") == float("-inf"), scout_rejected_rival
+    assert scout_rejected_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, "scout rejection should preserve planner comparison parity"
+
+    fallback_scout_state, fallback_scout_action = _prepare_case("fallback_non_rival_race")
+    fallback_scout_state["energy_level"] = 80
+    fallback_scout_state["max_energy"] = 100
+    fallback_scout_state["trackblazer_race_scout"] = {
+      "turn_key": f"{fallback_scout_state['year']}|{fallback_scout_state['turn']}",
+      "source": "synthetic_check",
+      "executed": True,
+      "scout_kind": "optional_aptitude",
+      "race_found": False,
+      "rival_found": False,
+      "match_count": 0,
+      "reason": "race_recommend_2_aptitudes_not_matched",
+      "blocks_optional_race": True,
+      "no_double_aptitude_match": True,
+    }
+    fallback_scout_snapshot = build_review_snapshot(
+      fallback_scout_state,
+      fallback_scout_action,
+      reasoning_notes="synthetic fallback race scout rejected case",
+      ocr_debug=[],
+    )
+    fallback_scout_turn_plan = TurnPlan.from_snapshot(
+      (fallback_scout_state.get("trackblazer_planner_state") or {}).get("turn_plan") or {}
+    )
+    fallback_scout_race_plan = dict(fallback_scout_turn_plan.race_plan or {})
+    fallback_scout_selected = dict(fallback_scout_race_plan.get("selected_action") or {})
+    fallback_scout_ranking = list(fallback_scout_turn_plan.candidate_ranking or [])
+    fallback_scout_fallback_race = next(
+      (entry for entry in fallback_scout_ranking if entry.get("node_id") == "race:fallback"),
+      None,
+    )
+    assert fallback_scout_selected.get("func") == "do_training", fallback_scout_selected
+    assert "race scout failed" in (fallback_scout_selected.get("trackblazer_race_decision", {}).get("reason") or ""), fallback_scout_selected
+    assert (fallback_scout_race_plan.get("race_scout") or {}).get("race_found") is False, fallback_scout_race_plan
+    assert (
+      fallback_scout_fallback_race is None
+      or fallback_scout_fallback_race.get("priority_score") == float("-inf")
+    ), fallback_scout_fallback_race
+    assert fallback_scout_snapshot.get("planner_dual_run_comparison", {}).get("match") is True, "fallback scout rejection should preserve planner comparison parity"
+
+    fallback_probe_state = _base_state()
+    fallback_probe_state["year"] = "Classic Year Late Sep"
+    fallback_probe_state["turn"] = 30
+    fallback_probe_state["energy_level"] = 46
+    fallback_probe_state["max_energy"] = 126
+    fallback_probe_state["rival_indicator_detected"] = False
+    fallback_probe_action, fallback_probe_training_results = _rest_with_failure_blocked_training_action(blocked_score=36.0)
+    fallback_probe_state["training_results"] = dict(fallback_probe_training_results)
+    fallback_probe_action["trackblazer_race_decision"] = evaluate_trackblazer_race(
+      fallback_probe_state,
+      fallback_probe_action,
+    )
+    _, fallback_probe_turn_plan = planner_module.set_turn_plan_decision_path(
+      fallback_probe_state,
+      fallback_probe_action,
+      "planner",
+    )
+    fallback_probe_step_types = [
+      entry.step_type
+      for entry in list(fallback_probe_turn_plan.step_sequence or [])
+    ]
+    assert "execute_rival_scout" in fallback_probe_step_types, fallback_probe_step_types
+    assert (fallback_probe_turn_plan.race_plan.get("race_scout") or {}).get("scout_kind") == "optional_aptitude", fallback_probe_turn_plan.race_plan
+
     whistle_state, whistle_action = _prepare_case("training")
     whistle_state["trackblazer_shop_summary"] = {
       "shop_coins": 180,

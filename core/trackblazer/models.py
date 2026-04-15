@@ -76,6 +76,8 @@ class PlannerRuntimeState:
   pending_skill_scan: BackgroundSkillScanState = field(default_factory=BackgroundSkillScanState)
   pending_shop_scan: PendingShopScanState = field(default_factory=PendingShopScanState)
   consecutive_warning_outcome: Dict[str, Any] = field(default_factory=dict)
+  race_scout_result: Dict[str, Any] = field(default_factory=dict)
+  rival_scout_result: Dict[str, Any] = field(default_factory=dict)
   fallback_count: int = 0
   last_fallback_reason: str = ""
   runtime_path: str = "legacy_runtime"
@@ -356,12 +358,31 @@ def _format_selected_action_line(selected_action):
 
 
 def _format_rival_line(selected_action, state_summary):
-  rival_scout = selected_action.get("rival_scout") or {}
-  if isinstance(rival_scout, dict) and rival_scout:
-    rival_found = rival_scout.get("rival_found")
+  race_scout = (
+    selected_action.get("race_scout")
+    or selected_action.get("rival_scout")
+    or state_summary.get("trackblazer_race_scout")
+    or state_summary.get("trackblazer_rival_scout")
+    or {}
+  )
+  if isinstance(race_scout, dict) and race_scout:
+    race_found = race_scout.get("race_found", race_scout.get("rival_found"))
+    scout_kind = str(race_scout.get("scout_kind") or "")
+    subject = "rival race" if scout_kind == "rival_aptitude" else "aptitude race"
+    if race_found is True:
+      return f"Race: {subject} found"
+    if race_found is False:
+      reason = race_scout.get("reason")
+      if reason:
+        return f"Race: {subject} not found ({reason})"
+      return f"Race: {subject} not found"
+    rival_found = race_scout.get("rival_found")
     if rival_found is True:
       return "Race: rival race found"
     if rival_found is False:
+      reason = race_scout.get("reason")
+      if reason:
+        return f"Race: rival race not found ({reason})"
       return "Race: rival race not found"
   rival_indicator = state_summary.get("rival_indicator_detected")
   if rival_indicator is True:
