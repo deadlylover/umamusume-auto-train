@@ -4473,6 +4473,11 @@ def _wait_for_shop_screen_open(max_wait_seconds=2.4, poll_seconds=0.2, threshold
         sleep(initial_sleep)
 
     while True:
+        # Force a fresh capture on every poll. The screenshot helpers cache the
+        # last frame, and without clearing here the verify loop can keep
+        # re-checking the pre-click lobby image after the shop has already
+        # opened.
+        device_action.flush_screenshot_cache()
         poll_t0 = _time()
         opened, verification_entry, verification_checks = detect_shop_screen(threshold=threshold)
         attempts.append({

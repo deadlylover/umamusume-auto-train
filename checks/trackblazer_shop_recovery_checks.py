@@ -58,6 +58,43 @@ class TrackblazerShopRecoveryChecks(unittest.TestCase):
         self.assertEqual(result.get("reason"), "clicked_lobby_button_shop")
         self.assertEqual(len(result.get("verification_attempts") or []), 2)
 
+    def test_wait_for_shop_screen_open_flushes_cached_frames_between_polls(self):
+        flush_counter = {"count": 0}
+
+        def _fake_flush():
+            flush_counter["count"] += 1
+
+        def _fake_detect_shop_screen(threshold=0.7):
+            if flush_counter["count"] >= 2:
+                return True, _entry("shop_confirm", passed=True, score=0.99), [_entry("shop_confirm", passed=True, score=0.99)]
+            return False, None, []
+
+        with patch.object(
+            trackblazer.device_action,
+            "flush_screenshot_cache",
+            side_effect=_fake_flush,
+        ), patch.object(
+            trackblazer,
+            "detect_shop_screen",
+            side_effect=_fake_detect_shop_screen,
+        ), patch.object(
+            trackblazer,
+            "sleep",
+            return_value=None,
+        ):
+            opened, entry, checks, attempts = trackblazer._wait_for_shop_screen_open(
+                max_wait_seconds=0.1,
+                poll_seconds=0.0,
+                threshold=0.75,
+                initial_sleep=0.0,
+            )
+
+        self.assertTrue(opened)
+        self.assertEqual((entry or {}).get("key"), "shop_confirm")
+        self.assertTrue(any(item.get("key") == "shop_confirm" for item in checks))
+        self.assertGreaterEqual(flush_counter["count"], 2)
+        self.assertGreaterEqual(len(attempts), 2)
+
     def test_execute_shop_purchase_failure_preserves_live_scan_state(self):
         shared_scan = {
             "all_items": ["stamina_manual"],
