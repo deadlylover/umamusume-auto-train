@@ -1554,6 +1554,48 @@ def get_mood(attempts=0):
   debug(f"Mood couldn't be determined, retrying (attempt {attempts + 1}/10)")
   return get_mood(attempts + 1)
 
+
+def _read_turn_digits_from_region(region_xywh, *, debug_key="turn", resize_factors=(2,), thresholds=(None,)):
+  turn_image = device_action.screenshot(region_xywh=region_xywh)
+  record_runtime_ocr_debug(
+    debug_key,
+    image=turn_image,
+    extra={
+      "region_xywh": list(region_xywh),
+    },
+  )
+
+  for resize_factor in resize_factors:
+    enhanced = enhance_image_for_ocr(turn_image, resize_factor=resize_factor)
+    for threshold in thresholds:
+      if threshold is None:
+        turn_text = extract_allowed_text(
+          enhanced,
+          allowlist="0123456789",
+          ocr_surface=_OCR_SURFACE_TURN_COUNTER,
+        )
+      else:
+        turn_text = extract_text(
+          enhanced,
+          allowlist="0123456789",
+          threshold=threshold,
+          ocr_surface=_OCR_SURFACE_TURN_COUNTER,
+        )
+      digits_only = re.sub(r"[^\d]", "", turn_text or "")
+      if digits_only:
+        record_runtime_ocr_debug(
+          debug_key,
+          extra={
+            "resize_factor": resize_factor,
+            "threshold": threshold,
+            "raw_text": turn_text,
+            "parsed_value": int(digits_only),
+          },
+        )
+        return int(digits_only)
+  return -1
+
+
 # Check turn
 def get_turn(*, use_last_known=True):
   global _last_turn
@@ -1568,15 +1610,13 @@ def get_turn(*, use_last_known=True):
   else:
     region_xywh = constants.TURN_REGION
   # TODO: add template-matching fallback for digits "1" and "7" when OCR fails.
-  turn = device_action.screenshot(region_xywh=region_xywh)
-  record_runtime_ocr_debug("turn", image=turn)
-  turn = enhance_image_for_ocr(turn, resize_factor=2)
-  turn_text = extract_allowed_text(
-    turn,
-    allowlist="0123456789",
-    ocr_surface=_OCR_SURFACE_TURN_COUNTER,
+  turn_value = _read_turn_digits_from_region(
+    region_xywh,
+    debug_key="turn",
+    resize_factors=(2,),
+    thresholds=(None,),
   )
-  debug(f"Turn text: {turn_text}")
+  debug(f"Turn narrow-region OCR: {turn_value}")
 
   if constants.SCENARIO_NAME == "unity":
     race_turns = device_action.screenshot(region_xywh=constants.UNITY_RACE_TURNS_REGION)
@@ -1594,11 +1634,29 @@ def get_turn(*, use_last_known=True):
         info(f"Race turns left until unity cup: {digits_only}, waiting for 3 seconds to allow banner to pass.")
         sleep(3)
 
-  digits_only = re.sub(r"[^\d]", "", turn_text)
-
-  if digits_only:
-    _last_turn = int(digits_only)
+  if turn_value != -1:
+    _last_turn = int(turn_value)
     return _last_turn
+
+  if constants.SCENARIO_NAME == "unity":
+    full_region_xywh = constants.UNITY_TURN_FULL_REGION
+  elif constants.SCENARIO_NAME in ("mant", "trackblazer"):
+    full_region_xywh = constants.MANT_TURN_FULL_REGION
+  else:
+    full_region_xywh = None
+
+  if full_region_xywh:
+    turn_value = _read_turn_digits_from_region(
+      full_region_xywh,
+      debug_key="turn_full",
+      resize_factors=(4, 6),
+      thresholds=(None, 0.6, 0.3),
+    )
+    debug(f"Turn full-region OCR: {turn_value}")
+    if turn_value != -1:
+      warning("[STATE] Turn OCR narrow region failed; recovered from full-region fallback.")
+      _last_turn = int(turn_value)
+      return _last_turn
 
   if constants.SCENARIO_NAME in ("mant", "trackblazer"):
     turn_1_match = device_action.locate(
