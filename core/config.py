@@ -160,6 +160,15 @@ def reload_config(print_config=True):
     load_var('VERBOSE_ACTIONS', debug_config.get("verbose_actions", False))
     load_var('VERBOSE_OCR', debug_config.get("verbose_ocr", False))
     load_var('EASYOCR_DEVICE', str(debug_config.get("easyocr_device", "auto") or "auto").strip().lower())
+    load_var('OCR_BACKEND', str(debug_config.get("ocr_backend", "easyocr") or "easyocr").strip().lower())
+    raw_route_overrides = debug_config.get("ocr_route_overrides", {})
+    if not isinstance(raw_route_overrides, dict):
+      raw_route_overrides = {}
+    load_var('OCR_ROUTE_OVERRIDES', {str(k): str(v).strip().lower() for k, v in raw_route_overrides.items() if v})
+    raw_vision_settings = debug_config.get("vision_ocr", {})
+    if not isinstance(raw_vision_settings, dict):
+      raw_vision_settings = {}
+    load_var('VISION_OCR_SETTINGS', raw_vision_settings)
     load_var('DEVICE_DEBUG_LOGGING', debug_config.get("device_debug", False))
     load_var('SAVE_DEBUG_IMAGES', debug_config.get("save_debug_images", False))
     turn_trace_config = debug_config.get("turn_trace", {})

@@ -1782,6 +1782,13 @@
     "verbose_actions": false,
     "verbose_ocr": false,
     "easyocr_device": "auto",
+    "ocr_backend": "easyocr",
+    "ocr_route_overrides": {},
+    "vision_ocr": {
+      "recognition_level": "accurate",
+      "minimum_confidence": 0.0,
+      "prefer_language_correction": false
+    },
     "device_debug": false,
     "save_debug_images": false,
     "turn_trace": {

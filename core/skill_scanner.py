@@ -751,15 +751,37 @@ def _stitch_split_skill_rows(rows):
     return stitched
 
 
-def _run_skill_name_ocr_pass(crop, bbox_top, reader, allowlist, batch_size, ocr_variant="normal"):
-    raw_results = reader.readtext(
+_SKILL_NAME_BAND_OCR_SURFACE = "skill_name_band"
+
+
+def _resolve_skill_name_band_batch_size():
+    """Pick an EasyOCR batch size when the skill-name-band route lands on EasyOCR.
+
+    When the configured route resolves to a non-EasyOCR backend (e.g. Apple
+    Vision) this returns ``None`` so we avoid initializing EasyOCR's reader
+    just to read its device attribute.
+    """
+    from core import ocr as ocr_facade
+    backend, _reason = ocr_facade.resolve_backend(_SKILL_NAME_BAND_OCR_SURFACE, None)
+    if backend != "easyocr":
+        return None
+    from core import ocr_easyocr
+    reader = ocr_easyocr.get_reader()
+    if str(getattr(reader, "device", "cpu")) != "cpu":
+        return _SKILL_OCR_GPU_BATCH_SIZE
+    return _SKILL_OCR_CPU_BATCH_SIZE
+
+
+def _run_skill_name_ocr_pass(crop, bbox_top, allowlist, batch_size, ocr_variant="normal"):
+    from core import ocr as ocr_facade
+    raw_results = ocr_facade.readtext_detailed(
         crop,
+        ocr_surface=_SKILL_NAME_BAND_OCR_SURFACE,
         allowlist=allowlist,
-        detail=1,
-        paragraph=False,
         min_size=_SKILL_OCR_MIN_SIZE,
         canvas_size=_SKILL_OCR_CANVAS_SIZE,
         batch_size=batch_size,
+        paragraph=False,
         workers=0,
     )
     rows = []
@@ -799,18 +821,13 @@ def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
 
-    from core.ocr import get_reader
-    r = get_reader()
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!.,'#?() "
-    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
-    if str(getattr(r, "device", "cpu")) != "cpu":
-        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+    batch_size = _resolve_skill_name_band_batch_size()
     _bbox_left, bbox_top, _bbox_right, _bbox_bottom = [int(v) for v in constants.SKILL_NAME_BAND_BBOX]
 
     normal_rows = _run_skill_name_ocr_pass(
         crop,
         bbox_top,
-        r,
         allowlist,
         batch_size,
         ocr_variant="normal",
@@ -824,7 +841,6 @@ def _extract_ocr_rows_from_name_band(screenshot, include_dim_pass=True):
             _run_skill_name_ocr_pass(
                 dim_crop,
                 bbox_top,
-                r,
                 allowlist,
                 batch_size,
                 ocr_variant="dim",
