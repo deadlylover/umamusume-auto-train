@@ -102,6 +102,7 @@ class OperatorConsole:
     self._execution_intent_var = None
     self._trackblazer_use_items_var = None
     self._trackblazer_use_new_planner_var = None
+    self._skill_auto_buy_var = None
     self._skip_scenario_detection_var = None
     self._skip_full_stats_aptitude_check_var = None
     self._trackblazer_scoring_mode_var = None
@@ -282,8 +283,6 @@ class OperatorConsole:
     primary_controls.grid(row=0, column=0, sticky="w")
     secondary_controls = tk.Frame(actions, bg="#101418")
     secondary_controls.grid(row=1, column=0, sticky="w", pady=(6, 0))
-    tertiary_controls = tk.Frame(actions, bg="#101418")
-    tertiary_controls.grid(row=2, column=0, sticky="w", pady=(6, 0))
 
     self._start_bot_button = tk.Button(primary_controls, text="Start Bot", command=self._start_bot)
     self._start_bot_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -314,9 +313,6 @@ class OperatorConsole:
         activeforeground="white",
       ).pack(side=tk.LEFT, padx=(0 if intent == "check_only" else 4, 0))
     self._always_on_top_var = tk.BooleanVar(value=False)
-    self._trackblazer_use_items_var = tk.BooleanVar(value=bot.get_trackblazer_use_items_enabled())
-    self._trackblazer_use_new_planner_var = tk.BooleanVar(value=bot.get_trackblazer_use_new_planner_enabled())
-    self._skill_auto_buy_var = tk.BooleanVar(value=bot.get_skill_auto_buy_enabled())
     self._skip_scenario_detection_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)))
     self._skip_full_stats_aptitude_check_var = tk.BooleanVar(value=bool(getattr(config, "SKIP_FULL_STATS_APTITUDE_CHECK", True)))
     tk.Checkbutton(
@@ -363,92 +359,6 @@ class OperatorConsole:
       anchor="w",
     ).pack(side=tk.LEFT, padx=(6, 0))
 
-    tk.Button(
-      tertiary_controls,
-      text="Test Use Items",
-      command=lambda: self._run_phase_check("check_inventory_selection"),
-    ).pack(side=tk.LEFT, padx=(0, 8))
-    tk.Checkbutton(
-      tertiary_controls,
-      text="New planner",
-      variable=self._trackblazer_use_new_planner_var,
-      command=self._toggle_trackblazer_use_new_planner,
-      fg="white",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-    ).pack(side=tk.LEFT, padx=(0, 8))
-    tk.Label(
-      tertiary_controls,
-      text="On = planner path for review/runtime. Planner/legacy boundaries are logged in Debug History.",
-      fg="#9aa4ad",
-      bg="#101418",
-    ).pack(side=tk.LEFT, padx=(0, 8))
-    tk.Checkbutton(
-      tertiary_controls,
-      text="Use items",
-      variable=self._trackblazer_use_items_var,
-      command=self._toggle_trackblazer_use_items,
-      fg="white",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-    ).pack(side=tk.LEFT, padx=(0, 8))
-    tk.Label(
-      tertiary_controls,
-      text="Off = dry-run and close inventory. On = click first confirm-use scaffold.",
-      fg="#9aa4ad",
-      bg="#101418",
-    ).pack(side=tk.LEFT)
-    tk.Checkbutton(
-      tertiary_controls,
-      text="Auto-buy skill",
-      variable=self._skill_auto_buy_var,
-      command=self._toggle_skill_auto_buy,
-      fg="white",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-    ).pack(side=tk.LEFT, padx=(12, 0))
-    tk.Label(
-      tertiary_controls,
-      text="On = override config and allow skill buys. Off = skip skill review.",
-      fg="#9aa4ad",
-      bg="#101418",
-    ).pack(side=tk.LEFT, padx=(8, 0))
-    tk.Button(
-      tertiary_controls,
-      text="Item Policy",
-      command=self._open_trackblazer_item_policy_window,
-    ).pack(side=tk.LEFT, padx=(12, 0))
-    tk.Button(
-      tertiary_controls,
-      text="Shop Policy",
-      command=self._open_trackblazer_shop_policy_window,
-    ).pack(side=tk.LEFT, padx=(12, 0))
-    tk.Label(
-      tertiary_controls,
-      text="Scoring:",
-      fg="#9aa4ad",
-      bg="#101418",
-    ).pack(side=tk.LEFT, padx=(12, 0))
-    self._trackblazer_scoring_mode_var = tk.StringVar(value=bot.get_trackblazer_scoring_mode())
-    for mode_val, mode_label in (("legacy", "legacy"), ("stat_focused", "stat focused")):
-      tk.Radiobutton(
-        tertiary_controls,
-        text=mode_label,
-        value=mode_val,
-        variable=self._trackblazer_scoring_mode_var,
-        command=self._set_trackblazer_scoring_mode,
-        fg="white",
-        bg="#101418",
-        selectcolor="#192028",
-        activebackground="#101418",
-        activeforeground="white",
-      ).pack(side=tk.LEFT, padx=(4, 0))
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
     right = tk.Frame(root, bg="#101418")
