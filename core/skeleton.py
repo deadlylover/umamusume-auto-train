@@ -16,7 +16,7 @@ from PIL import ImageGrab
 from core.actions import Action
 import utils.constants as constants
 from scenarios.unity import unity_cup_function
-from core.events import select_event
+from core.events import find_event_choice_icon, select_event
 from core.claw_machine import play_claw_machine
 from core.skill import (
   get_skill_purchase_check_state,
@@ -4657,12 +4657,14 @@ def _generic_post_action_return_to_lobby_step():
 
 _POST_ACTION_MAX_WAIT_RACE = 45.0
 _POST_ACTION_MAX_WAIT_DEFAULT = 20.0
+_POST_ACTION_EVENT_CHAIN_MAX = 4
+_POST_ACTION_EVENT_CHAIN_SETTLE_SECONDS = 0.15
 
 
 # Post-action resolution branch order:
-# 1. Stable lobby check
-# 2. Trackblazer career-complete banner
-# 3. Event choice resolution
+# 1. Event choice fast path
+# 2. Stable lobby check
+# 3. Trackblazer career-complete banner
 # 4. Trackblazer shop refresh popup
 # 5. Trackblazer scheduled race popup
 # 6. Trackblazer climax race result screen
@@ -4672,6 +4674,29 @@ _POST_ACTION_MAX_WAIT_DEFAULT = 20.0
 # 10. Generic bottom-screen recovery clicks
 # 11. Safe-space tap fallback after repeated idle loops
 # 12. Timeout fallback to the generic lobby scan
+def _resolve_post_action_event_chain(screenshot=None, max_events=_POST_ACTION_EVENT_CHAIN_MAX):
+  current_screenshot = screenshot
+  resolved_count = 0
+
+  while resolved_count < max_events:
+    event_choice_icon = find_event_choice_icon(screenshot=current_screenshot)
+    if not event_choice_icon:
+      break
+    if not select_event(
+      event_choices_icon=event_choice_icon,
+      screenshot=current_screenshot,
+      settle_seconds=_POST_ACTION_EVENT_CHAIN_SETTLE_SECONDS,
+    ):
+      break
+    resolved_count += 1
+    if resolved_count >= max_events:
+      break
+    device_action.flush_screenshot_cache()
+    current_screenshot = device_action.screenshot()
+
+  return resolved_count
+
+
 def _resolve_post_action_resolution(state_obj, action, max_wait=None):
   import time as _time_mod
 
@@ -4696,6 +4721,22 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
     device_action.flush_screenshot_cache()
     screenshot = device_action.screenshot()
+    resolved_event_choices = _resolve_post_action_event_chain(screenshot=screenshot)
+    if resolved_event_choices:
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message=(
+          f"Resolved {resolved_event_choices} post-action event choice"
+          f"{'' if resolved_event_choices == 1 else 's'}."
+        ),
+        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
+        popup_type="event_choice",
+        reasoning_notes=f"resolved_count={resolved_event_choices}",
+      )
+      idle_loops = 0
+      continue
+
     stable_lobby, anchor_counts = _is_stable_career_lobby_screen(screenshot=screenshot)
     if stable_lobby:
       bot.complete_turn_metrics(
@@ -4731,18 +4772,6 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         action,
         context="post_action_resolution",
       )
-
-    if select_event():
-      _update_post_action_resolution_snapshot(
-        state_obj,
-        action,
-        message="Resolved post-action event choice.",
-        sub_phase=SUB_PHASE_RESOLVE_EVENT_CHOICE,
-        popup_type="event_choice",
-      )
-      idle_loops = 0
-      sleep(0.6)
-      continue
 
     if _trackblazer_scenario_active():
       shop_refresh_result = _handle_trackblazer_shop_refresh_popup()
@@ -6389,7 +6418,12 @@ def career_lobby(dry_run_turn=False):
       # modify this portion to get event data out instead. Maybe call collect state or a partial version of it.
       if len(matches.get("event", [])) > 0:
         bot.push_debug_history({"event": "template_match", "asset": "event", "result": "found", "context": "lobby_scan"})
-        select_event()
+        event_box = matches["event"][0]
+        event_choice_icon = (
+          int(event_box[0] + (event_box[2] // 2)),
+          int(event_box[1] + (event_box[3] // 2)),
+        )
+        select_event(event_choices_icon=event_choice_icon, screenshot=screenshot)
         continue
       if click_match(matches.get("inspiration")):
         bot.push_debug_history({"event": "click", "asset": "inspiration", "result": "clicked", "context": "lobby_scan"})

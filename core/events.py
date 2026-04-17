@@ -1,5 +1,6 @@
 from rapidfuzz import fuzz
 import re
+from PIL import Image, ImageEnhance
 import utils.device_action_wrapper as device_action
 
 import core.config as config
@@ -8,6 +9,11 @@ from core.ocr import extract_text
 from utils.log import debug, info, warning, error
 from utils.screenshot import enhanced_screenshot
 from utils.tools import sleep, get_secs
+
+_EVENT_CHOICE_TEMPLATE = "assets/icons/event_choice_1.png"
+_EVENT_CHOICE_VERTICAL_GAP = 112
+_EVENT_CHOICE_THRESHOLD = 0.8
+_DEFAULT_EVENT_SETTLE_SECONDS = 0.15
 
 def event_choice(event_name):
   threshold = 0.8
@@ -41,8 +47,44 @@ def event_choice(event_name):
     )
     return default_choice
 
-def get_event_name():
-  img = enhanced_screenshot(constants.EVENT_NAME_REGION)
+def _crop_absolute_bbox_from_game_window_screenshot(screenshot, bbox):
+  if screenshot is None or getattr(screenshot, "size", 0) == 0:
+    return None
+  game_window_bbox = getattr(constants, "GAME_WINDOW_BBOX", None)
+  if not isinstance(game_window_bbox, tuple) or len(game_window_bbox) != 4:
+    return None
+  if not isinstance(bbox, tuple) or len(bbox) != 4:
+    return None
+  screenshot_h, screenshot_w = screenshot.shape[:2]
+  left = max(0, int(bbox[0] - game_window_bbox[0]))
+  top = max(0, int(bbox[1] - game_window_bbox[1]))
+  right = min(screenshot_w, int(bbox[2] - game_window_bbox[0]))
+  bottom = min(screenshot_h, int(bbox[3] - game_window_bbox[1]))
+  if right <= left or bottom <= top:
+    return None
+  return screenshot[top:bottom, left:right].copy()
+
+
+def _prepare_event_name_image(event_name_crop):
+  if event_name_crop is None or getattr(event_name_crop, "size", 0) == 0:
+    return None
+  pil_img = Image.fromarray(event_name_crop)
+  pil_img = pil_img.resize((pil_img.width * 2, pil_img.height * 2), Image.BICUBIC)
+  pil_img = pil_img.convert("L")
+  pil_img = ImageEnhance.Contrast(pil_img).enhance(1.5)
+  return pil_img
+
+
+def get_event_name(screenshot=None):
+  img = None
+  if screenshot is not None:
+    event_name_crop = _crop_absolute_bbox_from_game_window_screenshot(
+      screenshot,
+      getattr(constants, "EVENT_NAME_BBOX", None),
+    )
+    img = _prepare_event_name_image(event_name_crop)
+  if img is None:
+    img = enhanced_screenshot(constants.EVENT_NAME_REGION)
   text = extract_text(img)
   debug(f"Event name: {text}")
   return text
@@ -68,20 +110,37 @@ def find_best_match(text: str, event_list: list[dict]) -> tuple[str, float]:
 
   return best_match, best_similarity
 
+def find_event_choice_icon(screenshot=None, threshold=_EVENT_CHOICE_THRESHOLD):
+  region_ltrb = getattr(constants, "GAME_WINDOW_BBOX", None)
+  if screenshot is None:
+    screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+  matches = device_action.match_template(
+    _EVENT_CHOICE_TEMPLATE,
+    screenshot,
+    threshold=threshold,
+  )
+  if not matches:
+    return None
+  x, y, w, h = matches[0]
+  if isinstance(region_ltrb, tuple) and len(region_ltrb) == 4:
+    return (int(region_ltrb[0] + x + (w // 2)), int(region_ltrb[1] + y + (h // 2)))
+  return (int(x + (w // 2)), int(y + (h // 2)))
+
+
 # needs a rework can be more optimized
-def select_event():
-  event_choices_icon = device_action.locate("assets/icons/event_choice_1.png")
-  choice_vertical_gap = 112
+def select_event(event_choices_icon=None, screenshot=None, settle_seconds=_DEFAULT_EVENT_SETTLE_SECONDS):
+  event_choices_icon = event_choices_icon or find_event_choice_icon(screenshot=screenshot)
 
   if not event_choices_icon:
     return False
 
   if not config.USE_OPTIMAL_EVENT_CHOICE:
     device_action.click(target=event_choices_icon, text=f"Event found, selecting top choice.")
-    # click(boxes=event_choices_icon, text="Event found, selecting top choice.")
+    if settle_seconds > 0:
+      sleep(settle_seconds)
     return True
 
-  event_name = get_event_name()
+  event_name = get_event_name(screenshot=screenshot)
   if not event_name or event_name == "":
     debug(f"No event name found, returning False")
     return False
@@ -92,7 +151,8 @@ def select_event():
   debug(f"Event Choice: {chosen}")
   if chosen == 0:
     device_action.click(target=event_choices_icon, text=f"Event found, selecting top choice.")
-    # click(boxes=event_choices_icon, text=f"Event found, selecting top choice.")
+    if settle_seconds > 0:
+      sleep(settle_seconds)
     return True
   
   if event["event_name"] == "A Team at Last":
@@ -118,25 +178,29 @@ def select_event():
         if "Pudding" not in text and "Carrot" in text:
           debug(f"Clicking: {current_coords}")
           device_action.click(target=current_coords, text=f"Selecting optimal choice: {event_name}")
+          if settle_seconds > 0:
+            sleep(settle_seconds)
           break
       elif test_against in text:
         debug(f"test against: {test_against} in text: {text}")
         debug(f"Clicking: {current_coords}")
         device_action.click(target=current_coords, text=f"Selecting optimal choice: {event_name}")
+        if settle_seconds > 0:
+          sleep(settle_seconds)
         break
-      current_coords = (current_coords[0], current_coords[1] + choice_vertical_gap)
+      current_coords = (current_coords[0], current_coords[1] + _EVENT_CHOICE_VERTICAL_GAP)
   else:
     x = event_choices_icon[0]
-    y = event_choices_icon[1] + ((chosen - 1) * choice_vertical_gap)
+    y = event_choices_icon[1] + ((chosen - 1) * _EVENT_CHOICE_VERTICAL_GAP)
     # debug(f"Event choices coordinates: {event_choices_icon}")
     debug(f"Event choices coordinates: {event_choices_icon}")
     # debug(f"Clicking: {x}, {y}")
     debug(f"Clicking: {x}, {y}")
     device_action.click(target=(x, y), text=f"Selecting optimal choice: {event_name}")
-    # click(boxes=(x, y, 1, 1), text=f"Selecting optimal choice: {event_name}")
-    sleep(0.5)
+    if settle_seconds > 0:
+      sleep(settle_seconds)
     if "Acupuncturist" in event_name:
-      confirm_acupuncturist_y = event_choices_icon[1] + ((4 - 1) * choice_vertical_gap)
+      confirm_acupuncturist_y = event_choices_icon[1] + ((4 - 1) * _EVENT_CHOICE_VERTICAL_GAP)
       device_action.click(target=(x, confirm_acupuncturist_y), text=f"Selecting optimal choice: {event_name}")
       # click(boxes=(x, confirm_acupuncturist_y, 1, 1), text="Confirm acupuncturist.")
   return True

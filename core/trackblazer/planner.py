@@ -21,7 +21,7 @@ from core.trackblazer.candidates import (
   planner_native_scheduled_race_name,
 )
 from core.trackblazer.derive import derive_turn_state
-from core.trackblazer_item_use import plan_item_usage
+from core.trackblazer_item_use import plan_item_usage, should_allow_wit_training
 from core.trackblazer.observe import hydrate_observed_turn_state
 from core.trackblazer.review import build_ranked_training_snapshot
 from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
@@ -711,6 +711,14 @@ def _best_training_payload_from_state(action, state_obj=None) -> Dict[str, Any]:
     for training_name, payload in (trainings or {}).items():
       if not isinstance(payload, dict):
         continue
+      if training_name == "wit":
+        wit_allowed, _ = should_allow_wit_training(
+          state_obj,
+          payload,
+          getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+        )
+        if not wit_allowed:
+          continue
       score_tuple = payload.get("score_tuple") or ()
       score = payload.get("weighted_stat_score")
       if score is None and score_tuple:
@@ -2451,6 +2459,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
 
     if node_id.startswith("train:"):
       training = dict(training_entries.get(training_name) or {})
+      raw_training = dict((observed_data.get("training_results") or {}).get(training_name) or {})
       base_score = _safe_float(training.get("score"), 0.0)
       total_stat_gain = _safe_float(training.get("total_stat_gain"), 0.0)
       matching_stat_gain = _safe_float(training.get("matching_stat_gain"), 0.0)
@@ -2460,6 +2469,31 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       failure_bypassed = bool(usage_context.get("failure_bypassed_by_items"))
       reset_whistle_reroll = item_key == "reset_whistle"
       max_failure = max(0.0, _safe_float(getattr(config, "MAX_FAILURE", 5), 5.0))
+      if training_name == "wit":
+        wit_gate_training = raw_training or {
+          "total_supports": training.get("support_count"),
+          "total_rainbow_friends": training.get("rainbow_count"),
+        }
+        wit_allowed, wit_gate_reason = should_allow_wit_training(
+          observed_data,
+          wit_gate_training,
+          getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+        )
+        source_facts["wit_failure_gate"] = {
+          "allowed": bool(wit_allowed),
+          "reason": str(wit_gate_reason or ""),
+          "supports": int(_safe_float(wit_gate_training.get("total_supports"), 0.0)),
+          "rainbows": int(_safe_float(wit_gate_training.get("total_rainbow_friends"), 0.0)),
+        }
+        if not wit_allowed:
+          viable = False
+          candidate["priority_score"] = float("-inf")
+          candidate["rationale"] = (
+            f"{candidate.get('rationale') or ''}; dropped because {wit_gate_reason}"
+          ).strip("; ")
+          candidate["source_facts"] = source_facts
+          scored.append(candidate)
+          continue
       if failure_pct > max_failure and not reset_whistle_reroll and not (item_key and failure_bypassed):
         viable = False
         candidate["priority_score"] = float("-inf")

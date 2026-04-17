@@ -7,6 +7,7 @@ import core.bot as bot
 import core.config as config
 import utils.constants as constants
 from core.strategies import Strategy
+from core.trackblazer_item_use import should_allow_wit_training
 from utils.shared import CleanDefaultDict
 
 
@@ -55,6 +56,21 @@ def summarize_training_exclusion(training_name, training_data, state_obj, traini
   reason = "filtered"
   if settings["check_stat_caps"] and current_stat is not None and stat_cap is not None and current_stat >= stat_cap:
     reason = f"stat cap ({current_stat}/{stat_cap})"
+  elif (
+    constants.SCENARIO_NAME in ("mant", "trackblazer")
+    and training_name == "wit"
+  ):
+    wit_allowed, wit_reason = should_allow_wit_training(
+      state_obj,
+      training_data,
+      getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    )
+    if not wit_allowed:
+      reason = wit_reason
+    elif failure is not None and int(failure) > max_allowed_failure:
+      reason = f"fail {int(failure)}% > {int(max_allowed_failure)}%"
+    elif training_function:
+      reason = f"not selected by {training_function}"
   elif failure is not None and int(failure) > max_allowed_failure:
     reason = f"fail {int(failure)}% > {int(max_allowed_failure)}%"
   elif training_function:
