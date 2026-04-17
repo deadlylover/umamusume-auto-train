@@ -1127,7 +1127,9 @@ class OperatorConsole:
       ("timing_from_last_event_to_lobby", "event_to_lobby"),
       ("timing_from_last_popup_to_lobby", "popup_to_lobby"),
       ("timing_event_choice", "event_choice"),
+      ("timing_screenshot_capture", "screenshot"),
       ("timing_lobby_detect", "lobby_detect"),
+      ("timing_popup_checks", "popup_checks"),
       ("timing_popup_handlers", "popup_handlers"),
       ("timing_followup_wait", "followup_wait"),
       ("timing_generic_recovery", "generic_recovery"),
@@ -1137,6 +1139,10 @@ class OperatorConsole:
       if value is None:
         continue
       lines.append(f"  {label:13s} {self._format_timing_value(value)}")
+
+    unattributed_timing = self._calculate_post_action_unattributed_timing(payload)
+    if unattributed_timing is not None and unattributed_timing > 0.0005:
+      lines.append(f"  {'other':13s} {self._format_timing_value(unattributed_timing)}")
 
     counts = []
     for key, label in (
@@ -1401,7 +1407,9 @@ class OperatorConsole:
       "timing_from_last_event_to_lobby",
       "timing_from_last_popup_to_lobby",
       "timing_event_choice",
+      "timing_screenshot_capture",
       "timing_lobby_detect",
+      "timing_popup_checks",
       "timing_popup_handlers",
       "timing_followup_wait",
       "timing_generic_recovery",
@@ -1795,6 +1803,8 @@ class OperatorConsole:
   def _format_timing_mapping(self, mapping, indent="  "):
     lines = []
     for key, val in mapping.items():
+      if key in {"backend_debug", "history_context", "note"}:
+        continue
       lines.extend(self._format_timing_entry(key, val, indent=indent))
     return lines
 
@@ -1802,6 +1812,8 @@ class OperatorConsole:
     if isinstance(val, dict):
       lines = [f"{indent}{key}:"]
       lines.extend(self._format_timing_mapping(val, indent=indent + "  "))
+      if len(lines) == 1:
+        return []
       return lines
     if isinstance(val, bool):
       return [f"{indent}{key:14s} {val}"]
@@ -1810,6 +1822,28 @@ class OperatorConsole:
     if isinstance(val, int):
       return [f"{indent}{key:14s} {val}"]
     return [f"{indent}{key:14s} {val}"]
+
+  def _calculate_post_action_unattributed_timing(self, payload):
+    if not isinstance(payload, dict):
+      return None
+    total = payload.get("timing_total")
+    if total is None:
+      return None
+    subtotal = 0.0
+    for key in (
+      "timing_event_choice",
+      "timing_screenshot_capture",
+      "timing_lobby_detect",
+      "timing_popup_checks",
+      "timing_followup_wait",
+      "timing_generic_recovery",
+      "timing_idle_sleep",
+    ):
+      value = payload.get(key)
+      if value is None:
+        continue
+      subtotal += float(value)
+    return round(max(0.0, float(total) - subtotal), 4)
 
   def _copy_ocr_debug(self):
     if self._root is None:

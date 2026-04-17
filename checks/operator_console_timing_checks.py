@@ -215,6 +215,18 @@ def _manual_snapshot():
         "timing_close": 0.10,
         "timing_total": 0.70,
         "reason": "manual_prepare_training_items",
+        "open_result": {
+          "timing": {
+            "click_breakdown": {
+              "clicked": True,
+              "backend": "adb",
+              "target": [224, 1399],
+              "backend_debug": {"device_id": "127.0.0.1:5555"},
+              "history_context": "timing_check",
+              "note": "debug-only noise",
+            },
+          },
+        },
         "scan_timing": {
           "held_ocr": 0.12,
           "templates": 0.15,
@@ -254,7 +266,35 @@ def main():
   assert "increments" in manual_text, manual_text
   assert "confirm" in manual_text, manual_text
   assert "=== Scan Breakdown ===" in manual_text, manual_text
+  assert "backend_debug" not in manual_text, manual_text
+  assert "history_context" not in manual_text, manual_text
+  assert "debug-only noise" not in manual_text, manual_text
   assert "Planner Runtime" not in manual_text, manual_text
+
+  post_action_text = console._format_post_action_timing({
+    "post_action_resolution": {
+      "source_action": "do_race",
+      "status": "completed",
+      "outcome": "stable_lobby_confirmed",
+      "turn_label": "Senior Year Late Mar / 19",
+      "started_at": 1710000000.0,
+      "completed_at": 1710000014.494,
+      "timing_total": 14.494,
+      "timing_event_choice": 0.0,
+      "timing_screenshot_capture": 0.6,
+      "timing_lobby_detect": 1.118,
+      "timing_popup_checks": 11.2,
+      "timing_popup_handlers": 0.0,
+      "timing_followup_wait": 0.0,
+      "timing_generic_recovery": 0.0,
+      "timing_idle_sleep": 1.016,
+      "loop_count": 3,
+      "timeline_entries": [],
+    },
+  })
+  assert "popup_checks" in post_action_text, post_action_text
+  assert "screenshot" in post_action_text, post_action_text
+  assert "other" in post_action_text, post_action_text
 
   print("operator_console_timing_checks: ok")
 

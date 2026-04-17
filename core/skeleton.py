@@ -5018,7 +5018,9 @@ def _new_post_action_timing_metrics(state_obj, action_name):
     "started_at": started_at,
     "timing_total": None,
     "timing_event_choice": 0.0,
+    "timing_screenshot_capture": 0.0,
     "timing_lobby_detect": 0.0,
+    "timing_popup_checks": 0.0,
     "timing_popup_handlers": 0.0,
     "timing_followup_wait": 0.0,
     "timing_generic_recovery": 0.0,
@@ -5079,7 +5081,9 @@ def _post_action_timing_runtime_payload(metrics):
     "turn_label",
     "timing_total",
     "timing_event_choice",
+    "timing_screenshot_capture",
     "timing_lobby_detect",
+    "timing_popup_checks",
     "timing_popup_handlers",
     "timing_followup_wait",
     "timing_generic_recovery",
@@ -5165,7 +5169,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
       return False
 
     device_action.flush_screenshot_cache()
+    screenshot_started_at = _time_mod.time()
     screenshot = device_action.screenshot()
+    screenshot_duration = _time_mod.time() - screenshot_started_at
+    metrics["timing_screenshot_capture"] = round(
+      metrics.get("timing_screenshot_capture", 0.0) + screenshot_duration,
+      4,
+    )
     event_started_at = _time_mod.time()
     resolved_event_choices = _resolve_post_action_event_chain(screenshot=screenshot)
     event_duration = _time_mod.time() - event_started_at
@@ -5272,7 +5282,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
     if _trackblazer_scenario_active():
       branch_started_at = _time_mod.time()
       shop_refresh_result = _handle_trackblazer_shop_refresh_popup()
-      _record_popup_branch("shop_refresh", shop_refresh_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("shop_refresh", shop_refresh_result, branch_duration)
       if shop_refresh_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5291,7 +5303,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       scheduled_race_result = _handle_trackblazer_scheduled_race_popup(state_obj, action)
-      _record_popup_branch("scheduled_race_popup", scheduled_race_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("scheduled_race_popup", scheduled_race_result, branch_duration)
       if scheduled_race_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5310,7 +5324,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       climax_race_result = _handle_trackblazer_climax_race_result_screen(state_obj, action)
-      _record_popup_branch("climax_race_result", climax_race_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("climax_race_result", climax_race_result, branch_duration)
       if climax_race_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5329,7 +5345,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       post_race_watch_concert_result = _handle_trackblazer_post_race_watch_concert_screen(state_obj, action)
-      _record_popup_branch("post_race_watch_concert", post_race_watch_concert_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("post_race_watch_concert", post_race_watch_concert_result, branch_duration)
       if post_race_watch_concert_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5348,7 +5366,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       inspiration_go_result = _handle_trackblazer_inspiration_go_screen(state_obj, action)
-      _record_popup_branch("inspiration_go", inspiration_go_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("inspiration_go", inspiration_go_result, branch_duration)
       if inspiration_go_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5367,7 +5387,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       goal_complete_result = _handle_trackblazer_goal_complete_screen(state_obj, action)
-      _record_popup_branch("goal_complete", goal_complete_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("goal_complete", goal_complete_result, branch_duration)
       if goal_complete_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5386,7 +5408,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
 
       branch_started_at = _time_mod.time()
       insufficient_goal_pts_result = _handle_trackblazer_insufficient_goal_race_result_points_popup(state_obj, action)
-      _record_popup_branch("insufficient_goal_pts", insufficient_goal_pts_result, _time_mod.time() - branch_started_at)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("insufficient_goal_pts", insufficient_goal_pts_result, branch_duration)
       if insufficient_goal_pts_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -6797,7 +6821,9 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     step["data"] = {
       "timing_total": post_action_timing.get("timing_total"),
       "timing_event_choice": post_action_timing.get("timing_event_choice"),
+      "timing_screenshot_capture": post_action_timing.get("timing_screenshot_capture"),
       "timing_lobby_detect": post_action_timing.get("timing_lobby_detect"),
+      "timing_popup_checks": post_action_timing.get("timing_popup_checks"),
       "timing_popup_handlers": post_action_timing.get("timing_popup_handlers"),
       "timing_followup_wait": post_action_timing.get("timing_followup_wait"),
       "timing_generic_recovery": post_action_timing.get("timing_generic_recovery"),
