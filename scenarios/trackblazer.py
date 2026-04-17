@@ -3405,6 +3405,56 @@ def _resolve_shop_row_checkbox_state(screenshot, row_match, threshold=0.8):
     return state
 
 
+def _infer_inventory_execution_scroll_page(scan_timing=None, scrollbar_state=None):
+    """Infer which inventory page is currently visible for item execution."""
+    scrollbar = dict(scrollbar_state or {})
+    if scrollbar.get("is_at_bottom"):
+        return "bottom"
+    if scrollbar.get("is_at_top"):
+        return "top"
+    position_ratio = scrollbar.get("position_ratio")
+    if position_ratio is not None:
+        return "bottom" if float(position_ratio) >= 0.5 else "top"
+
+    scroll = dict((scan_timing or {}).get("scroll") or {})
+    for candidate in (
+        scroll.get("scrollbar_recovery_post") or {},
+        scroll.get("scrollbar_post") or {},
+        scroll.get("scrollbar_pre") or {},
+    ):
+        if candidate.get("is_at_bottom"):
+            return "bottom"
+        if candidate.get("is_at_top"):
+            return "top"
+
+    pages_scanned = int(scroll.get("pages_scanned") or 1)
+    if pages_scanned > 1:
+        return "bottom"
+    return "top"
+
+
+def _order_inventory_execution_items(requested_items, inventory, current_scroll=None):
+    """Reorder requested items so execution consumes the current page first."""
+    ordered_items = [str(item_name) for item_name in (requested_items or [])]
+    normalized_scroll = str(current_scroll or "").strip().lower()
+    if normalized_scroll not in ("top", "bottom"):
+        return ordered_items
+
+    current_pages = {normalized_scroll, "both"}
+
+    def _page_group(item_name):
+        page = str(((inventory.get(item_name) or {}).get("scroll_page") or "")).strip().lower()
+        if page in current_pages:
+            return 0
+        if page in ("top", "bottom"):
+            return 1
+        return 2
+
+    indexed_items = list(enumerate(ordered_items))
+    indexed_items.sort(key=lambda entry: (_page_group(entry[1]), entry[0]))
+    return [item_name for _, item_name in indexed_items]
+
+
 def _match_single_shop_item(screenshot, item_name, threshold=0.7):
     """Match a single item template against a shop screenshot.
 
@@ -3910,6 +3960,9 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
         "execution_intent": bot.get_execution_intent(),
         "commit_mode": str(commit_mode),
         "requested_items": list(requested_items),
+        "ordered_requested_items": list(requested_items),
+        "initial_scroll_page": None,
+        "execution_scrollbar_initial": None,
         "opened": False,
         "already_open": False,
         "closed": False,
@@ -3987,6 +4040,23 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
             flow["scan_timing"] = inventory.pop("_timing", None)
             result["trackblazer_inventory"] = inventory
             result["trackblazer_inventory_summary"] = build_inventory_summary(inventory)
+            execution_scrollbar = inspect_trackblazer_inventory_scrollbar()
+            flow["execution_scrollbar_initial"] = execution_scrollbar
+            flow["initial_scroll_page"] = _infer_inventory_execution_scroll_page(
+                flow["scan_timing"],
+                execution_scrollbar,
+            )
+            ordered_items = _order_inventory_execution_items(
+                requested_items,
+                inventory,
+                current_scroll=flow["initial_scroll_page"],
+            )
+            flow["ordered_requested_items"] = list(ordered_items)
+            if ordered_items != requested_items:
+                info(
+                    f"{log_tag} Reordered item increments for page-aware execution: "
+                    f"{ordered_items} (requested={requested_items}, current_page={flow['initial_scroll_page']})"
+                )
 
             # -- Check requested items --
             for item_name in requested_items:
@@ -4023,10 +4093,11 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                 # clicking, scroll to that page and re-scan to obtain a
                 # fresh increment target.
                 increment_t0 = _time()
-                current_scroll = None  # track last scroll edge we moved to
-                for item_name in requested_items:
+                current_scroll = flow.get("initial_scroll_page")
+                for item_name in ordered_items:
                     item_data = inventory.get(item_name) or {}
                     target = item_data.get("increment_target")
+                    scrolled_for_item = False
 
                     # Determine if the item's targets are effectively stale.
                     # The initial scan sets increment_target_stale for items
@@ -4048,10 +4119,11 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                             info(f"{log_tag} Scrolling inventory to {desired_edge} for '{item_name}'.")
                             sb = inspect_trackblazer_inventory_scrollbar()
                             if sb.get("detected") and sb.get("scrollable"):
-                                _drag_trackblazer_inventory_scrollbar(sb, edge=desired_edge)
+                                drag_result = _drag_trackblazer_inventory_scrollbar(sb, edge=desired_edge)
                                 sleep(_INV_SCROLLBAR_SETTLE_SECONDS)
                                 device_action.flush_screenshot_cache()
                                 current_scroll = desired_edge
+                                scrolled_for_item = bool(drag_result.get("swiped"))
                         # Re-scan single page for fresh increment targets.
                         # Update ALL requested items visible on this page so
                         # later iterations don't use stale coordinates.
@@ -4076,7 +4148,7 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                         "row_center_y": item_data.get("row_center_y"),
                         "held_quantity": item_data.get("held_quantity"),
                         "scroll_page": item_data.get("scroll_page"),
-                        "scrolled_to_find": bool(item_data.get("increment_target_stale")),
+                        "scrolled_to_find": bool(scrolled_for_item or item_data.get("increment_target_stale")),
                         "click_metrics": None,
                         "clicked": False,
                         "simulated": commit_mode == "dry_run",
