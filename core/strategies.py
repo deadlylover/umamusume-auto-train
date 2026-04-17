@@ -31,6 +31,15 @@ def _optional_race_blocked(state):
 def _remember_training_fallback(action):
   remember_trackblazer_training_fallback(action)
 
+
+def _allows_unreadable_current_stats(state):
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return False
+  if str(state.get("year") or "").strip() != "Finale Underway":
+    return False
+  return bool(state.get("trackblazer_climax_race_day"))
+
+
 class Strategy:
 
   def __init__(self):
@@ -133,7 +142,12 @@ class Strategy:
       invalid_reasons.append("turn unreadable (-1)")
 
     current_stats = state.get("current_stats") or {}
-    if not isinstance(current_stats, dict) or not current_stats or all(value == -1 for value in current_stats.values()):
+    stats_unreadable = (
+      not isinstance(current_stats, dict)
+      or not current_stats
+      or all(value == -1 for value in current_stats.values())
+    )
+    if stats_unreadable and not _allows_unreadable_current_stats(state):
       invalid_reasons.append("current_stats unreadable (all -1)")
 
     if not str(state.get("criteria") or "").strip():

@@ -530,17 +530,30 @@ def collect_main_state(*, use_last_known_turn=True):
   state_object["turn"] = get_turn(use_last_known=use_last_known_turn)
   debug("Before year collection.")
   state_object["year"] = get_current_year()
+  state_object["trackblazer_climax_race_day"] = False
+  state_object["trackblazer_climax_race_day_banner"] = False
+  state_object["trackblazer_climax_race_day_button"] = False
   if constants.SCENARIO_NAME in ("mant", "trackblazer") and state_object["year"] == "Finale Underway":
     try:
-      from scenarios.trackblazer import check_climax_locked_race_button
+      from scenarios.trackblazer import check_climax_locked_race_button, inspect_climax_race_day_detection
       climax_locked = bool(check_climax_locked_race_button())
+      climax_detection = inspect_climax_race_day_detection(log_result=False)
     except Exception as exc:
       warning(f"[TB_CLIMAX] Locked-race check failed during main-state collection: {exc}")
       climax_locked = False
+      climax_detection = {}
+    forced_climax_race_day = bool(climax_detection.get("detected")) or state_object["turn"] == "Race Day"
     state_object["trackblazer_climax"] = True
     state_object["trackblazer_climax_locked_race"] = climax_locked
     state_object["trackblazer_trainings_remaining_upper_bound"] = 3
-    if state_object["turn"] == -1:
+    state_object["trackblazer_climax_race_day"] = forced_climax_race_day
+    state_object["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
+    state_object["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
+    if forced_climax_race_day:
+      if state_object["turn"] != "Race Day":
+        info("[TB_RACE] Forced Climax race-day detected during main-state collection.")
+      state_object["turn"] = "Race Day"
+    elif state_object["turn"] == -1:
       state_object["turn"] = "Climax Training" if climax_locked else "Finale Turn"
   else:
     state_object["trackblazer_climax"] = False

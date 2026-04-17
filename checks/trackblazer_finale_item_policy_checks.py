@@ -3,6 +3,7 @@ import unittest
 import core.config as config
 import utils.constants as constants
 from core.actions import Action
+from core.strategies import Strategy
 from core.trackblazer import planner as planner_module
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 from core.trackblazer_item_use import plan_item_usage
@@ -104,6 +105,46 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     candidate_keys = [entry.get("key") for entry in (plan.get("candidates") or [])]
     self.assertNotIn("grilled_carrots", candidate_keys)
     self.assertIn("master_cleat_hammer", candidate_keys)
+
+  def test_forced_finale_race_day_state_is_valid_without_readable_stats(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = "Race Day"
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = True
+    state_obj["current_stats"] = {
+      "spd": -1,
+      "sta": -1,
+      "pwr": -1,
+      "guts": -1,
+      "wit": -1,
+      "sp": -1,
+    }
+
+    validation = Strategy().validate_state_details(state_obj)
+
+    self.assertTrue(validation.get("valid"))
+    self.assertEqual(validation.get("invalid_reasons"), [])
+
+  def test_finale_training_turn_still_requires_readable_stats(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = "Finale Turn"
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["current_stats"] = {
+      "spd": -1,
+      "sta": -1,
+      "pwr": -1,
+      "guts": -1,
+      "wit": -1,
+      "sp": -1,
+    }
+
+    validation = Strategy().validate_state_details(state_obj)
+
+    self.assertFalse(validation.get("valid"))
+    self.assertIn("current_stats unreadable (all -1)", list(validation.get("invalid_reasons") or []))
 
   def test_finale_underway_prefers_training_with_reset_whistle_over_optional_race(self):
     state_obj = _base_state()
