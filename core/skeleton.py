@@ -4579,6 +4579,91 @@ def _handle_trackblazer_goal_complete_screen(state_obj, action):
   }
 
 
+def _handle_trackblazer_insufficient_goal_race_result_points_popup(state_obj, action):
+  if not _trackblazer_scenario_active():
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "insufficient_goal_race_result_points",
+      "reason": "scenario_inactive",
+      "deferred_work": [],
+    }
+
+  template_path = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("insufficient_goal_race_result_points")
+  game_window_bbox = getattr(constants, "GAME_WINDOW_BBOX", None)
+  if not template_path or not game_window_bbox:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "insufficient_goal_race_result_points",
+      "reason": "template_or_region_missing",
+      "deferred_work": [],
+    }
+
+  # A tight popup crop proved brittle under the current screen-share override.
+  # Matching on the full game window was exact in live testing and is still far
+  # cheaper than waiting for the generic cancel fallback.
+  region_ltrb = tuple(int(v) for v in game_window_bbox)
+  screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+  matches = device_action.match_template(
+    template_path,
+    screenshot,
+    threshold=0.75,
+    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  )
+  if not matches:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "insufficient_goal_race_result_points",
+      "reason": "popup_not_found",
+      "deferred_work": [],
+    }
+
+  info("[TB_POST] Insufficient goal race result points popup detected during post-action resolution.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "insufficient_goal_race_result_pts.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+
+  if device_action.locate_and_click(
+    "assets/buttons/cancel_btn.png",
+    min_search_time=get_secs(0.35),
+    region_ltrb=constants.GAME_WINDOW_BBOX,
+    text="Cancelled insufficient goal race result points popup during post-action resolution.",
+  ):
+    bot.push_debug_history({
+      "event": "click",
+      "asset": "cancel_btn.png",
+      "result": "clicked",
+      "context": "post_action_resolution",
+    })
+    return {
+      "detected": True,
+      "handled": True,
+      "popup_type": "insufficient_goal_race_result_points",
+      "reason": "cancel_clicked",
+      "deferred_work": [],
+    }
+
+  warning("[TB_POST] Insufficient goal race result points popup detected but Cancel was not matched.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "cancel_btn.png",
+    "result": "not_found",
+    "context": "post_action_resolution",
+  })
+  return {
+    "detected": True,
+    "handled": False,
+    "popup_type": "insufficient_goal_race_result_points",
+    "reason": "cancel_not_found",
+    "deferred_work": [],
+  }
+
+
 def _detect_trackblazer_complete_career_banner(screenshot=None, threshold=0.75, log_result=False, context=""):
   if not _trackblazer_scenario_active():
     return {
@@ -4671,9 +4756,10 @@ _POST_ACTION_EVENT_CHAIN_SETTLE_SECONDS = 0.15
 # 7. Trackblazer post-race watch-concert result screen
 # 8. Trackblazer inspiration Go screen
 # 9. Trackblazer goal-complete screen
-# 10. Generic bottom-screen recovery clicks
-# 11. Safe-space tap fallback after repeated idle loops
-# 12. Timeout fallback to the generic lobby scan
+# 10. Trackblazer insufficient goal race result-points popup
+# 11. Generic bottom-screen recovery clicks
+# 12. Safe-space tap fallback after repeated idle loops
+# 13. Timeout fallback to the generic lobby scan
 def _resolve_post_action_event_chain(screenshot=None, max_events=_POST_ACTION_EVENT_CHAIN_MAX):
   current_screenshot = screenshot
   resolved_count = 0
@@ -4868,6 +4954,26 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         if goal_complete_result.get("handled"):
           idle_loops = 0
           sleep(0.8)
+          continue
+
+      insufficient_goal_pts_result = _handle_trackblazer_insufficient_goal_race_result_points_popup(state_obj, action)
+      if insufficient_goal_pts_result.get("detected"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message=(
+            "Cancelled Trackblazer insufficient goal race result-points popup."
+            if insufficient_goal_pts_result.get("handled") else
+            "Trackblazer insufficient goal race result-points popup detected but Cancel was not matched."
+          ),
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=insufficient_goal_pts_result.get("popup_type"),
+          deferred_work=insufficient_goal_pts_result.get("deferred_work"),
+          reasoning_notes=insufficient_goal_pts_result.get("reason"),
+        )
+        if insufficient_goal_pts_result.get("handled"):
+          idle_loops = 0
+          sleep(0.6)
           continue
 
     generic_step = _generic_post_action_return_to_lobby_step()

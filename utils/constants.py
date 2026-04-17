@@ -330,6 +330,7 @@ TRACKBLAZER_RACE_TEMPLATES = {
 
 TRACKBLAZER_RESOLUTION_TEMPLATES = {
   "inspiration_go": "assets/custom/inspiration_go.png",
+  "insufficient_goal_race_result_points": "assets/custom/insufficient_goal_race_result_pts.png",
   "post_race_watch_concert": "assets/trackblazer/resolution/post_race_watch_concert.png",
   "post_race_watch_concert_next": "assets/trackblazer/resolution/post_race_watch_concert_next.png",
 }
@@ -378,6 +379,15 @@ TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, 
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX)
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (443, 1176, -128, -173))
 TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_REGION = convert_xyxy_to_xywh(TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX)
+TRACKBLAZER_INSUFFICIENT_GOAL_RACE_RESULT_POINTS_BBOX = (
+  GAME_WINDOW_BBOX[0] + 307,
+  GAME_WINDOW_BBOX[1] + 566,
+  GAME_WINDOW_BBOX[0] + 510,
+  GAME_WINDOW_BBOX[1] + 732,
+)
+TRACKBLAZER_INSUFFICIENT_GOAL_RACE_RESULT_POINTS_REGION = convert_xyxy_to_xywh(
+  TRACKBLAZER_INSUFFICIENT_GOAL_RACE_RESULT_POINTS_BBOX
+)
 
 # Trackblazer career-complete banner shown on the bottom-right ribbon at the
 # end of a finished run. Use the broader bottom region because live runtime
