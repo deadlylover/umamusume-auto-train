@@ -348,12 +348,82 @@ def _should_force_rest_after_optional_warning(options=None):
     and _fallback_func(options) == "do_training"
   )
 
+
+def _is_trackblazer_aptitude_race_template(race_image_path=""):
+  return str(race_image_path or "") == str(
+    constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or ""
+  )
+
+
+def _is_post_debut_junior_year(options=None):
+  if not isinstance(options, dict):
+    return False
+  year = str(options.get("year") or "").strip()
+  return year.startswith("Junior Year") and year != "Junior Year Pre-Debut"
+
+
+def _should_allow_trackblazer_maiden_recovery(race_name="any", race_image_path="", options=None):
+  if not isinstance(options, dict):
+    return False
+  if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
+    return False
+  if not _is_post_debut_junior_year(options):
+    return False
+  if options.get("trackblazer_maiden_race"):
+    return True
+
+  race_decision = options.get("trackblazer_race_decision") or {}
+  if isinstance(race_decision, dict) and race_decision.get("mandatory_maiden_race"):
+    return True
+
+  planner_payload = options.get("trackblazer_planner_race") or {}
+  branch_kind = str(planner_payload.get("branch_kind") or "")
+  if branch_kind == "maiden_race":
+    return True
+
+  if _is_trackblazer_aptitude_race_template(race_image_path):
+    return True
+
+  return bool(
+    race_name not in (None, "", "any")
+    and (
+      options.get("scheduled_race")
+      or options.get("trackblazer_lobby_scheduled_race")
+      or branch_kind in {"scheduled_race", "lobby_scheduled_race"}
+    )
+  )
+
+
+def _click_visible_trackblazer_aptitude_race():
+  from scenarios.trackblazer import find_race_aptitude_matches
+
+  matches = find_race_aptitude_matches()
+  if not matches:
+    return False
+
+  click_target = (matches[0] or {}).get("click_target")
+  if not click_target:
+    return False
+
+  abs_x = int(click_target[0]) + constants.RACE_LIST_BOX_BBOX[0]
+  abs_y = int(click_target[1]) + constants.RACE_LIST_BOX_BBOX[1]
+  info(f"[TB_RACE] Clicking aptitude-backed race at ({abs_x}, {abs_y})")
+  device_action.click(target=(abs_x, abs_y), duration=0.15)
+  return True
+
+
 def _select_and_confirm_race_from_open_list(race_name="any", race_image_path="", options=None):
   if race_name == "any" or race_image_path == "":
     race_image_path = "assets/ui/match_track.png"
   sleep(1)
 
   prefer_rival = options is not None and options.get("prefer_rival_race", False)
+  allow_maiden_recovery = _should_allow_trackblazer_maiden_recovery(
+    race_name,
+    race_image_path,
+    options=options,
+  )
+  maiden_recovery_attempted = _is_trackblazer_aptitude_race_template(race_image_path)
 
   go_to_racebox_top()
   while True:
@@ -386,6 +456,12 @@ def _select_and_confirm_race_from_open_list(race_name="any", race_image_path="",
           go_to_racebox_top()
         continue
 
+    if _is_trackblazer_aptitude_race_template(race_image_path):
+      if _click_visible_trackblazer_aptitude_race():
+        if isinstance(options, dict):
+          options["trackblazer_maiden_recovery_fallback"] = True
+        break
+
     if options is not None and "race_mission_available" in options and options["race_mission_available"]:
       mission_icon = device_action.locate("assets/icons/race_mission_icon.png", min_search_time=get_secs(1), region_ltrb=constants.RACE_LIST_BOX_BBOX, template_scaling=0.72)
       if mission_icon:
@@ -406,6 +482,20 @@ def _select_and_confirm_race_from_open_list(race_name="any", race_image_path="",
         info(f"[RIVAL] No rival race found in list, falling back to generic match.")
         # Restart scan without rival preference so we pick any race.
         options["prefer_rival_race"] = False
+        go_to_racebox_top()
+        continue
+      if allow_maiden_recovery and not maiden_recovery_attempted:
+        info(
+          f"[TB_RACE] {race_name} was not present in the open race list. "
+          "Falling back to the visible aptitude-backed maiden entry."
+        )
+        race_name = "any"
+        race_image_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
+        maiden_recovery_attempted = True
+        if isinstance(options, dict):
+          options["race_name"] = "any"
+          options["race_image_path"] = race_image_path
+          options["trackblazer_maiden_recovery_fallback"] = True
         go_to_racebox_top()
         continue
       info(f"Couldn't find race image")
