@@ -412,95 +412,129 @@ def _click_visible_trackblazer_aptitude_race():
   return True
 
 
+def _click_visible_race_entry_on_current_page(race_image_path="", options=None):
+  prefer_rival = bool(isinstance(options, dict) and options.get("prefer_rival_race", False))
+
+  if prefer_rival:
+    from scenarios.trackblazer import find_rival_races_with_aptitude
+
+    paired = find_rival_races_with_aptitude()
+    if not paired:
+      return False
+
+    click_target = paired[0]["click_target"]
+    abs_x = click_target[0] + constants.RACE_LIST_BOX_BBOX[0]
+    abs_y = click_target[1] + constants.RACE_LIST_BOX_BBOX[1]
+    info(f"[RIVAL] Clicking rival race aptitude stars at ({abs_x}, {abs_y})")
+    device_action.click(target=(abs_x, abs_y), duration=0.15)
+    return True
+
+  if _is_trackblazer_aptitude_race_template(race_image_path):
+    if _click_visible_trackblazer_aptitude_race():
+      if isinstance(options, dict):
+        options["trackblazer_maiden_recovery_fallback"] = True
+      return True
+
+  if isinstance(options, dict) and options.get("race_mission_available"):
+    mission_icon = device_action.locate(
+      "assets/icons/race_mission_icon.png",
+      min_search_time=get_secs(1),
+      region_ltrb=constants.RACE_LIST_BOX_BBOX,
+      template_scaling=0.72,
+    )
+    if mission_icon:
+      debug("Found mission icon, looking for aptitude match.")
+      screenshot_region = (mission_icon[0], mission_icon[1], mission_icon[0] + 400, mission_icon[1] + 110)
+      if device_action.locate_and_click(race_image_path, min_search_time=get_secs(1), region_ltrb=screenshot_region):
+        return True
+  elif device_action.locate_and_click(
+    race_image_path,
+    min_search_time=get_secs(1),
+    region_ltrb=constants.RACE_LIST_BOX_BBOX,
+  ):
+    return True
+
+  return False
+
+
 def _select_and_confirm_race_from_open_list(race_name="any", race_image_path="", options=None):
-  if race_name == "any" or race_image_path == "":
+  if race_image_path == "":
     race_image_path = "assets/ui/match_track.png"
   sleep(1)
 
-  prefer_rival = options is not None and options.get("prefer_rival_race", False)
+  preserve_current_page = bool(isinstance(options, dict) and options.get("planner_race_list_ready"))
   allow_maiden_recovery = _should_allow_trackblazer_maiden_recovery(
     race_name,
     race_image_path,
     options=options,
   )
   maiden_recovery_attempted = _is_trackblazer_aptitude_race_template(race_image_path)
+  performed_full_top_rescan = False
 
-  go_to_racebox_top()
-  while True:
-    screenshot1 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+  if not _click_visible_race_entry_on_current_page(race_image_path, options=options):
+    if preserve_current_page:
+      debug("[RACE] Planner left the race list open; scouting commit from the current page before any reset.")
+      check_before_scroll = False
+    else:
+      go_to_racebox_top()
+      check_before_scroll = True
 
-    # Trackblazer rival-race priority: find a rival race with 2 matching
-    # aptitudes and click the aptitude stars to select it.
-    if prefer_rival:
-      from scenarios.trackblazer import find_rival_races_with_aptitude
-      paired = find_rival_races_with_aptitude()
-      if paired:
-        click_target = paired[0]["click_target"]
-        # click_target is region-relative; add RACE_LIST_BOX_BBOX origin.
-        abs_x = click_target[0] + constants.RACE_LIST_BOX_BBOX[0]
-        abs_y = click_target[1] + constants.RACE_LIST_BOX_BBOX[1]
-        info(f"[RIVAL] Clicking rival race aptitude stars at ({abs_x}, {abs_y})")
-        device_action.click(target=(abs_x, abs_y), duration=0.15)
-        break
-      else:
-        # Rival not visible on this page — skip generic match and scroll.
-        debug(f"[RIVAL] No rival on current page, scrolling to find it...")
-        sleep(0.5)
-        device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS)
-        device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
-        sleep(0.25)
-        screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
-        if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
-          info(f"[RIVAL] No rival race found in list, falling back to generic match.")
-          options["prefer_rival_race"] = False
-          go_to_racebox_top()
-        continue
+    while True:
+      screenshot1 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
 
-    if _is_trackblazer_aptitude_race_template(race_image_path):
-      if _click_visible_trackblazer_aptitude_race():
-        if isinstance(options, dict):
-          options["trackblazer_maiden_recovery_fallback"] = True
+      if check_before_scroll and _click_visible_race_entry_on_current_page(race_image_path, options=options):
         break
 
-    if options is not None and "race_mission_available" in options and options["race_mission_available"]:
-      mission_icon = device_action.locate("assets/icons/race_mission_icon.png", min_search_time=get_secs(1), region_ltrb=constants.RACE_LIST_BOX_BBOX, template_scaling=0.72)
-      if mission_icon:
-        debug(f"Found mission icon, looking for aptitude match.")
-        screenshot_region = (mission_icon[0], mission_icon[1], mission_icon[0] + 400, mission_icon[1] + 110)
-        if device_action.locate_and_click(race_image_path, min_search_time=get_secs(1), region_ltrb=screenshot_region):
-          break
-    elif device_action.locate_and_click(race_image_path, min_search_time=get_secs(1), region_ltrb=constants.RACE_LIST_BOX_BBOX):
-      break
-    sleep(0.5)
-    debug(f"Scrolling races...")
-    device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS)
-    device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
-    sleep(0.25)
-    screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
-    if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
+      prefer_rival = bool(isinstance(options, dict) and options.get("prefer_rival_race", False))
       if prefer_rival:
-        info(f"[RIVAL] No rival race found in list, falling back to generic match.")
-        # Restart scan without rival preference so we pick any race.
-        options["prefer_rival_race"] = False
-        go_to_racebox_top()
-        continue
-      if allow_maiden_recovery and not maiden_recovery_attempted:
-        info(
-          f"[TB_RACE] {race_name} was not present in the open race list. "
-          "Falling back to the visible aptitude-backed maiden entry."
-        )
-        race_name = "any"
-        race_image_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
-        maiden_recovery_attempted = True
-        if isinstance(options, dict):
-          options["race_name"] = "any"
-          options["race_image_path"] = race_image_path
-          options["trackblazer_maiden_recovery_fallback"] = True
-        go_to_racebox_top()
-        continue
-      info(f"Couldn't find race image")
-      device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
-      return False
+        debug("[RIVAL] No rival on current page, scrolling to find it...")
+
+      sleep(0.5)
+      debug("Scrolling races...")
+      device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS)
+      device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
+      sleep(0.25)
+      screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+      if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
+        if prefer_rival:
+          info("[RIVAL] No rival race found in list, falling back to generic match.")
+          if isinstance(options, dict):
+            options["prefer_rival_race"] = False
+          go_to_racebox_top()
+          preserve_current_page = False
+          performed_full_top_rescan = True
+          check_before_scroll = True
+          continue
+        if allow_maiden_recovery and not maiden_recovery_attempted:
+          info(
+            f"[TB_RACE] {race_name} was not present in the open race list. "
+            "Falling back to the visible aptitude-backed maiden entry."
+          )
+          race_name = "any"
+          race_image_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
+          maiden_recovery_attempted = True
+          if isinstance(options, dict):
+            options["race_name"] = "any"
+            options["race_image_path"] = race_image_path
+            options["trackblazer_maiden_recovery_fallback"] = True
+          go_to_racebox_top()
+          preserve_current_page = False
+          performed_full_top_rescan = True
+          check_before_scroll = True
+          continue
+        if preserve_current_page and not performed_full_top_rescan:
+          info("[RACE] Current preserved race-list page had no clickable match; resetting to the top once before giving up.")
+          go_to_racebox_top()
+          preserve_current_page = False
+          performed_full_top_rescan = True
+          check_before_scroll = True
+          continue
+        info("Couldn't find race image")
+        device_action.locate_and_click("assets/buttons/back_btn.png", min_search_time=get_secs(2), region_ltrb=constants.SCREEN_BOTTOM_BBOX)
+        return False
+
+      preserve_current_page = False
+      check_before_scroll = True
 
   for i in range(2):
     if not device_action.locate_and_click("assets/buttons/race_btn.png", min_search_time=get_secs(2)):
