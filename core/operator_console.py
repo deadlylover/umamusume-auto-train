@@ -2778,8 +2778,8 @@ class OperatorConsole:
 
     tk.Button(header, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
 
-    preset_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 8))
-    preset_row.pack(fill=tk.X)
+    preset_row = tk.Frame(window, bg="#101418", padx=14)
+    preset_row.pack(fill=tk.X, pady=(0, 8))
     tk.Label(
       preset_row,
       text="Preset",
@@ -2799,8 +2799,8 @@ class OperatorConsole:
     tk.Button(preset_row, text="Update", command=self._update_skill_preset).pack(side=tk.LEFT, padx=(0, 6))
     tk.Button(preset_row, text="Delete", command=self._delete_skill_preset).pack(side=tk.LEFT)
 
-    preset_name_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 12))
-    preset_name_row.pack(fill=tk.X)
+    preset_name_row = tk.Frame(window, bg="#101418", padx=14)
+    preset_name_row.pack(fill=tk.X, pady=(0, 12))
     tk.Label(
       preset_name_row,
       text="Preset Name",
@@ -2822,8 +2822,8 @@ class OperatorConsole:
     preset_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
     tk.Button(preset_name_row, text="Save New", command=self._save_new_skill_preset).pack(side=tk.LEFT)
 
-    search_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 12))
-    search_row.pack(fill=tk.X)
+    search_row = tk.Frame(window, bg="#101418", padx=14)
+    search_row.pack(fill=tk.X, pady=(0, 12))
     tk.Label(
       search_row,
       text="Search",
@@ -2844,8 +2844,8 @@ class OperatorConsole:
     )
     search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    content = tk.Frame(window, bg="#101418", padx=12, pady=(0, 12))
-    content.pack(fill=tk.BOTH, expand=True)
+    content = tk.Frame(window, bg="#101418", padx=12)
+    content.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
     content.columnconfigure(0, weight=3)
     content.columnconfigure(1, weight=2)
     content.rowconfigure(0, weight=1)
