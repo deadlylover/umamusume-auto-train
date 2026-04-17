@@ -4291,6 +4291,8 @@ def apply_turn_plan_action_payload(action, turn_plan: TurnPlan):
       timeline_policy=(existing_selected_action.get("timeline_policy") or {}),
     )
     for key, value in existing_selected_action.items():
+      if key in {"pre_action_item_use", "reassess_after_item_use"}:
+        continue
       if value in (None, {}, []):
         continue
       selected_action_context[key] = copy.deepcopy(value)

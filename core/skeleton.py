@@ -3360,11 +3360,18 @@ def _refresh_trackblazer_pre_action_inventory(state_obj, action):
     _cache_trackblazer_inventory(state_obj, turn_key=action_count)
   else:
     _invalidate_trackblazer_inventory_cache()
+  turn_plan = get_turn_plan(state_obj, action, limit=8)
+  planner_item_execution = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  planned_items = list(planner_item_execution.get("execution_items") or _trackblazer_pre_action_items(action))
+  apply_turn_plan_action_payload(action, turn_plan)
   if hasattr(action, "__setitem__"):
-    action["_trackblazer_planner_item_execution_override"] = copy.deepcopy(planner_item_execution)
+    if planner_item_execution:
+      action["_trackblazer_planner_item_execution_override"] = copy.deepcopy(planner_item_execution)
+    elif hasattr(action, "options"):
+      action.options.pop("_trackblazer_planner_item_execution_override", None)
   return {
     "status": "ready",
-    "reason": "trackblazer_pre_action_items_preserved_after_refresh",
+    "reason": "trackblazer_pre_action_items_replanned_after_refresh",
     "turn_plan": turn_plan,
     "planner_item_execution": planner_item_execution,
     "planned_items": planned_items,

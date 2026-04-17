@@ -100,6 +100,9 @@ class OperatorConsole:
     self._message_value = None
     self._error_value = None
     self._execution_intent_var = None
+    self._region_adjuster_profile_var = None
+    self._region_adjuster_profile_menu = None
+    self._region_adjuster_profiles = {}
     self._trackblazer_use_items_var = None
     self._trackblazer_use_new_planner_var = None
     self._skill_auto_buy_var = None
@@ -295,6 +298,27 @@ class OperatorConsole:
     self._continue_button = tk.Button(primary_controls, text="Continue (F2)", command=self._continue_review)
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
+    self._region_adjuster_profiles, active_profile = self._get_region_adjuster_profile_options()
+    self._region_adjuster_profile_var = tk.StringVar(value=active_profile)
+    tk.Label(primary_controls, text="OCR preset:", fg="#9aa4ad", bg="#101418").pack(side=tk.LEFT, padx=(8, 4))
+    profile_names = list(self._region_adjuster_profiles.keys()) or [active_profile]
+    self._region_adjuster_profile_menu = tk.OptionMenu(
+      primary_controls,
+      self._region_adjuster_profile_var,
+      *profile_names,
+      command=self._set_region_adjuster_profile,
+    )
+    self._region_adjuster_profile_menu.configure(
+      bg="#192028",
+      fg="white",
+      highlightthickness=0,
+      activebackground="#192028",
+      activeforeground="white",
+      borderwidth=1,
+      relief=tk.FLAT,
+    )
+    self._region_adjuster_profile_menu["menu"].configure(bg="#192028", fg="white")
+    self._region_adjuster_profile_menu.pack(side=tk.LEFT, padx=(0, 8))
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     tk.Button(primary_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(primary_controls, text="Planner Flow", command=self._open_planner_flow_window).pack(side=tk.LEFT, padx=(4, 0))
@@ -1811,6 +1835,52 @@ class OperatorConsole:
     bot.set_execution_intent(self._execution_intent_var.get())
     self.publish()
 
+  def _get_region_adjuster_profile_options(self):
+    settings = dict(getattr(config, "REGION_ADJUSTER_CONFIG", {}) or {})
+    profiles, active_profile, _ = resolve_region_adjuster_profiles(settings)
+    return profiles, active_profile
+
+  def _refresh_region_adjuster_profile_menu(self):
+    profiles, active_profile = self._get_region_adjuster_profile_options()
+    self._region_adjuster_profiles = profiles
+    if self._region_adjuster_profile_var is not None:
+      self._region_adjuster_profile_var.set(active_profile)
+    if self._region_adjuster_profile_menu is None:
+      return
+    menu = self._region_adjuster_profile_menu["menu"]
+    menu.delete(0, "end")
+    for name in profiles.keys():
+      menu.add_command(label=name, command=tk._setit(self._region_adjuster_profile_var, name, self._set_region_adjuster_profile))
+
+  def _set_region_adjuster_profile(self, selected_profile):
+    profile_name = str(selected_profile or "").strip()
+    if not profile_name:
+      return
+    profiles = self._region_adjuster_profiles or self._get_region_adjuster_profile_options()[0]
+    overrides_path = profiles.get(profile_name)
+    if not overrides_path:
+      self._message_value.set(f"Unknown OCR preset: {profile_name}")
+      return
+    saved_profile = self._persist_config_value("debug.region_adjuster.active_profile", profile_name)
+    saved_path = self._persist_config_value("debug.region_adjuster.overrides_path", overrides_path)
+    if not (saved_profile and saved_path):
+      self._message_value.set("Failed to save OCR preset.")
+      return
+    try:
+      config.reload_config(print_config=False)
+      constants.apply_region_overrides(
+        overrides_path=overrides_path,
+        force=True,
+      )
+    except Exception as exc:
+      self._message_value.set(f"OCR preset saved, but reload failed: {exc}")
+      return
+    if self._region_adjuster_profile_var is not None:
+      self._region_adjuster_profile_var.set(profile_name)
+    self._region_adjuster_profiles = dict(profiles)
+    self._message_value.set(f"OCR preset: {profile_name}.")
+    self.publish()
+
   def _toggle_skip_scenario_detection(self):
     if self._skip_scenario_detection_var is None:
       return
@@ -2544,7 +2614,9 @@ class OperatorConsole:
       success = run_region_adjuster_session(settings)
       if success:
         config.reload_config(print_config=False)
-        _, _, overrides_path = resolve_region_adjuster_profiles(settings)
+        if self._root is not None:
+          self._root.after(0, self._refresh_region_adjuster_profile_menu)
+        _, _, overrides_path = resolve_region_adjuster_profiles(dict(config.REGION_ADJUSTER_CONFIG))
         constants.apply_region_overrides(
           overrides_path=overrides_path,
           force=True,

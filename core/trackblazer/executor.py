@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from core.trackblazer.models import TurnPlan
 from core.trackblazer.planner import (
+  apply_turn_plan_action_payload,
   append_planner_runtime_transition,
   set_planner_consecutive_warning_outcome,
 )
@@ -75,7 +77,23 @@ def _preview_trackblazer_items(state_obj, action, hooks: PlannerExecutorHooks):
     return refresh_result
   if refresh_result.get("status") == "skipped":
     return {"status": "skipped"}
+  refreshed_turn_plan = refresh_result.get("turn_plan")
+  if isinstance(refreshed_turn_plan, TurnPlan):
+    _sync_action_to_turn_plan(action, refreshed_turn_plan)
   return hooks.execute_trackblazer_pre_action_items(state_obj, action, commit_mode="dry_run")
+
+
+def _sync_action_to_turn_plan(action, turn_plan: TurnPlan):
+  if not isinstance(turn_plan, TurnPlan):
+    return
+  apply_turn_plan_action_payload(action, turn_plan)
+  if not hasattr(action, "options"):
+    return
+  item_execution_payload = dict(turn_plan.to_execution_payload().get("item_execution") or {})
+  if item_execution_payload:
+    action["_trackblazer_planner_item_execution_override"] = copy.deepcopy(item_execution_payload)
+  else:
+    action.options.pop("_trackblazer_planner_item_execution_override", None)
 
 
 def run_planner_action_with_review(
@@ -315,6 +333,7 @@ def run_planner_action_with_review(
     if isinstance(refreshed_turn_plan, TurnPlan):
       previous_planned_clicks = list(planned_clicks or [])
       turn_plan = refreshed_turn_plan
+      _sync_action_to_turn_plan(action, turn_plan)
       item_execution_payload = dict(turn_plan.to_execution_payload().get("item_execution") or {})
       planned_clicks = turn_plan.to_planned_clicks()
       if planned_clicks != previous_planned_clicks:

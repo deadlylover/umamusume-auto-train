@@ -237,6 +237,173 @@ def _run_energy_recheck_case():
   }
 
 
+def _run_refresh_sync_case():
+  state_obj = {}
+  action = _make_action("do_training")
+  action["training_name"] = "pwr"
+  action["trackblazer_pre_action_items"] = [
+    {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+  ]
+  action["_trackblazer_planner_item_execution_override"] = {
+    "execution_items": [
+      {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+    ],
+    "reassess_transition": {
+      "required": True,
+      "transition_kind": "energy_rescue_reassess",
+      "reason": "stale_energy_item_reassess",
+      "trigger_items": ["royal_kale_juice"],
+    },
+  }
+  stale_turn_plan = TurnPlan(
+    decision_path="planner",
+    item_plan={
+      "pre_action_items": [
+        {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+      ],
+      "execution_payload": {
+        "execution_items": [
+          {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+        ],
+        "reassess_transition": {
+          "required": True,
+          "transition_kind": "energy_rescue_reassess",
+          "reason": "stale_energy_item_reassess",
+          "trigger_items": ["royal_kale_juice"],
+        },
+        "action_mutations": {
+          "trackblazer_pre_action_items": [
+            {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+          ],
+          "trackblazer_reassess_after_item_use": True,
+        },
+      },
+      "reassess_after_item_use": True,
+    },
+    review_context={
+      "selected_action": {
+        "func": "do_training",
+        "training_name": "pwr",
+        "pre_action_item_use": [
+          {"key": "royal_kale_juice", "name": "Royal Kale Juice"}
+        ],
+        "reassess_after_item_use": True,
+      }
+    },
+    step_sequence=[
+      ExecutionStep(step_id="refresh_inventory_for_items", step_type="refresh_inventory_for_items"),
+      ExecutionStep(step_id="replan_pre_action_items", step_type="replan_pre_action_items"),
+      ExecutionStep(step_id="execute_pre_action_items", step_type="execute_pre_action_items"),
+    ],
+  )
+  refreshed_items = [
+    {"key": "vita_20", "name": "Vita 20"},
+    {"key": "vita_20", "name": "Vita 20"},
+  ]
+  refreshed_turn_plan = TurnPlan(
+    decision_path="planner",
+    item_plan={
+      "pre_action_items": copy.deepcopy(refreshed_items),
+      "execution_payload": {
+        "execution_items": copy.deepcopy(refreshed_items),
+        "reassess_transition": {
+          "required": True,
+          "transition_kind": "energy_rescue_reassess",
+          "reason": "refreshed_energy_item_reassess",
+          "trigger_items": ["vita_20", "vita_20"],
+        },
+        "action_mutations": {
+          "trackblazer_pre_action_items": copy.deepcopy(refreshed_items),
+          "trackblazer_reassess_after_item_use": True,
+        },
+      },
+      "reassess_after_item_use": True,
+    },
+    review_context={
+      "selected_action": {
+        "func": "do_training",
+        "training_name": "pwr",
+        "pre_action_item_use": copy.deepcopy(refreshed_items),
+        "reassess_after_item_use": True,
+      }
+    },
+    step_sequence=[
+      ExecutionStep(step_id="refresh_inventory_for_items", step_type="refresh_inventory_for_items"),
+      ExecutionStep(step_id="replan_pre_action_items", step_type="replan_pre_action_items"),
+      ExecutionStep(step_id="execute_pre_action_items", step_type="execute_pre_action_items"),
+    ],
+  )
+  captured = {}
+  state_log = []
+
+  def _capture_item_execute(_state_obj, current_action, commit_mode="full"):
+    captured["commit_mode"] = commit_mode
+    captured["pre_action_items"] = copy.deepcopy(current_action.get("trackblazer_pre_action_items") or [])
+    captured["override"] = copy.deepcopy(current_action.get("_trackblazer_planner_item_execution_override") or {})
+    return {
+      "status": "failed",
+      "reason": "captured_refreshed_items",
+    }
+
+  hooks = PlannerExecutorHooks(
+    skill_purchase_plan=lambda _action: {},
+    review_action_before_execution=lambda *_args, **_kwargs: True,
+    wait_for_execute_intent=lambda *_args, **_kwargs: "execute",
+    run_skill_purchase_plan=lambda *_args, **_kwargs: {"status": "skipped"},
+    run_trackblazer_shop_purchases=lambda *_args, **_kwargs: {"status": "skipped"},
+    wait_for_lobby_after_shop_purchase=lambda: True,
+    refresh_trackblazer_pre_action_inventory=lambda _state_obj, _action: {
+      "status": "ready",
+      "turn_plan": refreshed_turn_plan,
+    },
+    execute_trackblazer_pre_action_items=_capture_item_execute,
+    recheck_selected_training_after_item_use=lambda *_args, **_kwargs: {"status": "ready"},
+    run_post_energy_item_followup=lambda *_args, **_kwargs: {"status": "ready"},
+    run_post_reset_whistle_replan=lambda *_args, **_kwargs: {"status": "blocked", "reason": "not_used"},
+    wait_for_lobby_after_item_use=lambda *_args, **_kwargs: True,
+    enforce_operator_race_gate_before_execute=lambda *_args, **_kwargs: None,
+    run_planner_race_preflight=lambda *_args, **_kwargs: None,
+    resolve_post_action_resolution=lambda *_args, **_kwargs: True,
+    trackblazer_action_failure_should_block_retry=lambda *_args, **_kwargs: False,
+    update_operator_snapshot=lambda *_args, **_kwargs: state_log.append(
+      {
+        "phase": _kwargs.get("phase"),
+        "message": _kwargs.get("message"),
+      }
+    ),
+  )
+
+  outcome = run_planner_action_with_review(
+    state_obj,
+    action,
+    stale_turn_plan,
+    1,
+    "Review proposed action before execution.",
+    hooks,
+    resume_context={
+      "skip_review": True,
+      "skip_skill_purchases": True,
+      "skip_shop_purchases": True,
+      "reason": "test_refresh_sync",
+    },
+  )
+
+  refreshed_keys = [entry.get("key") for entry in captured.get("pre_action_items") or []]
+  override_keys = [
+    entry.get("key")
+    for entry in list((captured.get("override") or {}).get("execution_items") or [])
+  ]
+  assert outcome.get("status") == "failed", outcome
+  assert outcome.get("reason") == "captured_refreshed_items", outcome
+  assert refreshed_keys == ["vita_20", "vita_20"], captured
+  assert override_keys == ["vita_20", "vita_20"], captured
+  return {
+    "status": outcome.get("status"),
+    "captured_items": refreshed_keys,
+    "captured_override_items": override_keys,
+  }
+
+
 def _run_whistle_reseed_case():
   state_obj = {
     "year": "Senior Year Late Jul",
@@ -368,6 +535,7 @@ def main():
   results = {
     "whistle_replan": _run_whistle_replan_case(),
     "energy_recheck": _run_energy_recheck_case(),
+    "refresh_sync": _run_refresh_sync_case(),
     "whistle_reseed": _run_whistle_reseed_case(),
   }
   print(json.dumps(results, indent=2, sort_keys=True))
