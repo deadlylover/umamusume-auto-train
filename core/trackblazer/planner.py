@@ -1421,6 +1421,11 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
   base_fallback = {}
   pre_debut_fallback = _resolve_pre_debut_non_race_payload(action, state_obj=state_obj, fallback_payload=base_fallback)
   pre_debut = state_obj.get("year") == "Junior Year Pre-Debut"
+  maiden_race_active = bool(
+    state_obj.get("trackblazer_maiden_available")
+    and str(state_obj.get("year") or "").startswith("Junior Year")
+    and state_obj.get("year") != "Junior Year Pre-Debut"
+  )
   lobby_scheduled_race = bool(state_obj.get("trackblazer_lobby_scheduled_race"))
   forced_climax_race_day = bool(timeline_policy.get("is_forced_climax_race_day"))
   forced_race_day = bool(timeline_policy.get("is_race_day"))
@@ -1498,6 +1503,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     "planner_owned": True,
     "branch_kind": branch_kind,
     "rival_indicator_detected": bool(state_obj.get("rival_indicator_detected")),
+    "maiden_race_available": maiden_race_active,
     "scheduled_race": scheduled_race_active,
     "scheduled_race_source": (
       "lobby_button"
@@ -1582,7 +1588,7 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
     )
     race_scout = {
       "planner_owned": True,
-      "required": bool(branch_kind in {"optional_rival_race", "optional_fallback_race"}),
+      "required": bool(branch_kind in {"optional_rival_race", "optional_fallback_race", "maiden_race"}),
       "scout_kind": "rival_aptitude" if branch_kind == "optional_rival_race" else "optional_aptitude",
       "executed": bool(existing_rival_scout),
       "race_found": existing_rival_scout.get("race_found", existing_rival_scout.get("rival_found")),
@@ -1718,6 +1724,49 @@ def _build_planner_race_plan(state_obj, action, *, allow_live_rival_indicator_ch
           "race_name": _action_value(action, "race_name") or "any",
           "rival_indicator": bool(state_obj.get("rival_indicator_detected")),
         },
+        warning_policy=warning_plan,
+        fallback_action=base_fallback,
+        branch_kind=branch_kind,
+      )
+    elif maiden_race_active:
+      branch_kind = "maiden_race"
+      warning_plan = {
+        "planner_owned": True,
+        "warning_expected": True,
+        "accept_warning": True,
+        "accept_reason": "Maiden recovery race forces continue through the consecutive-race warning.",
+        "cancel_target": "",
+        "cancel_target_label": "",
+        "cancel_target_node_id": "",
+        "force_rest_on_cancel": False,
+        "force_accept_warning": True,
+      }
+      race_scout = {
+        "planner_owned": True,
+        "required": True,
+        "scout_kind": "optional_aptitude",
+        "executed": False,
+        "status": "pending",
+        "failure_transition": "",
+      }
+      selected_action_payload = _planner_selected_action_payload(
+        action,
+        func="do_race",
+        race_name="any",
+        race_image_path=constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png",
+        race_decision={
+          "should_race": True,
+          "branch_kind": branch_kind,
+          "reason": (
+            "Post-debut Junior maiden banner detected on the lobby screen; "
+            "clear any 2-aptitude maiden race before normal selected races can proceed."
+          ),
+          "mandatory_maiden_race": True,
+          "race_name": "any",
+          "race_available": True,
+          "rival_indicator": False,
+        },
+        race_lookahead=race_lookahead,
         warning_policy=warning_plan,
         fallback_action=base_fallback,
         branch_kind=branch_kind,
@@ -2104,7 +2153,7 @@ def _planner_owned_warning_policy_for_node(
   if (
     selected_node_id == "race:race_day"
     or selected_node_id.startswith("race:g1_today:")
-    or branch_kind in {"forced_race_day", "scheduled_race", "lobby_scheduled_race"}
+    or branch_kind in {"forced_race_day", "scheduled_race", "lobby_scheduled_race", "maiden_race"}
   ):
     return {
       "planner_owned": True,
@@ -2117,7 +2166,11 @@ def _planner_owned_warning_policy_for_node(
           or selected_node_id == "race:race_day"
           or selected_node_id.startswith("race:g1_today:")
         ) else
-        "Scheduled race branch forces continue through the consecutive-race warning."
+        (
+          "Maiden recovery race forces continue through the consecutive-race warning."
+          if branch_kind == "maiden_race" else
+          "Scheduled race branch forces continue through the consecutive-race warning."
+        )
       ),
       "cancel_target": top_func,
       "cancel_target_label": top_label,
@@ -2342,6 +2395,13 @@ def _transitional_planner_native_candidates_from_race_plan(planner_race_plan) ->
     _append(
       f"race:scheduled:{race_name or 'scheduled'}",
       "transitional planner-native scheduled race candidate (remove when M6 race evaluators are planner-native)",
+      ["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+    )
+  elif branch_kind == "maiden_race":
+    _append(
+      "race:maiden",
+      "transitional planner-native maiden recovery race candidate sourced from existing race branch",
       ["race_opportunity"],
       expected_warnings=["consecutive_race_warning"],
     )
@@ -2903,6 +2963,8 @@ def _candidate_branch_kind(node_id: str, selected_func: str) -> str:
     return "forced_race_day"
   if node_id == "race:climax_locked":
     return "forced_climax_race"
+  if node_id == "race:maiden":
+    return "maiden_race"
   if node_id.startswith("race:scheduled:"):
     return "scheduled_race"
   if node_id.startswith("race:goal:"):
@@ -2969,6 +3031,9 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
     race_decision = {**race_decision, "should_race": False, "branch_kind": "non_race"}
   elif node_id.startswith("race:"):
     selected_func = "do_race"
+    if node_id == "race:maiden":
+      race_name = "any"
+      race_image_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
     if node_id.startswith("race:scheduled:"):
       race_name = node_id.split("race:scheduled:", 1)[1] or race_name
       scheduled_race = True
@@ -3102,11 +3167,11 @@ def _apply_ranked_selection_to_race_plan(
     if selected_payload.get("trackblazer_lobby_scheduled_race") else
     ("config_schedule" if selected_payload.get("scheduled_race") else "")
   )
-  race_check["scout_required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race"})
+  race_check["scout_required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race", "maiden_race"})
 
   race_scout = copy.deepcopy(planner_race_plan.get("race_scout") or {})
   race_scout["planner_owned"] = True
-  race_scout["required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race"})
+  race_scout["required"] = bool(branch_kind in {"optional_rival_race", "optional_fallback_race", "maiden_race"})
   if race_scout["required"]:
     race_scout["scout_kind"] = "rival_aptitude" if branch_kind == "optional_rival_race" else "optional_aptitude"
   if selected_payload.get("func") != "do_race":

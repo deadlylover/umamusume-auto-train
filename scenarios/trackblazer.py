@@ -5372,6 +5372,58 @@ def check_climax_race_day_button():
     return bool((detection.get("button") or {}).get("passed_threshold"))
 
 
+def inspect_maiden_detection(screenshot=None, log_result=True):
+    """Inspect the post-debut Junior maiden banner on the Trackblazer lobby."""
+    region_ltrb = getattr(constants, "TRACKBLAZER_MAIDEN_BBOX", None)
+    result = {
+        "detected": False,
+        "region_ltrb": [int(v) for v in region_ltrb] if region_ltrb else None,
+        "maiden": None,
+    }
+    if not region_ltrb:
+        if log_result:
+            warning("[TB_RACE] Maiden detection skipped: invalid maiden region.")
+        return result
+
+    if screenshot is None:
+        screenshot = device_action.screenshot(region_ltrb=region_ltrb)
+
+    maiden_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("maiden")
+    if maiden_path:
+        maiden_entry = _best_match_entry(
+            maiden_path,
+            region_ltrb=region_ltrb,
+            threshold=0.78,
+            template_scaling=_INVERSE_GLOBAL_SCALE,
+            screenshot=screenshot,
+        )
+        maiden_entry["key"] = "maiden"
+        result["maiden"] = maiden_entry
+
+    maiden_passed = bool((result.get("maiden") or {}).get("passed_threshold"))
+    result["detected"] = maiden_passed
+
+    if log_result:
+        info(
+            "[TB_RACE] Maiden detection "
+            f"region={result.get('region_ltrb')} "
+            f"score={(result.get('maiden') or {}).get('score')} "
+            f"passed={maiden_passed} "
+            f"detected={result['detected']}"
+        )
+        bot.push_debug_history({
+            "event": "trackblazer_maiden_detection",
+            "asset": "maiden.png",
+            "result": "found" if result["detected"] else "not_found",
+            "context": "trackblazer_maiden",
+            "region_ltrb": result.get("region_ltrb"),
+            "score": (result.get("maiden") or {}).get("score"),
+            "passed_threshold": maiden_passed,
+        })
+
+    return result
+
+
 def climax_race_button_region():
     """Return the current region used to search for the Climax race button."""
     return _trackblazer_climax_bottom_region()

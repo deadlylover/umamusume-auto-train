@@ -166,15 +166,19 @@ def do_race(options=None):
   if options is None:
     options = {}
   debug(f"do_race options before enter race: {options}")
+  race_name = options.get("race_name")
+  custom_race_image_path = options.get("race_image_path") or ""
   if "is_race_day" in options and options["is_race_day"]:
     race_day(options)
   elif ("race_mission_available" in options and options["race_mission_available"]):
     if not enter_race(options=options):
       return False
-  elif "race_name" in options and options["race_name"] != "any" and options["race_name"] != "":
-    race_name = options["race_name"]
-    race_image_path = f"assets/races/{race_name}.png"
+  elif race_name not in (None, "", "any"):
+    race_image_path = custom_race_image_path or f"assets/races/{race_name}.png"
     if not enter_race(race_name, race_image_path, options=options):
+      return False
+  elif custom_race_image_path:
+    if not enter_race(race_name or "any", custom_race_image_path, options=options):
       return False
   else:
     if not enter_race(options=options):

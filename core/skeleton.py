@@ -1647,6 +1647,56 @@ def _operator_race_gate_message(gate, context="racing"):
   return message
 
 
+def _is_trackblazer_post_debut_junior_turn(state_obj):
+  year = str((state_obj or {}).get("year") or "").strip()
+  return year.startswith("Junior Year") and year != "Junior Year Pre-Debut"
+
+
+def _trackblazer_maiden_race_template():
+  return constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
+
+
+def _configure_trackblazer_maiden_race_action(action, state_obj):
+  year = (state_obj or {}).get("year")
+  action.func = "do_race"
+  action["year"] = year
+  action["race_name"] = "any"
+  action["race_image_path"] = _trackblazer_maiden_race_template()
+  action["trackblazer_maiden_race"] = True
+  action["prefer_rival_race"] = False
+  action["fallback_non_rival_race"] = False
+  action["trackblazer_race_decision"] = {
+    "should_race": True,
+    "reason": (
+      "Post-debut Junior maiden banner detected on the lobby screen; "
+      "clear any 2-aptitude maiden race before normal selected races can proceed."
+    ),
+    "mandatory_maiden_race": True,
+    "race_available": True,
+    "rival_indicator": False,
+    "prefer_rival_race": False,
+    "race_name": "any",
+  }
+  action["planner_race_warning_policy"] = {
+    "planner_owned": False,
+    "warning_expected": True,
+    "accept_warning": True,
+    "accept_reason": "Maiden recovery race is mandatory after a failed debut race.",
+    "force_accept_warning": True,
+  }
+  return action
+
+
+def _is_trackblazer_mandatory_maiden_action(action):
+  if _action_value(action, "trackblazer_maiden_race"):
+    return True
+  race_decision = _action_value(action, "trackblazer_race_decision", {}) or {}
+  if isinstance(race_decision, dict) and race_decision.get("mandatory_maiden_race"):
+    return True
+  planner_payload = _action_value(action, "trackblazer_planner_race", {}) or {}
+  return bool(isinstance(planner_payload, dict) and planner_payload.get("branch_kind") == "maiden_race")
+
+
 def _planner_pre_training_locked_race(state_obj, action, strategy):
   if not _trackblazer_planner_mode_enabled():
     return None
@@ -1696,6 +1746,14 @@ def _planner_pre_training_locked_race(state_obj, action, strategy):
       "reason": "race_day",
       "message": "Race Day detected. Skipping training scan and preparing race entry.",
       "review_message": "Race Day detected. Review before entering race.",
+    }
+
+  if state_obj.get("trackblazer_maiden_available") and _is_trackblazer_post_debut_junior_turn(state_obj):
+    _configure_trackblazer_maiden_race_action(action, state_obj)
+    return {
+      "reason": "maiden_race",
+      "message": "Trackblazer maiden banner detected. Skipping training scan and preparing a mandatory maiden race.",
+      "review_message": "Trackblazer maiden race detected. Review before entering race.",
     }
 
   action = strategy.check_scheduled_races(state_obj, action)
@@ -1831,7 +1889,11 @@ def _should_force_rest_after_consecutive_warning(action):
 def _enforce_operator_race_gate_before_execute(state_obj, action, sub_phase=None, ocr_debug=None, planned_clicks=None):
   if _action_func(action) != "do_race":
     return None
-  if _action_value(action, "is_race_day") or _action_value(action, "trackblazer_climax_race_day"):
+  if (
+    _action_value(action, "is_race_day")
+    or _action_value(action, "trackblazer_climax_race_day")
+    or _is_trackblazer_mandatory_maiden_action(action)
+  ):
     return None
 
   blocked, gate = _operator_race_gate_blocks_optional_races(state_obj)
@@ -7101,7 +7163,7 @@ def career_lobby(dry_run_turn=False):
             data={"skipped": True, "execution_intent": execution_intent},
           )
 
-        from scenarios.trackblazer import inspect_climax_race_day_detection
+        from scenarios.trackblazer import inspect_climax_race_day_detection, inspect_maiden_detection
 
         with _timed_turn_step("Climax race-day check", "decision", key="climax_race_day_check") as step:
           climax_detection = inspect_climax_race_day_detection(log_result=True)
@@ -7113,6 +7175,19 @@ def career_lobby(dry_run_turn=False):
         state_obj["trackblazer_climax_race_day"] = bool(climax_detection.get("detected"))
         state_obj["trackblazer_climax_race_day_banner"] = bool((climax_detection.get("banner") or {}).get("passed_threshold"))
         state_obj["trackblazer_climax_race_day_button"] = bool((climax_detection.get("button") or {}).get("passed_threshold"))
+        state_obj["trackblazer_maiden_available"] = False
+        state_obj["trackblazer_maiden_detection"] = {}
+        if _is_trackblazer_post_debut_junior_turn(state_obj):
+          with _timed_turn_step("Maiden banner check", "decision", key="maiden_banner_check") as step:
+            maiden_detection = inspect_maiden_detection(log_result=True)
+            step["detail"] = _turn_metric_detail(
+              f"detected={bool(maiden_detection.get('detected'))}",
+              f"score={(maiden_detection.get('maiden') or {}).get('score')}",
+            )
+          state_obj["trackblazer_maiden_detection"] = maiden_detection
+          state_obj["trackblazer_maiden_available"] = bool(maiden_detection.get("detected"))
+          if state_obj["trackblazer_maiden_available"]:
+            info("[TB_RACE] Post-debut maiden banner detected on lobby screen.")
 
         if shop_flow.get("entered") and shop_flow.get("closed"):
           bot.push_debug_history({
@@ -7227,6 +7302,45 @@ def career_lobby(dry_run_turn=False):
           action.options.pop("is_race_day", None)
           action.options.pop("year", None)
           action.options.pop("trackblazer_climax_race_day", None)
+
+      if (
+        state_obj.get("trackblazer_maiden_available")
+        and _is_trackblazer_post_debut_junior_turn(state_obj)
+        and not _trackblazer_planner_mode_enabled()
+      ):
+        info("[TB_RACE] Taking early maiden-race branch before training scan.")
+        _push_flow_decision_debug(
+          state_obj,
+          asset="pre_training_branch",
+          result="maiden_race",
+          note="Post-debut Junior maiden banner detected on lobby screen.",
+          context="pre_training_gate",
+          phase="collecting_race_state",
+        )
+        action = _configure_trackblazer_maiden_race_action(action, state_obj)
+        action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
+        state_obj["rival_indicator_detected"] = False
+        update_pre_action_phase(
+          state_obj,
+          action,
+          message="Trackblazer maiden banner detected. Skipping training scan and preparing a mandatory maiden race.",
+        )
+        skill_result = maybe_review_skill_purchase(state_obj, action_count, race_check=True, action=action)
+        if skill_result in ("failed", "previewed"):
+          continue
+        maiden_race_result = run_action_with_review(
+          state_obj,
+          action,
+          "Trackblazer maiden race detected. Review before entering race.",
+          sub_phase="preview_race_selection",
+        )
+        if maiden_race_result == "executed":
+          record_and_finalize_turn(state_obj, action)
+          continue
+        elif maiden_race_result == "previewed":
+          continue
+        else:
+          continue
 
       optional_race_blocked, race_gate = _operator_race_gate_blocks_optional_races(state_obj)
 

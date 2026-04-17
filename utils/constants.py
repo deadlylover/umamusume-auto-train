@@ -311,6 +311,7 @@ TRACKBLAZER_ITEM_CATEGORIES = {
 
 # Trackblazer race-related templates (rival indicators, grade badges, warnings).
 TRACKBLAZER_RACE_TEMPLATES = {
+  "maiden": "assets/custom/maiden.png",
   "rival_racer": "assets/trackblazer/rival_racer.png",
   "race_recommend_2_aptitudes": "assets/trackblazer/race_recommend_2_aptitudes.png",
   "summer_rival_race_button": "assets/trackblazer/summer_rival_race_button.png",
@@ -354,6 +355,15 @@ TRACKBLAZER_SHOP_UI_TEMPLATES = {
 TRACKBLAZER_LOBBY_BUFF_ICON = "assets/trackblazer/lobby_buff_active.png"
 # Region covering the top-left area of the game window where buff icons appear.
 TRACKBLAZER_LOBBY_BUFF_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (0, 50, -670, -930))
+
+# Post-debut Junior maiden banner shown on the lobby when the debut race was
+# failed and a maiden race must be cleared before normal race selection works.
+TRACKBLAZER_MAIDEN_BBOX = (
+  GAME_WINDOW_BBOX[0] + 49,
+  GAME_WINDOW_BBOX[1] + 837,
+  GAME_WINDOW_BBOX[0] + 161,
+  GAME_WINDOW_BBOX[1] + 871,
+)
 
 # Trackblazer lobby "Scheduled Race" button — replaces the normal race button when a scheduled race is available.
 TRACKBLAZER_LOBBY_SCHEDULED_RACE = "assets/trackblazer/lobby_scheduled_race.png"
