@@ -4931,12 +4931,20 @@ def _wait_for_post_action_actionable_state(
 ):
   from utils.screenshot import are_screenshots_same
 
-  deadline = time.time() + max(0.0, float(max_wait or 0.0))
+  started_at = time.time()
+  deadline = started_at + max(0.0, float(max_wait or 0.0))
+  polls = 0
 
   while time.time() < deadline:
     if bot.stop_event.is_set():
-      return {"ready": False, "reason": "bot_stopped"}
+      return {
+        "ready": False,
+        "reason": "bot_stopped",
+        "duration": round(max(0.0, time.time() - started_at), 4),
+        "polls": polls,
+      }
 
+    polls += 1
     device_action.flush_screenshot_cache()
     screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
     if (
@@ -4955,6 +4963,8 @@ def _wait_for_post_action_actionable_state(
           "ready": True,
           "reason": "event_choice",
           "event_choice_icon": [int(event_choice_icon[0]), int(event_choice_icon[1])],
+          "duration": round(max(0.0, time.time() - started_at), 4),
+          "polls": polls,
         }
 
     if include_stable_lobby:
@@ -4964,6 +4974,8 @@ def _wait_for_post_action_actionable_state(
           "ready": True,
           "reason": "stable_lobby",
           "anchor_counts": dict(anchor_counts or {}),
+          "duration": round(max(0.0, time.time() - started_at), 4),
+          "polls": polls,
         }
 
     if include_advance_button:
@@ -4973,19 +4985,160 @@ def _wait_for_post_action_actionable_state(
           "ready": True,
           "reason": "advance_button",
           "advance_button": str(advance_button),
+          "duration": round(max(0.0, time.time() - started_at), 4),
+          "polls": polls,
         }
 
     remaining = deadline - time.time()
     if remaining > 0:
       sleep(min(float(poll_interval), remaining))
 
-  return {"ready": False, "reason": "timeout"}
+  return {
+    "ready": False,
+    "reason": "timeout",
+    "duration": round(max(0.0, time.time() - started_at), 4),
+    "polls": polls,
+  }
+
+
+def _post_action_turn_label(state_obj):
+  if not isinstance(state_obj, dict):
+    return ""
+  year = state_obj.get("year")
+  turn = state_obj.get("turn")
+  if year or turn:
+    return f"{year or '?'} / {turn or '?'}"
+  return ""
+
+
+def _new_post_action_timing_metrics(state_obj, action_name):
+  started_at = time.time()
+  return {
+    "turn_label": _post_action_turn_label(state_obj),
+    "started_at": started_at,
+    "timing_total": None,
+    "timing_event_choice": 0.0,
+    "timing_lobby_detect": 0.0,
+    "timing_popup_handlers": 0.0,
+    "timing_followup_wait": 0.0,
+    "timing_generic_recovery": 0.0,
+    "timing_idle_sleep": 0.0,
+    "timing_to_first_event_choice": None,
+    "timing_to_stable_lobby": None,
+    "timing_from_last_event_to_lobby": None,
+    "timing_from_last_popup_to_lobby": None,
+    "loop_count": 0,
+    "event_choice_count": 0,
+    "handled_popup_count": 0,
+    "generic_recovery_count": 0,
+    "safe_space_tap_count": 0,
+    "followup_wait_count": 0,
+    "idle_sleep_count": 0,
+    "last_anchor_counts": {},
+    "timeline_entries": [],
+    "last_event_at": None,
+    "last_popup_at": None,
+    "action_name": str(action_name or "unknown_action"),
+  }
+
+
+def _post_action_timing_elapsed(metrics, timestamp=None):
+  if not isinstance(metrics, dict):
+    return None
+  started_at = metrics.get("started_at")
+  if started_at is None:
+    return None
+  end_time = time.time() if timestamp is None else float(timestamp)
+  return round(max(0.0, end_time - float(started_at)), 4)
+
+
+def _append_post_action_timing_entry(metrics, kind, label, *, duration=None, detail="", when=None):
+  if not isinstance(metrics, dict):
+    return
+  timestamp = time.time() if when is None else float(when)
+  entries = metrics.setdefault("timeline_entries", [])
+  entry = {
+    "kind": str(kind or ""),
+    "label": str(label or ""),
+    "at": _post_action_timing_elapsed(metrics, timestamp),
+  }
+  if duration is not None:
+    entry["duration"] = round(max(0.0, float(duration)), 4)
+  if detail:
+    entry["detail"] = str(detail)
+  entries.append(entry)
+  if len(entries) > 20:
+    del entries[:-20]
+
+
+def _post_action_timing_runtime_payload(metrics):
+  if not isinstance(metrics, dict):
+    return {}
+  payload = {}
+  for key in (
+    "turn_label",
+    "timing_total",
+    "timing_event_choice",
+    "timing_lobby_detect",
+    "timing_popup_handlers",
+    "timing_followup_wait",
+    "timing_generic_recovery",
+    "timing_idle_sleep",
+    "timing_to_first_event_choice",
+    "timing_to_stable_lobby",
+    "timing_from_last_event_to_lobby",
+    "timing_from_last_popup_to_lobby",
+    "loop_count",
+    "event_choice_count",
+    "handled_popup_count",
+    "generic_recovery_count",
+    "safe_space_tap_count",
+    "followup_wait_count",
+    "idle_sleep_count",
+    "last_anchor_counts",
+    "timeline_entries",
+  ):
+    if key in metrics:
+      payload[key] = copy.deepcopy(metrics.get(key))
+  return payload
 
 
 def _resolve_post_action_resolution(state_obj, action, max_wait=None):
   import time as _time_mod
 
   action_name = _action_func(action) or "unknown_action"
+  metrics = _new_post_action_timing_metrics(state_obj, action_name)
+
+  def _sync_post_action_timing():
+    metrics["timing_total"] = _post_action_timing_elapsed(metrics)
+    bot.set_post_action_resolution_metrics(_post_action_timing_runtime_payload(metrics))
+
+  def _record_post_action_wait(wait_result, *, label, kind):
+    wait_duration = float((wait_result or {}).get("duration") or 0.0)
+    metrics["timing_followup_wait"] = round(metrics.get("timing_followup_wait", 0.0) + wait_duration, 4)
+    metrics["followup_wait_count"] = int(metrics.get("followup_wait_count", 0) or 0) + 1
+    detail = f"reason={wait_result.get('reason')} polls={wait_result.get('polls')}"
+    _append_post_action_timing_entry(metrics, kind, label, duration=wait_duration, detail=detail)
+    _sync_post_action_timing()
+
+  def _record_popup_branch(branch_label, result, duration):
+    if not isinstance(result, dict) or not result.get("detected"):
+      return
+    metrics["timing_popup_handlers"] = round(metrics.get("timing_popup_handlers", 0.0) + float(duration or 0.0), 4)
+    if result.get("handled"):
+      metrics["handled_popup_count"] = int(metrics.get("handled_popup_count", 0) or 0) + 1
+      metrics["last_popup_at"] = time.time()
+    popup_label = str(result.get("popup_type") or branch_label)
+    detail = str(result.get("reason") or "")
+    _append_post_action_timing_entry(
+      metrics,
+      "popup",
+      popup_label,
+      duration=duration,
+      detail=f"handled={bool(result.get('handled'))} {detail}".strip(),
+    )
+    _sync_post_action_timing()
+
   if max_wait is None:
     # Races chain through result screens, concerts, and events before stable
     # lobby returns — give them the longer budget that the old post-race loop
@@ -4996,18 +5149,42 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
     reason="action_committed_waiting_for_stable_lobby",
     sub_phase=SUB_PHASE_POST_ACTION_RESOLUTION,
   )
+  _sync_post_action_timing()
   deadline = _time_mod.time() + max_wait
   idle_loops = 0
 
   while _time_mod.time() < deadline:
+    metrics["loop_count"] = int(metrics.get("loop_count", 0) or 0) + 1
     if bot.stop_event.is_set():
-      bot.end_post_action_resolution(outcome="bot_stopped", status="stopped")
+      metrics["timing_total"] = _post_action_timing_elapsed(metrics)
+      bot.end_post_action_resolution(
+        outcome="bot_stopped",
+        status="stopped",
+        **_post_action_timing_runtime_payload(metrics),
+      )
       return False
 
     device_action.flush_screenshot_cache()
     screenshot = device_action.screenshot()
+    event_started_at = _time_mod.time()
     resolved_event_choices = _resolve_post_action_event_chain(screenshot=screenshot)
+    event_duration = _time_mod.time() - event_started_at
+    metrics["timing_event_choice"] = round(metrics.get("timing_event_choice", 0.0) + event_duration, 4)
     if resolved_event_choices:
+      resolved_at = _time_mod.time()
+      metrics["event_choice_count"] = int(metrics.get("event_choice_count", 0) or 0) + int(resolved_event_choices)
+      if metrics.get("timing_to_first_event_choice") is None:
+        metrics["timing_to_first_event_choice"] = _post_action_timing_elapsed(metrics, resolved_at)
+      metrics["last_event_at"] = resolved_at
+      _append_post_action_timing_entry(
+        metrics,
+        "event_choice",
+        "event_choice",
+        duration=event_duration,
+        detail=f"count={resolved_event_choices}",
+        when=resolved_at,
+      )
+      _sync_post_action_timing()
       _update_post_action_resolution_snapshot(
         state_obj,
         action,
@@ -5022,8 +5199,33 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
       idle_loops = 0
       continue
 
+    lobby_started_at = _time_mod.time()
     stable_lobby, anchor_counts = _is_stable_career_lobby_screen(screenshot=screenshot)
+    lobby_duration = _time_mod.time() - lobby_started_at
+    metrics["timing_lobby_detect"] = round(metrics.get("timing_lobby_detect", 0.0) + lobby_duration, 4)
+    metrics["last_anchor_counts"] = dict(anchor_counts or {})
     if stable_lobby:
+      stable_lobby_at = _time_mod.time()
+      metrics["timing_to_stable_lobby"] = _post_action_timing_elapsed(metrics, stable_lobby_at)
+      if metrics.get("last_event_at") is not None:
+        metrics["timing_from_last_event_to_lobby"] = round(
+          max(0.0, stable_lobby_at - float(metrics.get("last_event_at"))),
+          4,
+        )
+      if metrics.get("last_popup_at") is not None:
+        metrics["timing_from_last_popup_to_lobby"] = round(
+          max(0.0, stable_lobby_at - float(metrics.get("last_popup_at"))),
+          4,
+        )
+      _append_post_action_timing_entry(
+        metrics,
+        "stable_lobby",
+        "stable_lobby",
+        duration=lobby_duration,
+        detail=f"anchors={anchor_counts}",
+        when=stable_lobby_at,
+      )
+      metrics["timing_total"] = _post_action_timing_elapsed(metrics, stable_lobby_at)
       bot.complete_turn_metrics(
         reason="stable_lobby_confirmed",
         detail=_turn_metric_detail(
@@ -5039,9 +5241,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
         reasoning_notes=f"anchor_counts={anchor_counts}",
       )
-      bot.end_post_action_resolution(outcome="stable_lobby_confirmed")
+      bot.end_post_action_resolution(
+        outcome="stable_lobby_confirmed",
+        **_post_action_timing_runtime_payload(metrics),
+      )
       return True
 
+    _sync_post_action_timing()
     _update_post_action_resolution_snapshot(
       state_obj,
       action,
@@ -5051,7 +5257,12 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
     )
 
     if _detect_trackblazer_complete_career_banner(context="post_action_resolution").get("detected"):
-      bot.end_post_action_resolution(outcome="trackblazer_career_complete", status="completed")
+      metrics["timing_total"] = _post_action_timing_elapsed(metrics)
+      bot.end_post_action_resolution(
+        outcome="trackblazer_career_complete",
+        status="completed",
+        **_post_action_timing_runtime_payload(metrics),
+      )
       _stop_for_trackblazer_complete_career(
         state_obj,
         action,
@@ -5059,7 +5270,9 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
       )
 
     if _trackblazer_scenario_active():
+      branch_started_at = _time_mod.time()
       shop_refresh_result = _handle_trackblazer_shop_refresh_popup()
+      _record_popup_branch("shop_refresh", shop_refresh_result, _time_mod.time() - branch_started_at)
       if shop_refresh_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5072,10 +5285,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if shop_refresh_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_shop_refresh", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       scheduled_race_result = _handle_trackblazer_scheduled_race_popup(state_obj, action)
+      _record_popup_branch("scheduled_race_popup", scheduled_race_result, _time_mod.time() - branch_started_at)
       if scheduled_race_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5088,10 +5304,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if scheduled_race_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_scheduled_race_popup", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       climax_race_result = _handle_trackblazer_climax_race_result_screen(state_obj, action)
+      _record_popup_branch("climax_race_result", climax_race_result, _time_mod.time() - branch_started_at)
       if climax_race_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5104,10 +5323,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if climax_race_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_climax_race_result", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       post_race_watch_concert_result = _handle_trackblazer_post_race_watch_concert_screen(state_obj, action)
+      _record_popup_branch("post_race_watch_concert", post_race_watch_concert_result, _time_mod.time() - branch_started_at)
       if post_race_watch_concert_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5120,10 +5342,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if post_race_watch_concert_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_post_race_watch_concert", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       inspiration_go_result = _handle_trackblazer_inspiration_go_screen(state_obj, action)
+      _record_popup_branch("inspiration_go", inspiration_go_result, _time_mod.time() - branch_started_at)
       if inspiration_go_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5136,10 +5361,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if inspiration_go_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_inspiration_go", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       goal_complete_result = _handle_trackblazer_goal_complete_screen(state_obj, action)
+      _record_popup_branch("goal_complete", goal_complete_result, _time_mod.time() - branch_started_at)
       if goal_complete_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5152,10 +5380,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if goal_complete_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_goal_complete", kind="followup_wait")
           continue
 
+      branch_started_at = _time_mod.time()
       insufficient_goal_pts_result = _handle_trackblazer_insufficient_goal_race_result_points_popup(state_obj, action)
+      _record_popup_branch("insufficient_goal_pts", insufficient_goal_pts_result, _time_mod.time() - branch_started_at)
       if insufficient_goal_pts_result.get("detected"):
         _update_post_action_resolution_snapshot(
           state_obj,
@@ -5172,11 +5403,25 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if insufficient_goal_pts_result.get("handled"):
           idle_loops = 0
-          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+          wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+          _record_post_action_wait(wait_result, label="after_insufficient_goal_points", kind="followup_wait")
           continue
 
+    generic_started_at = _time_mod.time()
     generic_step = _generic_post_action_return_to_lobby_step()
+    generic_duration = _time_mod.time() - generic_started_at
     if generic_step:
+      metrics["timing_generic_recovery"] = round(metrics.get("timing_generic_recovery", 0.0) + generic_duration, 4)
+      metrics["generic_recovery_count"] = int(metrics.get("generic_recovery_count", 0) or 0) + 1
+      metrics["last_popup_at"] = _time_mod.time()
+      _append_post_action_timing_entry(
+        metrics,
+        "generic_recovery",
+        str(generic_step),
+        duration=generic_duration,
+        detail="clicked",
+      )
+      _sync_post_action_timing()
       _update_post_action_resolution_snapshot(
         state_obj,
         action,
@@ -5186,7 +5431,8 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         reasoning_notes=f"clicked={generic_step}",
       )
       idle_loops = 0
-      _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+      wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+      _record_post_action_wait(wait_result, label=f"after_{generic_step}", kind="followup_wait")
       continue
 
     idle_loops += 1
@@ -5198,12 +5444,30 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         sub_phase=SUB_PHASE_RETURN_TO_LOBBY,
         popup_type="generic_recovery",
       )
+      recovery_started_at = _time_mod.time()
       device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
+      recovery_duration = _time_mod.time() - recovery_started_at
+      metrics["timing_generic_recovery"] = round(metrics.get("timing_generic_recovery", 0.0) + recovery_duration, 4)
+      metrics["safe_space_tap_count"] = int(metrics.get("safe_space_tap_count", 0) or 0) + 1
+      metrics["last_popup_at"] = _time_mod.time()
+      _append_post_action_timing_entry(
+        metrics,
+        "safe_space",
+        "safe_space_tap",
+        duration=recovery_duration,
+      )
+      _sync_post_action_timing()
       idle_loops = 0
-      _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+      wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
+      _record_post_action_wait(wait_result, label="after_safe_space_tap", kind="followup_wait")
       continue
 
+    sleep_started_at = _time_mod.time()
     sleep(0.5)
+    sleep_duration = _time_mod.time() - sleep_started_at
+    metrics["timing_idle_sleep"] = round(metrics.get("timing_idle_sleep", 0.0) + sleep_duration, 4)
+    metrics["idle_sleep_count"] = int(metrics.get("idle_sleep_count", 0) or 0) + 1
+    _sync_post_action_timing()
 
   warning(f"[POST_ACTION] Timed out resolving post-action screens after {action_name}; returning control to generic lobby scan.")
   _update_post_action_resolution_snapshot(
@@ -5214,7 +5478,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
     popup_type="generic_timeout_fallback",
     status="warning",
   )
-  bot.end_post_action_resolution(outcome="timed_out_fallback", status="warning")
+  metrics["timing_total"] = _post_action_timing_elapsed(metrics)
+  _append_post_action_timing_entry(metrics, "timeout", "timed_out_fallback", detail=f"loops={metrics.get('loop_count')}")
+  bot.end_post_action_resolution(
+    outcome="timed_out_fallback",
+    status="warning",
+    **_post_action_timing_runtime_payload(metrics),
+  )
   return True
 
 
@@ -6519,10 +6789,28 @@ def run_action_with_review(state_obj, action, review_message, pre_run_hook=None,
     return "failed"
   with _timed_turn_step("Post-action resolution", "wait", key="post_action_resolution") as step:
     post_action_result = _resolve_post_action_resolution(state_obj, action)
+    post_action_timing = bot.get_post_action_resolution_state()
     step["detail"] = _turn_metric_detail(
       f"action={_turn_metric_action_label(action)}",
       f"resolved={'yes' if post_action_result else 'no'}",
     )
+    step["data"] = {
+      "timing_total": post_action_timing.get("timing_total"),
+      "timing_event_choice": post_action_timing.get("timing_event_choice"),
+      "timing_lobby_detect": post_action_timing.get("timing_lobby_detect"),
+      "timing_popup_handlers": post_action_timing.get("timing_popup_handlers"),
+      "timing_followup_wait": post_action_timing.get("timing_followup_wait"),
+      "timing_generic_recovery": post_action_timing.get("timing_generic_recovery"),
+      "timing_idle_sleep": post_action_timing.get("timing_idle_sleep"),
+      "timing_to_first_event_choice": post_action_timing.get("timing_to_first_event_choice"),
+      "timing_to_stable_lobby": post_action_timing.get("timing_to_stable_lobby"),
+      "timing_from_last_event_to_lobby": post_action_timing.get("timing_from_last_event_to_lobby"),
+      "timing_from_last_popup_to_lobby": post_action_timing.get("timing_from_last_popup_to_lobby"),
+      "event_choice_count": post_action_timing.get("event_choice_count"),
+      "handled_popup_count": post_action_timing.get("handled_popup_count"),
+      "loop_count": post_action_timing.get("loop_count"),
+      "outcome": post_action_timing.get("outcome"),
+    }
   if not post_action_result:
     update_operator_snapshot(
       state_obj,

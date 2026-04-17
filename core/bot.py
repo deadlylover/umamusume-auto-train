@@ -78,6 +78,8 @@ trackblazer_allow_buff_override = False  # allow 60% megaphone to override activ
 skill_dry_run_enabled = False
 skill_auto_buy_skill_enabled = None
 post_action_resolution = default_post_action_resolution_state()
+post_action_resolution_history = []
+POST_ACTION_RESOLUTION_HISTORY_MAX = 2
 turn_trace_lock = threading.Lock()
 turn_trace_path = ""
 turn_trace_session_started = False
@@ -672,7 +674,8 @@ def get_runtime_state():
       "skill_dry_run_enabled": not get_skill_auto_buy_enabled(),
       "skill_auto_buy_skill_enabled": get_skill_auto_buy_enabled(),
       "is_bot_running": is_bot_running,
-      "post_action_resolution": dict(post_action_resolution or {}),
+      "post_action_resolution": copy.deepcopy(post_action_resolution or {}),
+      "post_action_resolution_history": copy.deepcopy(post_action_resolution_history or []),
       "backend_state": get_backend_state(),
       "turn_metrics": {
         "current": _clone_turn_metrics(current_turn_metrics),
@@ -1013,6 +1016,7 @@ def get_skill_dry_run_enabled():
 
 def begin_post_action_resolution(source_action="", reason="", sub_phase=SUB_PHASE_IDLE):
   global post_action_resolution, runtime_updated_at
+  now = time.time()
   with runtime_lock:
     post_action_resolution = default_post_action_resolution_state()
     post_action_resolution.update({
@@ -1022,8 +1026,12 @@ def begin_post_action_resolution(source_action="", reason="", sub_phase=SUB_PHAS
       "sub_phase": str(sub_phase or SUB_PHASE_IDLE),
       "status": "active",
       "outcome": "",
+      "started_at": round(now, 4),
+      "updated_at": round(now, 4),
+      "completed_at": None,
+      "archived": False,
     })
-    runtime_updated_at = time.time()
+    runtime_updated_at = now
     push_debug_history({
       "event": "post_action_resolution",
       "asset": source_action or "unknown_action",
@@ -1041,17 +1049,19 @@ def update_post_action_resolution(**changes):
       post_action_resolution = default_post_action_resolution_state()
     changed = {}
     for key, value in (changes or {}).items():
-      if key == "deferred_work" and value is not None:
-        new_value = list(value)
-      elif value is not None:
-        new_value = value
-      else:
+      if value is None:
         continue
+      if isinstance(value, (dict, list)):
+        new_value = copy.deepcopy(value)
+      else:
+        new_value = value
       previous = post_action_resolution.get(key)
       if previous != new_value:
         changed[key] = {"before": previous, "after": new_value}
         post_action_resolution[key] = new_value
-    runtime_updated_at = time.time()
+    now = time.time()
+    post_action_resolution["updated_at"] = round(now, 4)
+    runtime_updated_at = now
     if changed:
       push_debug_history({
         "event": "post_action_resolution",
@@ -1063,8 +1073,95 @@ def update_post_action_resolution(**changes):
       })
 
 
-def end_post_action_resolution(outcome="", status="completed"):
-  update_post_action_resolution(active=False, outcome=str(outcome or ""), status=str(status or "completed"))
+def _archive_post_action_resolution_unlocked():
+  global post_action_resolution_history
+  if not isinstance(post_action_resolution, dict):
+    return
+  if post_action_resolution.get("archived"):
+    return
+  if not (
+    post_action_resolution.get("source_action")
+    or post_action_resolution.get("reason")
+    or post_action_resolution.get("outcome")
+    or post_action_resolution.get("timing_total") is not None
+  ):
+    return
+  archived_entry = copy.deepcopy(post_action_resolution)
+  archived_entry["archived"] = True
+  post_action_resolution["archived"] = True
+  post_action_resolution_history.insert(0, archived_entry)
+  if len(post_action_resolution_history) > POST_ACTION_RESOLUTION_HISTORY_MAX:
+    post_action_resolution_history = post_action_resolution_history[:POST_ACTION_RESOLUTION_HISTORY_MAX]
+
+
+def set_post_action_resolution_metrics(metrics=None, timeline_entry=None):
+  global post_action_resolution, runtime_updated_at
+  with runtime_lock:
+    if not isinstance(post_action_resolution, dict):
+      post_action_resolution = default_post_action_resolution_state()
+    changed = False
+    if isinstance(metrics, dict):
+      for key, value in metrics.items():
+        if value is None:
+          continue
+        new_value = copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+        if post_action_resolution.get(key) != new_value:
+          post_action_resolution[key] = new_value
+          changed = True
+    if isinstance(timeline_entry, dict):
+      timeline = list(post_action_resolution.get("timeline_entries") or [])
+      timeline.append(copy.deepcopy(timeline_entry))
+      if len(timeline) > 20:
+        timeline = timeline[-20:]
+      post_action_resolution["timeline_entries"] = timeline
+      changed = True
+    if changed:
+      now = time.time()
+      post_action_resolution["updated_at"] = round(now, 4)
+      runtime_updated_at = now
+
+
+def end_post_action_resolution(outcome="", status="completed", **changes):
+  global post_action_resolution, runtime_updated_at
+  with runtime_lock:
+    if not isinstance(post_action_resolution, dict):
+      post_action_resolution = default_post_action_resolution_state()
+    now = time.time()
+    changed_fields = {}
+    final_changes = {
+      "active": False,
+      "outcome": str(outcome or ""),
+      "status": str(status or "completed"),
+      "completed_at": round(now, 4),
+    }
+    for key, value in (changes or {}).items():
+      if value is None:
+        continue
+      final_changes[key] = copy.deepcopy(value) if isinstance(value, (dict, list)) else value
+    if final_changes.get("timing_total") is None:
+      started_at = post_action_resolution.get("started_at")
+      if started_at is not None:
+        try:
+          final_changes["timing_total"] = round(max(0.0, now - float(started_at)), 4)
+        except (TypeError, ValueError):
+          pass
+    for key, new_value in final_changes.items():
+      previous = post_action_resolution.get(key)
+      if previous != new_value:
+        changed_fields[key] = {"before": previous, "after": new_value}
+        post_action_resolution[key] = new_value
+    post_action_resolution["updated_at"] = round(now, 4)
+    runtime_updated_at = now
+    if changed_fields:
+      push_debug_history({
+        "event": "post_action_resolution",
+        "asset": post_action_resolution.get("source_action") or "unknown_action",
+        "result": str(post_action_resolution.get("status") or "updated"),
+        "context": "runtime_flow",
+        "changes": changed_fields,
+        "note": ",".join(changed_fields.keys()),
+      })
+    _archive_post_action_resolution_unlocked()
 
 
 def clear_post_action_resolution():
@@ -1085,7 +1182,12 @@ def clear_post_action_resolution():
 
 def get_post_action_resolution_state():
   with runtime_lock:
-    return dict(post_action_resolution or {})
+    return copy.deepcopy(post_action_resolution or {})
+
+
+def get_post_action_resolution_history():
+  with runtime_lock:
+    return copy.deepcopy(post_action_resolution_history or [])
 
 
 def set_control_backend_state(

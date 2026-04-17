@@ -998,6 +998,9 @@ class OperatorConsole:
     planner_text = self._format_planner_timing(snapshot)
     if planner_text:
       sections.append(planner_text)
+    post_action_text = self._format_post_action_timing(runtime_state)
+    if post_action_text:
+      sections.append(post_action_text)
     flow_text = self._format_flow_timing(snapshot)
     if flow_text and flow_text != "No timing data":
       sections.append(flow_text)
@@ -1049,6 +1052,142 @@ class OperatorConsole:
     if sections:
       return "\n\n".join(sections)
     return "No timing data"
+
+  def _format_post_action_timing(self, runtime_state):
+    runtime_state = runtime_state or {}
+    current = runtime_state.get("post_action_resolution") or {}
+    history = list(runtime_state.get("post_action_resolution_history") or [])
+    sections = []
+    seen_entries = set()
+
+    if self._post_action_section_has_data(current):
+      title = "Post-Action Resolution (Live)" if current.get("active") else "Post-Action Resolution (Latest)"
+      section = self._format_post_action_timing_section(title, current)
+      if section:
+        sections.append(section)
+        seen_entries.add(self._post_action_history_key(current))
+
+    for index, entry in enumerate(history[:2], start=1):
+      history_key = self._post_action_history_key(entry)
+      if history_key in seen_entries:
+        continue
+      section = self._format_post_action_timing_section(f"Post-Action Resolution (Recent {index})", entry)
+      if section:
+        sections.append(section)
+        seen_entries.add(history_key)
+
+    return "\n\n".join(sections)
+
+  def _post_action_section_has_data(self, payload):
+    if not isinstance(payload, dict) or not payload:
+      return False
+    return bool(
+      payload.get("source_action")
+      or payload.get("outcome")
+      or payload.get("timing_total") is not None
+      or payload.get("timeline_entries")
+    )
+
+  def _post_action_history_key(self, payload):
+    if not isinstance(payload, dict):
+      return ()
+    return (
+      payload.get("turn_label"),
+      payload.get("source_action"),
+      payload.get("started_at"),
+      payload.get("completed_at"),
+      payload.get("outcome"),
+    )
+
+  def _format_post_action_timing_section(self, title, payload):
+    if not self._post_action_section_has_data(payload):
+      return ""
+    lines = [f"=== {title} ==="]
+    turn_label = payload.get("turn_label") or ""
+    if turn_label:
+      lines.append(f"  turn          {turn_label}")
+    action_name = payload.get("source_action") or ""
+    if action_name:
+      lines.append(f"  action        {action_name}")
+    status = payload.get("status") or ""
+    outcome = payload.get("outcome") or ""
+    sub_phase = payload.get("sub_phase") or ""
+    status_parts = [part for part in (status, outcome, sub_phase) if part]
+    if status_parts:
+      lines.append(f"  status        {' | '.join(status_parts)}")
+    started_text = self._format_transition_timestamp(payload.get("started_at"))
+    completed_text = self._format_transition_timestamp(payload.get("completed_at"))
+    if started_text or completed_text:
+      lines.append(f"  window        {started_text or '-'} -> {completed_text or '-'}")
+
+    for key, label in (
+      ("timing_total", "total"),
+      ("timing_to_first_event_choice", "to_first_event"),
+      ("timing_to_stable_lobby", "to_lobby"),
+      ("timing_from_last_event_to_lobby", "event_to_lobby"),
+      ("timing_from_last_popup_to_lobby", "popup_to_lobby"),
+      ("timing_event_choice", "event_choice"),
+      ("timing_lobby_detect", "lobby_detect"),
+      ("timing_popup_handlers", "popup_handlers"),
+      ("timing_followup_wait", "followup_wait"),
+      ("timing_generic_recovery", "generic_recovery"),
+      ("timing_idle_sleep", "idle_sleep"),
+    ):
+      value = payload.get(key)
+      if value is None:
+        continue
+      lines.append(f"  {label:13s} {self._format_timing_value(value)}")
+
+    counts = []
+    for key, label in (
+      ("loop_count", "loops"),
+      ("event_choice_count", "events"),
+      ("handled_popup_count", "popups"),
+      ("generic_recovery_count", "generic"),
+      ("safe_space_tap_count", "safe_space"),
+      ("followup_wait_count", "waits"),
+      ("idle_sleep_count", "idle_sleeps"),
+    ):
+      value = payload.get(key)
+      if value in (None, 0):
+        continue
+      counts.append(f"{label}={value}")
+    if counts:
+      lines.append(f"  counts        {' | '.join(counts)}")
+
+    anchor_counts = payload.get("last_anchor_counts") or {}
+    if anchor_counts:
+      anchor_text = ", ".join(f"{key}={value}" for key, value in anchor_counts.items() if value)
+      if anchor_text:
+        lines.append(f"  anchors       {anchor_text}")
+
+    timeline_entries = list(payload.get("timeline_entries") or [])
+    if timeline_entries:
+      lines.append("")
+      lines.append("Timeline:")
+      for index, entry in enumerate(timeline_entries[-10:], start=max(1, len(timeline_entries) - 9)):
+        lines.append(self._format_post_action_timeline_entry(index, entry))
+
+    return "\n".join(lines)
+
+  def _format_post_action_timeline_entry(self, index, entry):
+    if not isinstance(entry, dict):
+      return f"  {index}. {entry}"
+    label = entry.get("label") or entry.get("kind") or f"step_{index}"
+    at_text = ""
+    if entry.get("at") is not None:
+      at_text = f"t+{float(entry.get('at')):.3f}s"
+    duration_text = ""
+    if entry.get("duration") is not None:
+      duration_text = f"{float(entry.get('duration')):.3f}s"
+    prefix = f"  {index}. {label}"
+    parts = [part for part in (at_text, duration_text) if part]
+    if parts:
+      prefix += f" [{' | '.join(parts)}]"
+    detail = entry.get("detail") or ""
+    if detail:
+      prefix += f"  {detail}"
+    return prefix
 
   def _format_planner_timing(self, snapshot):
     state_summary = snapshot.get("state_summary") or {}
@@ -1257,6 +1396,16 @@ class OperatorConsole:
     if not isinstance(flow, dict):
       return []
     preferred = [
+      "timing_to_first_event_choice",
+      "timing_to_stable_lobby",
+      "timing_from_last_event_to_lobby",
+      "timing_from_last_popup_to_lobby",
+      "timing_event_choice",
+      "timing_lobby_detect",
+      "timing_popup_handlers",
+      "timing_followup_wait",
+      "timing_generic_recovery",
+      "timing_idle_sleep",
       "timing_open",
       "timing_scan",
       "timing_increments",
