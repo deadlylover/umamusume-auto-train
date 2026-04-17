@@ -75,6 +75,59 @@ PHASE_CONTROL_CALLBACKS = {
   "checking_skill_purchase": "check_skill_purchase",
 }
 
+_SKILL_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "skills.json"
+
+
+def _load_skill_catalog_entries():
+  try:
+    with _SKILL_DATA_PATH.open("r", encoding="utf-8") as file:
+      raw_entries = json.load(file)
+  except Exception as exc:
+    debug(f"Unable to load skill catalog from {_SKILL_DATA_PATH}: {exc}")
+    return []
+
+  if not isinstance(raw_entries, list):
+    debug(f"Skill catalog payload is not a list: {_SKILL_DATA_PATH}")
+    return []
+
+  entries = []
+  seen_names = set()
+  for raw_entry in raw_entries:
+    if not isinstance(raw_entry, dict):
+      continue
+    name = str(raw_entry.get("name") or "").strip()
+    if not name or name in seen_names:
+      continue
+    seen_names.add(name)
+    entries.append({
+      "name": name,
+      "description": str(raw_entry.get("description") or "").strip(),
+    })
+  return entries
+
+
+def _filter_skill_catalog_entries(entries, search_text="", selected_skills=None):
+  query = str(search_text or "").strip().lower()
+  selected_names = {
+    str(name).strip()
+    for name in (selected_skills or [])
+    if str(name).strip()
+  }
+
+  filtered = []
+  for entry in entries or []:
+    name = str(entry.get("name") or "").strip()
+    if not name or name in selected_names:
+      continue
+    description = str(entry.get("description") or "").strip()
+    if query and query not in name.lower() and query not in description.lower():
+      continue
+    filtered.append({
+      "name": name,
+      "description": description,
+    })
+  return filtered
+
 
 class OperatorConsole:
   DEFAULT_GEOMETRY = "960x760+40+40"
@@ -120,6 +173,15 @@ class OperatorConsole:
     self._race_selector_year_bodies = {}
     self._race_selector_date_window = None
     self._race_selector_date_context = None
+    self._skill_selector_window = None
+    self._skill_selector_search_var = None
+    self._skill_selector_status_var = None
+    self._skill_selector_summary_var = None
+    self._skill_selector_available_count_var = None
+    self._skill_selector_selected_count_var = None
+    self._skill_selector_available_body = None
+    self._skill_selector_selected_body = None
+    self._skill_selector_catalog = []
     self._details_notebook = None
     self._planned_actions_text = None
     self._timing_text = None
@@ -378,6 +440,15 @@ class OperatorConsole:
     tk.Label(
       secondary_controls,
       textvariable=self._race_selector_status_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(6, 0))
+    tk.Button(secondary_controls, text="Skills", command=self._open_skill_selector_window).pack(side=tk.LEFT, padx=(12, 0))
+    self._skill_selector_status_var = tk.StringVar(value=self._skill_selector_status_text())
+    tk.Label(
+      secondary_controls,
+      textvariable=self._skill_selector_status_var,
       fg="#9aa4ad",
       bg="#101418",
       anchor="w",
@@ -869,6 +940,8 @@ class OperatorConsole:
       self._skill_auto_buy_var.set(bool(runtime_state.get("skill_auto_buy_skill_enabled", runtime_state.get("skill_dry_run_enabled"))))
     if self._race_selector_status_var is not None:
       self._race_selector_status_var.set(self._race_selector_status_text())
+    if self._skill_selector_status_var is not None:
+      self._skill_selector_status_var.set(self._skill_selector_status_text())
     self._message_value.set(runtime_state.get("message") or "")
     self._error_value.set(runtime_state.get("error") or "")
     is_bot_running = bool(runtime_state.get("is_bot_running"))
@@ -2053,6 +2126,73 @@ class OperatorConsole:
     source = "selector" if selector_enabled else "legacy"
     return f"{source}: {summary['selected_count']} sel / {summary['blocked_count']} blocked"
 
+  def _current_skill_selection(self):
+    selected = []
+    seen = set()
+    for raw_name in getattr(config, "SKILL_LIST", []) or []:
+      name = str(raw_name or "").strip()
+      if not name or name in seen:
+        continue
+      seen.add(name)
+      selected.append(name)
+    return selected
+
+  def _skill_selector_status_text(self):
+    selected_count = len(self._current_skill_selection())
+    return f"{selected_count} selected"
+
+  def _set_selected_skills(self, skill_list, message):
+    normalized = []
+    seen = set()
+    for raw_name in skill_list or []:
+      name = str(raw_name or "").strip()
+      if not name or name in seen:
+        continue
+      seen.add(name)
+      normalized.append(name)
+
+    if not self._persist_config_value("skill.skill_list", normalized):
+      self._message_value.set("Failed to save skill list.")
+      return False
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Skill list saved, but reload failed: {exc}")
+      self.publish()
+      return False
+
+    if self._skill_selector_status_var is not None:
+      self._skill_selector_status_var.set(self._skill_selector_status_text())
+    if self._skill_selector_window is not None and self._skill_selector_window.winfo_exists():
+      self._refresh_skill_selector_window()
+    self._message_value.set(message)
+    self.publish()
+    return True
+
+  def _add_selected_skill(self, skill_name):
+    selected = self._current_skill_selection()
+    normalized_name = str(skill_name or "").strip()
+    if not normalized_name:
+      return
+    if normalized_name in selected:
+      self._message_value.set(f"{normalized_name} is already selected.")
+      return
+    self._set_selected_skills(
+      [normalized_name, *selected],
+      f"Added {normalized_name} to skill targets.",
+    )
+
+  def _remove_selected_skill(self, skill_name):
+    normalized_name = str(skill_name or "").strip()
+    if not normalized_name:
+      return
+    selected = [name for name in self._current_skill_selection() if name != normalized_name]
+    self._set_selected_skills(
+      selected,
+      f"Removed {normalized_name} from skill targets.",
+    )
+
   def _set_execution_intent(self):
     if self._execution_intent_var is None:
       return
@@ -2303,6 +2443,15 @@ class OperatorConsole:
     self._race_selector_date_window = None
     self._race_selector_date_context = None
 
+  def _clear_skill_selector_window_state(self):
+    self._skill_selector_window = None
+    self._skill_selector_search_var = None
+    self._skill_selector_summary_var = None
+    self._skill_selector_available_count_var = None
+    self._skill_selector_selected_count_var = None
+    self._skill_selector_available_body = None
+    self._skill_selector_selected_body = None
+
   def _open_race_selector_window(self):
     if self._root is None:
       return
@@ -2388,6 +2537,315 @@ class OperatorConsole:
       lambda event, target=window: self._clear_race_selector_window_state() if event.widget is target else None,
     )
     self._refresh_race_selector_window()
+
+  def _open_skill_selector_window(self):
+    if self._root is None:
+      return
+    if self._skill_selector_window is not None and self._skill_selector_window.winfo_exists():
+      self._skill_selector_catalog = _load_skill_catalog_entries()
+      self._refresh_skill_selector_window()
+      self._skill_selector_window.deiconify()
+      self._skill_selector_window.lift()
+      self._skill_selector_window.focus_force()
+      return
+
+    self._skill_selector_catalog = _load_skill_catalog_entries()
+    if not self._skill_selector_catalog:
+      self._message_value.set("Skill catalog is empty or failed to load from data/skills.json.")
+
+    self._skill_selector_search_var = tk.StringVar(value="")
+    self._skill_selector_search_var.trace_add("write", lambda *_args: self._refresh_skill_selector_window())
+
+    window = tk.Toplevel(self._root)
+    window.title("Skill Selector")
+    window.configure(bg="#101418")
+    window.geometry("1100x720")
+    window.minsize(860, 520)
+    window.transient(self._root)
+    window.bind("<Escape>", lambda _event, target=window: target.destroy())
+
+    header = tk.Frame(window, bg="#101418", padx=14, pady=12)
+    header.pack(fill=tk.X)
+    header.columnconfigure(0, weight=1)
+    header.columnconfigure(1, weight=0)
+
+    title_block = tk.Frame(header, bg="#101418")
+    title_block.grid(row=0, column=0, sticky="w")
+    tk.Label(
+      title_block,
+      text="Skill Selector",
+      fg="white",
+      bg="#101418",
+      font=("Helvetica", 16, "bold"),
+      anchor="w",
+    ).pack(anchor="w")
+    self._skill_selector_summary_var = tk.StringVar(value="")
+    tk.Label(
+      title_block,
+      textvariable=self._skill_selector_summary_var,
+      fg="#8bd5ca",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+    ).pack(anchor="w", pady=(2, 0))
+    tk.Label(
+      title_block,
+      text="Uses the same skill catalog as the web UI from data/skills.json. Click a skill to add it, or remove it from the selected list on the right.",
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+      justify="left",
+      wraplength=760,
+    ).pack(anchor="w", pady=(6, 0))
+
+    tk.Button(header, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
+
+    search_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 12))
+    search_row.pack(fill=tk.X)
+    tk.Label(
+      search_row,
+      text="Search",
+      fg="white",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    search_entry = tk.Entry(
+      search_row,
+      textvariable=self._skill_selector_search_var,
+      bg="#192028",
+      fg="white",
+      insertbackground="white",
+      relief=tk.FLAT,
+      highlightthickness=1,
+      highlightbackground="#2d333b",
+      highlightcolor="#1f6feb",
+    )
+    search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    content = tk.Frame(window, bg="#101418", padx=12, pady=(0, 12))
+    content.pack(fill=tk.BOTH, expand=True)
+    content.columnconfigure(0, weight=3)
+    content.columnconfigure(1, weight=2)
+    content.rowconfigure(0, weight=1)
+
+    available_panel = tk.LabelFrame(
+      content,
+      text="Available Skills",
+      fg="white",
+      bg="#101418",
+      padx=8,
+      pady=8,
+    )
+    available_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    available_panel.rowconfigure(1, weight=1)
+    available_panel.columnconfigure(0, weight=1)
+    available_header = tk.Frame(available_panel, bg="#101418")
+    available_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    available_header.columnconfigure(0, weight=1)
+    self._skill_selector_available_count_var = tk.StringVar(value="")
+    tk.Label(
+      available_header,
+      textvariable=self._skill_selector_available_count_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).grid(row=0, column=0, sticky="w")
+
+    available_canvas_frame = tk.Frame(available_panel, bg="#101418")
+    available_canvas_frame.grid(row=1, column=0, sticky="nsew")
+    available_canvas_frame.rowconfigure(0, weight=1)
+    available_canvas_frame.columnconfigure(0, weight=1)
+    available_canvas = tk.Canvas(available_canvas_frame, bg="#101418", highlightthickness=0)
+    available_scrollbar = tk.Scrollbar(available_canvas_frame, orient="vertical", command=available_canvas.yview)
+    self._skill_selector_available_body = tk.Frame(available_canvas, bg="#101418")
+    available_window_id = available_canvas.create_window((0, 0), window=self._skill_selector_available_body, anchor="nw")
+    available_canvas.configure(yscrollcommand=available_scrollbar.set)
+    available_canvas.grid(row=0, column=0, sticky="nsew")
+    available_scrollbar.grid(row=0, column=1, sticky="ns")
+    self._skill_selector_available_body.bind(
+      "<Configure>",
+      lambda _event, canvas=available_canvas: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    available_canvas.bind(
+      "<Configure>",
+      lambda event, canvas=available_canvas, window_id=available_window_id: canvas.itemconfigure(window_id, width=event.width),
+    )
+
+    selected_panel = tk.LabelFrame(
+      content,
+      text="Selected Skills",
+      fg="white",
+      bg="#101418",
+      padx=8,
+      pady=8,
+    )
+    selected_panel.grid(row=0, column=1, sticky="nsew")
+    selected_panel.rowconfigure(1, weight=1)
+    selected_panel.columnconfigure(0, weight=1)
+    selected_header = tk.Frame(selected_panel, bg="#101418")
+    selected_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    selected_header.columnconfigure(0, weight=1)
+    self._skill_selector_selected_count_var = tk.StringVar(value="")
+    tk.Label(
+      selected_header,
+      textvariable=self._skill_selector_selected_count_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).grid(row=0, column=0, sticky="w")
+
+    selected_canvas_frame = tk.Frame(selected_panel, bg="#101418")
+    selected_canvas_frame.grid(row=1, column=0, sticky="nsew")
+    selected_canvas_frame.rowconfigure(0, weight=1)
+    selected_canvas_frame.columnconfigure(0, weight=1)
+    selected_canvas = tk.Canvas(selected_canvas_frame, bg="#101418", highlightthickness=0)
+    selected_scrollbar = tk.Scrollbar(selected_canvas_frame, orient="vertical", command=selected_canvas.yview)
+    self._skill_selector_selected_body = tk.Frame(selected_canvas, bg="#101418")
+    selected_window_id = selected_canvas.create_window((0, 0), window=self._skill_selector_selected_body, anchor="nw")
+    selected_canvas.configure(yscrollcommand=selected_scrollbar.set)
+    selected_canvas.grid(row=0, column=0, sticky="nsew")
+    selected_scrollbar.grid(row=0, column=1, sticky="ns")
+    self._skill_selector_selected_body.bind(
+      "<Configure>",
+      lambda _event, canvas=selected_canvas: canvas.configure(scrollregion=canvas.bbox("all")),
+    )
+    selected_canvas.bind(
+      "<Configure>",
+      lambda event, canvas=selected_canvas, window_id=selected_window_id: canvas.itemconfigure(window_id, width=event.width),
+    )
+
+    self._skill_selector_window = window
+    window.bind(
+      "<Destroy>",
+      lambda event, target=window: self._clear_skill_selector_window_state() if event.widget is target else None,
+    )
+    self._refresh_skill_selector_window()
+    search_entry.focus_set()
+
+  def _refresh_skill_selector_window(self):
+    if self._skill_selector_window is None or not self._skill_selector_window.winfo_exists():
+      return
+
+    selected_skills = self._current_skill_selection()
+    search_text = self._skill_selector_search_var.get() if self._skill_selector_search_var is not None else ""
+    filtered_entries = _filter_skill_catalog_entries(
+      self._skill_selector_catalog,
+      search_text=search_text,
+      selected_skills=selected_skills,
+    )
+
+    if self._skill_selector_summary_var is not None:
+      self._skill_selector_summary_var.set(
+        f"{len(selected_skills)} selected • {len(filtered_entries)} visible result(s) • source: data/skills.json"
+      )
+    if self._skill_selector_available_count_var is not None:
+      self._skill_selector_available_count_var.set(f"{len(filtered_entries)} matching skill(s)")
+    if self._skill_selector_selected_count_var is not None:
+      self._skill_selector_selected_count_var.set(f"{len(selected_skills)} selected skill(s)")
+
+    if self._skill_selector_available_body is not None:
+      for child in self._skill_selector_available_body.winfo_children():
+        child.destroy()
+      if filtered_entries:
+        for entry in filtered_entries:
+          skill_name = entry["name"]
+          description = entry.get("description") or ""
+          card = tk.Frame(
+            self._skill_selector_available_body,
+            bg="#161d24",
+            highlightbackground="#2d333b",
+            highlightthickness=1,
+            padx=10,
+            pady=10,
+            cursor="hand2",
+          )
+          card.pack(fill=tk.X, pady=(0, 8))
+          card.columnconfigure(0, weight=1)
+
+          title = tk.Label(
+            card,
+            text=skill_name,
+            fg="white",
+            bg="#161d24",
+            anchor="w",
+            justify="left",
+            font=("Helvetica", 11, "bold"),
+            cursor="hand2",
+          )
+          title.grid(row=0, column=0, sticky="w")
+          add_button = tk.Button(
+            card,
+            text="Add",
+            command=lambda name=skill_name: self._add_selected_skill(name),
+          )
+          add_button.grid(row=0, column=1, sticky="ne", padx=(12, 0))
+          description_label = tk.Label(
+            card,
+            text=description or "No description available.",
+            fg="#9aa4ad",
+            bg="#161d24",
+            anchor="w",
+            justify="left",
+            wraplength=580,
+            cursor="hand2",
+          )
+          description_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+          for widget in (card, title, description_label):
+            widget.bind("<Button-1>", lambda _event, name=skill_name: self._add_selected_skill(name))
+      else:
+        empty_text = "No skills match the current search."
+        if not self._skill_selector_catalog:
+          empty_text = "Skill catalog is empty."
+        elif selected_skills and not str(search_text or "").strip():
+          empty_text = "All catalog skills are already selected."
+        tk.Label(
+          self._skill_selector_available_body,
+          text=empty_text,
+          fg="#9aa4ad",
+          bg="#101418",
+          anchor="w",
+          justify="left",
+          wraplength=620,
+        ).pack(fill=tk.X, pady=(4, 0))
+
+    if self._skill_selector_selected_body is not None:
+      for child in self._skill_selector_selected_body.winfo_children():
+        child.destroy()
+      if selected_skills:
+        for skill_name in selected_skills:
+          row = tk.Frame(
+            self._skill_selector_selected_body,
+            bg="#15283b",
+            highlightbackground="#3b82f6",
+            highlightthickness=1,
+            padx=10,
+            pady=8,
+          )
+          row.pack(fill=tk.X, pady=(0, 8))
+          row.columnconfigure(0, weight=1)
+          tk.Label(
+            row,
+            text=skill_name,
+            fg="white",
+            bg="#15283b",
+            anchor="w",
+            justify="left",
+            wraplength=250,
+          ).grid(row=0, column=0, sticky="w")
+          tk.Button(
+            row,
+            text="X",
+            width=3,
+            command=lambda name=skill_name: self._remove_selected_skill(name),
+          ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+      else:
+        tk.Label(
+          self._skill_selector_selected_body,
+          text="No skills selected yet.",
+          fg="#9aa4ad",
+          bg="#101418",
+          anchor="w",
+        ).pack(fill=tk.X, pady=(4, 0))
 
   def _refresh_race_selector_window(self):
     if self._race_selector_window is None or not self._race_selector_window.winfo_exists():

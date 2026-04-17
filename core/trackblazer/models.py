@@ -306,6 +306,75 @@ def _planner_comparison_line(snapshot_context):
   return "Planner Comparison: match" if comparison.get("match") else "Planner Comparison: DIVERGED (see notes)"
 
 
+def _planner_score_summary_line(snapshot_context):
+  snapshot_context = snapshot_context if isinstance(snapshot_context, dict) else {}
+  state_summary = snapshot_context.get("state_summary") or {}
+  planner_state = (
+    snapshot_context.get("trackblazer_planner_state")
+    or state_summary.get("trackblazer_planner_state")
+    or {}
+  )
+  turn_plan = dict((planner_state or {}).get("turn_plan") or {})
+  candidate_ranking = list(turn_plan.get("candidate_ranking") or [])
+  selected_candidate = dict(turn_plan.get("selected_candidate") or {})
+  if not candidate_ranking:
+    return ""
+
+  def _score(entry):
+    return _safe_float((entry or {}).get("priority_score"), float("-inf"))
+
+  def _find_exact(node_id):
+    return next(
+      (
+        dict(entry)
+        for entry in candidate_ranking
+        if str(entry.get("node_id") or "") == node_id
+        and _score(entry) != float("-inf")
+      ),
+      {},
+    )
+
+  def _find_best(prefix):
+    viable = [
+      dict(entry)
+      for entry in candidate_ranking
+      if str(entry.get("node_id") or "").startswith(prefix)
+      and _score(entry) != float("-inf")
+    ]
+    if not viable:
+      return {}
+    viable.sort(
+      key=lambda entry: (-_score(entry), str(entry.get("node_id") or "")),
+    )
+    return viable[0]
+
+  selected_node_id = str(selected_candidate.get("node_id") or "")
+  selected_score = _score(selected_candidate)
+  rest_entry = _find_exact("rest")
+  best_train_entry = _find_best("train:")
+  best_race_entry = _find_best("race:")
+
+  parts = []
+  if selected_node_id and selected_score != float("-inf"):
+    parts.append(f"selected {selected_node_id}={_format_number(selected_score)}")
+  if rest_entry:
+    parts.append(f"rest={_format_number(_score(rest_entry))}")
+  if best_train_entry:
+    parts.append(
+      f"best {best_train_entry.get('node_id')}={_format_number(_score(best_train_entry))}"
+    )
+  if best_race_entry:
+    parts.append(
+      f"best {best_race_entry.get('node_id')}={_format_number(_score(best_race_entry))}"
+    )
+  if selected_node_id == "rest" and rest_entry and best_train_entry:
+    gap = _score(rest_entry) - _score(best_train_entry)
+    parts.append(f"rest_gap_vs_train={_format_number(gap)}")
+  if not parts:
+    return ""
+  return f"Planner Scores: {' | '.join(parts)}"
+
+
 def _format_selected_action_line(selected_action):
   action_name = selected_action.get("func") or "-"
   if (
@@ -1083,6 +1152,9 @@ def _review_summary_lines(snapshot_context, planned_actions, include_prompt=Fals
   comparison_line = _planner_comparison_line(snapshot_context)
   if comparison_line:
     lines.append(comparison_line)
+  planner_score_line = _planner_score_summary_line(snapshot_context)
+  if planner_score_line:
+    lines.append(planner_score_line)
   lines.append(
     "State: "
     f"mood {state_summary.get('current_mood') or '-'}"
