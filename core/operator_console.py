@@ -76,6 +76,7 @@ PHASE_CONTROL_CALLBACKS = {
 }
 
 _SKILL_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "skills.json"
+_SKILL_CONFIG_UNSET = object()
 
 
 def _load_skill_catalog_entries():
@@ -179,6 +180,9 @@ class OperatorConsole:
     self._skill_selector_summary_var = None
     self._skill_selector_available_count_var = None
     self._skill_selector_selected_count_var = None
+    self._skill_preset_var = None
+    self._skill_preset_name_var = None
+    self._skill_preset_combo = None
     self._skill_selector_available_body = None
     self._skill_selector_selected_body = None
     self._skill_selector_catalog = []
@@ -2127,38 +2131,69 @@ class OperatorConsole:
     return f"{source}: {summary['selected_count']} sel / {summary['blocked_count']} blocked"
 
   def _current_skill_selection(self):
-    selected = []
-    seen = set()
-    for raw_name in getattr(config, "SKILL_LIST", []) or []:
-      name = str(raw_name or "").strip()
-      if not name or name in seen:
-        continue
-      seen.add(name)
-      selected.append(name)
-    return selected
+    return config.normalize_skill_list(getattr(config, "SKILL_LIST", []))
+
+  def _current_skill_presets(self):
+    return config.normalize_skill_presets(getattr(config, "SKILL_PRESETS", []))
+
+  def _active_skill_preset_name(self):
+    return str(getattr(config, "ACTIVE_SKILL_PRESET", "") or "").strip()
 
   def _skill_selector_status_text(self):
     selected_count = len(self._current_skill_selection())
+    active_preset = self._active_skill_preset_name()
+    if active_preset:
+      return f"{selected_count} selected • {active_preset}"
     return f"{selected_count} selected"
 
-  def _set_selected_skills(self, skill_list, message):
-    normalized = []
-    seen = set()
-    for raw_name in skill_list or []:
-      name = str(raw_name or "").strip()
-      if not name or name in seen:
-        continue
-      seen.add(name)
-      normalized.append(name)
+  def _persist_skill_config(
+    self,
+    message,
+    *,
+    skill_list=_SKILL_CONFIG_UNSET,
+    presets=_SKILL_CONFIG_UNSET,
+    active_preset=_SKILL_CONFIG_UNSET,
+  ):
+    try:
+      with open("config.json", "r", encoding="utf-8") as file:
+        config_data = json.load(file)
+    except Exception:
+      config_data = {}
 
-    if not self._persist_config_value("skill.skill_list", normalized):
-      self._message_value.set("Failed to save skill list.")
+    skill_config = config_data.setdefault("skill", {})
+    if not isinstance(skill_config, dict):
+      skill_config = {}
+      config_data["skill"] = skill_config
+
+    current_presets = config.normalize_skill_presets(skill_config.get("presets"))
+    next_presets = current_presets if presets is _SKILL_CONFIG_UNSET else config.normalize_skill_presets(presets)
+
+    if skill_list is not _SKILL_CONFIG_UNSET:
+      skill_config["skill_list"] = config.normalize_skill_list(skill_list)
+    if presets is not _SKILL_CONFIG_UNSET:
+      skill_config["presets"] = next_presets
+
+    if active_preset is _SKILL_CONFIG_UNSET:
+      next_active_preset = str(skill_config.get("active_preset", "") or "").strip()
+    else:
+      next_active_preset = str(active_preset or "").strip()
+    if next_active_preset not in {preset["name"] for preset in next_presets}:
+      next_active_preset = ""
+    skill_config["active_preset"] = next_active_preset
+
+    try:
+      with open("config.json", "w", encoding="utf-8") as file:
+        json.dump(config_data, file, indent=2)
+        file.write("\n")
+    except Exception as exc:
+      debug(f"Unable to persist skill config: {exc}")
+      self._message_value.set("Failed to save skill config.")
       return False
 
     try:
       config.reload_config(print_config=False)
     except Exception as exc:
-      self._message_value.set(f"Skill list saved, but reload failed: {exc}")
+      self._message_value.set(f"Skill config saved, but reload failed: {exc}")
       self.publish()
       return False
 
@@ -2169,6 +2204,13 @@ class OperatorConsole:
     self._message_value.set(message)
     self.publish()
     return True
+
+  def _set_selected_skills(self, skill_list, message, active_preset=""):
+    return self._persist_skill_config(
+      message,
+      skill_list=skill_list,
+      active_preset=active_preset,
+    )
 
   def _add_selected_skill(self, skill_name):
     selected = self._current_skill_selection()
@@ -2181,6 +2223,7 @@ class OperatorConsole:
     self._set_selected_skills(
       [normalized_name, *selected],
       f"Added {normalized_name} to skill targets.",
+      active_preset="",
     )
 
   def _remove_selected_skill(self, skill_name):
@@ -2191,7 +2234,137 @@ class OperatorConsole:
     self._set_selected_skills(
       selected,
       f"Removed {normalized_name} from skill targets.",
+      active_preset="",
     )
+
+  def _selected_skill_preset_name(self):
+    if self._skill_preset_var is None:
+      return ""
+    return str(self._skill_preset_var.get() or "").strip()
+
+  def _skill_preset_name_input(self):
+    if self._skill_preset_name_var is None:
+      return ""
+    return str(self._skill_preset_name_var.get() or "").strip()
+
+  def _select_skill_preset(self, preset_name="", sync_name_entry=False):
+    normalized_name = str(preset_name or "").strip()
+    preset_names = [preset["name"] for preset in self._current_skill_presets()]
+    if normalized_name not in preset_names:
+      normalized_name = ""
+    if self._skill_preset_var is not None:
+      self._skill_preset_var.set(normalized_name)
+    if sync_name_entry and self._skill_preset_name_var is not None:
+      self._skill_preset_name_var.set(normalized_name)
+
+  def _refresh_skill_preset_controls(self, preferred_name=None, sync_name_entry=False):
+    preset_names = [preset["name"] for preset in self._current_skill_presets()]
+    desired_name = str(preferred_name or "").strip()
+    current_name = self._selected_skill_preset_name()
+    active_name = self._active_skill_preset_name()
+
+    if desired_name not in preset_names:
+      if current_name in preset_names:
+        desired_name = current_name
+      elif active_name in preset_names:
+        desired_name = active_name
+      elif preset_names:
+        desired_name = preset_names[0]
+      else:
+        desired_name = ""
+
+    if self._skill_preset_combo is not None:
+      self._skill_preset_combo.configure(values=preset_names)
+    self._select_skill_preset(desired_name, sync_name_entry=sync_name_entry)
+
+  def _on_skill_preset_selected(self, _event=None):
+    self._select_skill_preset(self._selected_skill_preset_name(), sync_name_entry=True)
+
+  def _apply_skill_preset(self):
+    preset_name = self._selected_skill_preset_name()
+    presets = {preset["name"]: preset for preset in self._current_skill_presets()}
+    preset = presets.get(preset_name)
+    if preset is None:
+      self._message_value.set("Select a skill preset to apply.")
+      return
+    self._set_selected_skills(
+      preset.get("skill_list") or [],
+      f"Applied skill preset {preset_name}.",
+      active_preset=preset_name,
+    )
+    self._refresh_skill_preset_controls(preferred_name=preset_name, sync_name_entry=True)
+
+  def _save_new_skill_preset(self):
+    preset_name = self._skill_preset_name_input()
+    if not preset_name:
+      self._message_value.set("Enter a preset name first.")
+      return
+    presets = self._current_skill_presets()
+    if any(preset["name"] == preset_name for preset in presets):
+      self._message_value.set(f"Preset {preset_name} already exists. Use Update instead.")
+      return
+    presets.append({
+      "name": preset_name,
+      "skill_list": self._current_skill_selection(),
+    })
+    if self._persist_skill_config(
+      f"Saved skill preset {preset_name}.",
+      presets=presets,
+      active_preset=preset_name,
+    ):
+      self._refresh_skill_preset_controls(preferred_name=preset_name, sync_name_entry=True)
+
+  def _update_skill_preset(self):
+    selected_name = self._selected_skill_preset_name()
+    if not selected_name:
+      self._message_value.set("Select a skill preset to update.")
+      return
+    updated_name = self._skill_preset_name_input() or selected_name
+    presets = self._current_skill_presets()
+    if updated_name != selected_name and any(preset["name"] == updated_name for preset in presets):
+      self._message_value.set(f"Preset {updated_name} already exists.")
+      return
+    updated_presets = []
+    updated = False
+    for preset in presets:
+      if preset["name"] == selected_name:
+        updated_presets.append({
+          "name": updated_name,
+          "skill_list": self._current_skill_selection(),
+        })
+        updated = True
+      else:
+        updated_presets.append(preset)
+    if not updated:
+      self._message_value.set("Selected preset no longer exists.")
+      return
+    if self._persist_skill_config(
+      f"Updated skill preset {updated_name}.",
+      presets=updated_presets,
+      active_preset=updated_name,
+    ):
+      self._refresh_skill_preset_controls(preferred_name=updated_name, sync_name_entry=True)
+
+  def _delete_skill_preset(self):
+    selected_name = self._selected_skill_preset_name()
+    if not selected_name:
+      self._message_value.set("Select a skill preset to delete.")
+      return
+    presets = self._current_skill_presets()
+    updated_presets = [preset for preset in presets if preset["name"] != selected_name]
+    if len(updated_presets) == len(presets):
+      self._message_value.set("Selected preset no longer exists.")
+      return
+    next_active = self._active_skill_preset_name()
+    if next_active == selected_name:
+      next_active = ""
+    if self._persist_skill_config(
+      f"Deleted skill preset {selected_name}.",
+      presets=updated_presets,
+      active_preset=next_active,
+    ):
+      next_name = updated_presets[0]["name"] if updated_presets else ""
+      self._refresh_skill_preset_controls(preferred_name=next_name, sync_name_entry=True)
 
   def _set_execution_intent(self):
     if self._execution_intent_var is None:
@@ -2449,6 +2622,9 @@ class OperatorConsole:
     self._skill_selector_summary_var = None
     self._skill_selector_available_count_var = None
     self._skill_selector_selected_count_var = None
+    self._skill_preset_var = None
+    self._skill_preset_name_var = None
+    self._skill_preset_combo = None
     self._skill_selector_available_body = None
     self._skill_selector_selected_body = None
 
@@ -2555,6 +2731,8 @@ class OperatorConsole:
 
     self._skill_selector_search_var = tk.StringVar(value="")
     self._skill_selector_search_var.trace_add("write", lambda *_args: self._refresh_skill_selector_window())
+    self._skill_preset_var = tk.StringVar(value="")
+    self._skill_preset_name_var = tk.StringVar(value="")
 
     window = tk.Toplevel(self._root)
     window.title("Skill Selector")
@@ -2599,6 +2777,50 @@ class OperatorConsole:
     ).pack(anchor="w", pady=(6, 0))
 
     tk.Button(header, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
+
+    preset_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 8))
+    preset_row.pack(fill=tk.X)
+    tk.Label(
+      preset_row,
+      text="Preset",
+      fg="white",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    self._skill_preset_combo = ttk.Combobox(
+      preset_row,
+      textvariable=self._skill_preset_var,
+      state="readonly",
+      width=28,
+    )
+    self._skill_preset_combo.pack(side=tk.LEFT, padx=(0, 8))
+    self._skill_preset_combo.bind("<<ComboboxSelected>>", self._on_skill_preset_selected)
+    tk.Button(preset_row, text="Apply", command=self._apply_skill_preset).pack(side=tk.LEFT, padx=(0, 6))
+    tk.Button(preset_row, text="Update", command=self._update_skill_preset).pack(side=tk.LEFT, padx=(0, 6))
+    tk.Button(preset_row, text="Delete", command=self._delete_skill_preset).pack(side=tk.LEFT)
+
+    preset_name_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 12))
+    preset_name_row.pack(fill=tk.X)
+    tk.Label(
+      preset_name_row,
+      text="Preset Name",
+      fg="white",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(0, 8))
+    preset_name_entry = tk.Entry(
+      preset_name_row,
+      textvariable=self._skill_preset_name_var,
+      bg="#192028",
+      fg="white",
+      insertbackground="white",
+      relief=tk.FLAT,
+      highlightthickness=1,
+      highlightbackground="#2d333b",
+      highlightcolor="#1f6feb",
+    )
+    preset_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+    tk.Button(preset_name_row, text="Save New", command=self._save_new_skill_preset).pack(side=tk.LEFT)
 
     search_row = tk.Frame(window, bg="#101418", padx=14, pady=(0, 12))
     search_row.pack(fill=tk.X)
@@ -2720,6 +2942,7 @@ class OperatorConsole:
       lambda event, target=window: self._clear_skill_selector_window_state() if event.widget is target else None,
     )
     self._refresh_skill_selector_window()
+    self._refresh_skill_preset_controls(sync_name_entry=True)
     search_entry.focus_set()
 
   def _refresh_skill_selector_window(self):
@@ -2727,16 +2950,19 @@ class OperatorConsole:
       return
 
     selected_skills = self._current_skill_selection()
+    presets = self._current_skill_presets()
+    self._refresh_skill_preset_controls()
     search_text = self._skill_selector_search_var.get() if self._skill_selector_search_var is not None else ""
     filtered_entries = _filter_skill_catalog_entries(
       self._skill_selector_catalog,
       search_text=search_text,
       selected_skills=selected_skills,
     )
+    active_preset = self._active_skill_preset_name() or "custom"
 
     if self._skill_selector_summary_var is not None:
       self._skill_selector_summary_var.set(
-        f"{len(selected_skills)} selected • {len(filtered_entries)} visible result(s) • source: data/skills.json"
+        f"{len(selected_skills)} selected • {len(presets)} preset(s) • active: {active_preset} • source: data/skills.json"
       )
     if self._skill_selector_available_count_var is not None:
       self._skill_selector_available_count_var.set(f"{len(filtered_entries)} matching skill(s)")

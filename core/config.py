@@ -20,6 +20,39 @@ TRACKBLAZER_PLANNER_POLICY = {
 }
 
 
+def normalize_skill_list(raw_skill_list=None):
+  normalized = []
+  seen = set()
+  if not isinstance(raw_skill_list, list):
+    raw_skill_list = []
+  for raw_name in raw_skill_list:
+    name = str(raw_name or "").strip()
+    if not name or name in seen:
+      continue
+    seen.add(name)
+    normalized.append(name)
+  return normalized
+
+
+def normalize_skill_presets(raw_presets=None):
+  normalized = []
+  seen = set()
+  if not isinstance(raw_presets, list):
+    raw_presets = []
+  for raw_preset in raw_presets:
+    if not isinstance(raw_preset, dict):
+      continue
+    name = str(raw_preset.get("name") or "").strip()
+    if not name or name in seen:
+      continue
+    seen.add(name)
+    normalized.append({
+      "name": name,
+      "skill_list": normalize_skill_list(raw_preset.get("skill_list")),
+    })
+  return normalized
+
+
 def normalize_trackblazer_planner_policy(raw_policy=None):
   raw_policy = raw_policy if isinstance(raw_policy, dict) else {}
   defaults = TRACKBLAZER_PLANNER_POLICY
@@ -104,11 +137,18 @@ def reload_config(print_config=True):
     load_var('USE_RACE_SCHEDULE', config["use_race_schedule"])
     load_var('CANCEL_CONSECUTIVE_RACE', config["cancel_consecutive_race"])
     load_var('STAT_CAPS', config["stat_caps"])
+    normalized_skill_list = normalize_skill_list(config["skill"]["skill_list"])
+    normalized_skill_presets = normalize_skill_presets(config["skill"].get("presets"))
+    active_skill_preset = str(config["skill"].get("active_preset", "") or "").strip()
+    if active_skill_preset not in {preset["name"] for preset in normalized_skill_presets}:
+      active_skill_preset = ""
     load_var('IS_AUTO_BUY_SKILL', config["skill"]["is_auto_buy_skill"])
     load_var('SKILL_CHECK_TURNS', config["skill"]["skill_check_turns"])
     load_var('CHECK_SKILL_BEFORE_RACES', config["skill"]["check_skill_before_races"])
     load_var('SKILL_PTS_CHECK', config["skill"]["skill_pts_check"])
-    load_var('SKILL_LIST', config["skill"]["skill_list"])
+    load_var('SKILL_LIST', normalized_skill_list)
+    load_var('SKILL_PRESETS', normalized_skill_presets)
+    load_var('ACTIVE_SKILL_PRESET', active_skill_preset)
     load_var('PRIORITY_EFFECTS_LIST', {i: v for i, v in enumerate(config["priority_weights"])})
     load_var('SKIP_TRAINING_ENERGY', config["skip_training_energy"])
     load_var('NEVER_REST_ENERGY', config["never_rest_energy"])

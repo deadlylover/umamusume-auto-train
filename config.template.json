@@ -179,6 +179,8 @@
     "skill_check_turns": 10,
     "check_skill_before_races": false,
     "skill_pts_check": 180,
+    "active_preset": "",
+    "presets": [],
     "skill_list": [
       "Homestretch Haste",
       "Go with the Flow",
