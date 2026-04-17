@@ -44,7 +44,7 @@ from core.trackblazer.models import (
   render_turn_discussion,
 )
 import utils.constants as constants
-from core.platform.window_focus import focus_target_window
+from core.platform.window_focus import focus_target_window, reapply_configured_recognition_geometry
 from core.region_adjuster import run_region_adjuster_session
 from core.region_adjuster.shared import resolve_region_adjuster_profiles
 from utils.log import debug, error
@@ -1861,6 +1861,9 @@ class OperatorConsole:
     if not overrides_path:
       self._message_value.set(f"Unknown OCR preset: {profile_name}")
       return
+    if not Path(overrides_path).exists():
+      self._message_value.set(f"OCR preset file missing: {overrides_path}")
+      return
     saved_profile = self._persist_config_value("debug.region_adjuster.active_profile", profile_name)
     saved_path = self._persist_config_value("debug.region_adjuster.overrides_path", overrides_path)
     if not (saved_profile and saved_path):
@@ -1868,10 +1871,7 @@ class OperatorConsole:
       return
     try:
       config.reload_config(print_config=False)
-      constants.apply_region_overrides(
-        overrides_path=overrides_path,
-        force=True,
-      )
+      reapply_configured_recognition_geometry(force_overrides=True)
     except Exception as exc:
       self._message_value.set(f"OCR preset saved, but reload failed: {exc}")
       return
@@ -2616,11 +2616,7 @@ class OperatorConsole:
         config.reload_config(print_config=False)
         if self._root is not None:
           self._root.after(0, self._refresh_region_adjuster_profile_menu)
-        _, _, overrides_path = resolve_region_adjuster_profiles(dict(config.REGION_ADJUSTER_CONFIG))
-        constants.apply_region_overrides(
-          overrides_path=overrides_path,
-          force=True,
-        )
+        reapply_configured_recognition_geometry(force_overrides=True)
     except Exception as exc:  # pragma: no cover
       debug(f"Operator console failed to launch region adjuster: {exc}")
 

@@ -197,6 +197,12 @@ def apply_configured_recognition_geometry(force_overrides: bool = False) -> None
   constants.apply_region_overrides(overrides_path=overrides_path, force=force_overrides)
 
 
+def reapply_configured_recognition_geometry(force_overrides: bool = False) -> None:
+  """Reset mutable OCR geometry, then reapply the active configured profile."""
+  constants.reset_adjustable_coordinates()
+  apply_configured_recognition_geometry(force_overrides=force_overrides)
+
+
 def _focus_default_windows() -> bool:
   if gw is None:
     error("pygetwindow is not available; cannot control emulator window.")

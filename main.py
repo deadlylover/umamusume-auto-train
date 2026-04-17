@@ -14,9 +14,8 @@ from utils.log import info, warning, error, debug, init_logging, args
 from core.skeleton import career_lobby, _enrich_ocr_debug_entries, _planned_clicks_for_action
 from core.hotkeys import HotkeyListener
 from core.operator_console import ensure_operator_console, publish_runtime_state
-from core.platform.window_focus import focus_target_window
+from core.platform.window_focus import focus_target_window, reapply_configured_recognition_geometry
 from core.region_adjuster import run_region_adjuster_session
-from core.region_adjuster.shared import resolve_region_adjuster_profiles
 import core.config as config
 import core.bot as bot
 import utils.constants as constants
@@ -530,11 +529,7 @@ def trigger_region_adjuster():
     if success:
       debug("Region adjuster reported success; reloading config to apply overrides.")
       config.reload_config()
-      _, _, overrides_path = resolve_region_adjuster_profiles(settings)
-      constants.apply_region_overrides(
-        overrides_path=overrides_path,
-        force=True,
-      )
+      reapply_configured_recognition_geometry(force_overrides=True)
 
   threading.Thread(target=_open_adjuster, daemon=True).start()
 

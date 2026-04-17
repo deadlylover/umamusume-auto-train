@@ -680,6 +680,29 @@ SCALE_APPLIED = False
 
 DEFAULT_REGION_OVERRIDES_PATH = Path(__file__).resolve().parents[1] / "data" / "region_overrides.json"
 
+MANT_ALIAS_COORDINATE_FALLBACKS = {
+  "MANT_ENERGY_BBOX": "ENERGY_BBOX",
+  "MANT_ENERGY_REGION": "ENERGY_REGION",
+  "MANT_TURN_BBOX": "TURN_BBOX",
+  "MANT_TURN_REGION": "TURN_REGION",
+  "MANT_TURN_FULL_BBOX": "TURN_BBOX",
+  "MANT_TURN_FULL_REGION": "TURN_REGION",
+  "MANT_FAILURE_BBOX": "FAILURE_BBOX",
+  "MANT_FAILURE_REGION": "FAILURE_REGION",
+  "MANT_YEAR_BBOX": "YEAR_BBOX",
+  "MANT_YEAR_REGION": "YEAR_REGION",
+  "MANT_CRITERIA_BBOX": "CRITERIA_BBOX",
+  "MANT_CRITERIA_REGION": "CRITERIA_REGION",
+  "MANT_CURRENT_STATS_BBOX": "CURRENT_STATS_BBOX",
+  "MANT_CURRENT_STATS_REGION": "CURRENT_STATS_REGION",
+  "MANT_STAT_GAINS_BBOX": "URA_STAT_GAINS_BBOX",
+  "MANT_STAT_GAINS_REGION": "URA_STAT_GAINS_REGION",
+  "MANT_STAT_GAINS_2_BBOX": "URA_STAT_GAINS_BBOX",
+  "MANT_STAT_GAINS_2_REGION": "URA_STAT_GAINS_REGION",
+  "MANT_SUPPORT_CARD_ICON_BBOX": "SUPPORT_CARD_ICON_BBOX",
+  "MANT_SUPPORT_CARD_ICON_REGION": "SUPPORT_CARD_ICON_REGION",
+}
+
 LAYOUT_REGION_OFFSETS = {
   "SCREEN_TOP_BBOX": (0, 0, 0, -780),
   "SCREEN_MIDDLE_BBOX": (0, 300, 0, -280),
@@ -827,6 +850,19 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "RACE_BUTTON_IN_RACE_REGION_LANDSCAPE",
 )
 
+
+def _snapshot_adjustable_coordinates():
+  g = globals()
+  snapshot = {}
+  for name in ADJUSTABLE_COORDINATE_ORDER:
+    value = g.get(name)
+    if isinstance(value, tuple) and len(value) == 4:
+      snapshot[name] = tuple(value)
+  return snapshot
+
+
+_BASE_ADJUSTABLE_COORDINATES = _snapshot_adjustable_coordinates()
+
 ADJUSTER_TEMPLATE_MAP = {
   "GAME_WINDOW_BBOX": [
     "assets/buttons/next_btn.png",
@@ -934,6 +970,33 @@ def export_adjustable_coordinates():
 
   return entries
 
+
+def reset_adjustable_coordinates():
+  global OFFSET_APPLIED, OVERRIDES_APPLIED, SCALE_APPLIED
+  global RECOGNITION_OFFSET_X, RECOGNITION_OFFSET_Y
+
+  g = globals()
+  for name, value in _BASE_ADJUSTABLE_COORDINATES.items():
+    g[name] = tuple(value)
+
+  OFFSET_APPLIED = False
+  OVERRIDES_APPLIED = False
+  SCALE_APPLIED = False
+  RECOGNITION_OFFSET_X = 0
+  RECOGNITION_OFFSET_Y = 0
+  sync_layout_regions_from_game_window()
+
+
+def _sync_trackblazer_alias_coordinates(overrides):
+  override_keys = set(overrides.keys()) if isinstance(overrides, dict) else set()
+  g = globals()
+  for alias_name, source_name in MANT_ALIAS_COORDINATE_FALLBACKS.items():
+    if alias_name in override_keys:
+      continue
+    source_value = g.get(source_name)
+    if isinstance(source_value, tuple) and len(source_value) == 4:
+      g[alias_name] = tuple(source_value)
+
 def apply_region_overrides(overrides_path=None, force=False):
   global OVERRIDES_APPLIED
   if OVERRIDES_APPLIED and not force:
@@ -962,6 +1025,7 @@ def apply_region_overrides(overrides_path=None, force=False):
       continue
     g[name] = tuple(int(round(v)) for v in value[:4])
 
+  _sync_trackblazer_alias_coordinates(overrides)
   sync_layout_regions_from_game_window()
   update_action_positions()
   OVERRIDES_APPLIED = True
