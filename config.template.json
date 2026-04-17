@@ -1782,7 +1782,7 @@
     "verbose_actions": false,
     "verbose_ocr": false,
     "easyocr_device": "auto",
-    "ocr_backend": "easyocr",
+    "ocr_backend": "vision",
     "ocr_route_overrides": {},
     "vision_ocr": {
       "recognition_level": "accurate",

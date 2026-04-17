@@ -1,8 +1,8 @@
 """Routing facade for OCR calls.
 
 Historically this module owned the EasyOCR reader directly. It is now a thin
-router that selects a backend per named OCR surface and falls back to EasyOCR
-on error or when no route is configured.
+router that selects a backend per named OCR surface, prefers the configured
+default backend (Vision in this repo), and falls back to EasyOCR on error.
 
 Public API (stable):
 
@@ -61,12 +61,13 @@ def _log_routing(meta: Dict[str, Any]):
   if getattr(config, "VERBOSE_OCR", False):
     info(
       "[OCR] surface={surface} op={op} backend={backend} requested={requested}"
-      " fallback={fallback} reason={reason}".format(
+      " fallback={fallback} fallback_error={fallback_error} reason={reason}".format(
         surface=meta.get("surface"),
         op=meta.get("op"),
         backend=meta.get("backend"),
         requested=meta.get("requested_backend"),
         fallback=meta.get("fallback"),
+        fallback_error=meta.get("fallback_error"),
         reason=meta.get("reason"),
       )
     )
@@ -78,10 +79,10 @@ def _log_routing(meta: Dict[str, Any]):
 
 
 def _global_default_backend() -> str:
-  raw = str(getattr(config, "OCR_BACKEND", _BACKEND_EASYOCR) or _BACKEND_EASYOCR).strip().lower()
+  raw = str(getattr(config, "OCR_BACKEND", _BACKEND_VISION) or _BACKEND_VISION).strip().lower()
   if raw not in _KNOWN_BACKENDS:
-    warning(f"[OCR] Unknown ocr_backend='{raw}'; defaulting to {_BACKEND_EASYOCR}.")
-    return _BACKEND_EASYOCR
+    warning(f"[OCR] Unknown ocr_backend='{raw}'; defaulting to {_BACKEND_VISION}.")
+    return _BACKEND_VISION
   return raw
 
 
@@ -113,7 +114,9 @@ def resolve_backend(surface: Optional[str], explicit_backend: Optional[str]) -> 
 
   Returns ``(backend, reason)`` where ``backend`` is one of the known backend
   names and ``reason`` describes how the decision was made (for debug logs).
-  Priority: explicit > surface override > global default > easyocr fallback.
+  Priority: explicit > surface override > global default.
+  Runtime dispatch may still fall back to EasyOCR if Vision is unavailable or
+  raises.
   """
   if explicit_backend:
     normalized = str(explicit_backend).strip().lower()

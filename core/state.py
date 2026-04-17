@@ -10,7 +10,7 @@ from PIL import Image
 from utils.log import info, warning, error, debug, debug_window, args
 
 from utils.screenshot import enhanced_screenshot, enhance_image_for_ocr, binarize_between_colors, crop_after_plus_component, clean_noise, custom_grabcut
-from core.ocr import extract_text, extract_number, extract_allowed_text, get_reader
+from core.ocr import extract_text, extract_number, extract_allowed_text, readtext_detailed
 from core.recognizer import count_pixels_of_color, find_color_of_pixel, closest_color, compare_brightness
 from utils.tools import click, sleep, get_secs, check_race_suitability, get_aptitude_index
 import utils.device_action_wrapper as device_action
@@ -48,6 +48,17 @@ APTITUDE_BOX_RATIOS = {
   "style_late": (0.50, 0.66, 0.25, 0.33),
   "style_end": (0.75, 0.66, 0.25, 0.33),
 }
+
+_OCR_SURFACE_TRAINING_STAT_GAIN = "training_stat_gain"
+_OCR_SURFACE_TRAINING_FAILURE_PERCENT = "training_failure_percent"
+_OCR_SURFACE_TRAINING_FAILURE_DIGITS = "training_failure_digits"
+_OCR_SURFACE_TRACKBLAZER_SHOP_COINS = "trackblazer_shop_coins"
+_OCR_SURFACE_TURN_COUNTER = "turn_counter"
+_OCR_SURFACE_UNITY_RACE_TURNS = "unity_race_turns"
+_OCR_SURFACE_YEAR_BANNER = "year_banner"
+_OCR_SURFACE_CRITERIA_BANNER = "criteria_banner"
+_OCR_SURFACE_CURRENT_STATS = "current_stats"
+_OCR_SURFACE_TRACKBLAZER_SKILL_POINTS = "trackblazer_lobby_skill_points"
 
 
 def _save_training_scan_debug_image(image, training_name, label):
@@ -1336,7 +1347,7 @@ def get_stat_gains(year=1, attempts=0, enable_debug=True, show_screenshot=False,
     cropped_image = clean_noise(cropped_image)
     if enable_debug:
       debug_window(cropped_image, save_name=f"stat_{key}_cleaned_{year}", show_on_screen=show_screenshot)
-    text = extract_number(cropped_image)
+    text = extract_number(cropped_image, ocr_surface=_OCR_SURFACE_TRAINING_STAT_GAIN)
 
     if text != -1:
       if enable_debug:
@@ -1361,7 +1372,12 @@ def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None, m
 
   if "%" in allowlist:
     for threshold in threshold_values:
-      text = extract_text(enhanced, allowlist=allowlist, threshold=threshold)
+      text = extract_text(
+        enhanced,
+        allowlist=allowlist,
+        threshold=threshold,
+        ocr_surface=_OCR_SURFACE_TRAINING_FAILURE_PERCENT,
+      )
       matches = re.findall(r"\d{1,3}", text or "")
       for match in matches:
         value = int(match)
@@ -1369,16 +1385,19 @@ def _extract_failure_ocr_value(image, allowlist="0123456789", thresholds=None, m
           return value
     return -1
 
-  img_np = np.array(enhanced)
   for threshold in threshold_values:
-    result = get_reader().readtext(img_np, allowlist=allowlist, text_threshold=threshold)
+    result = readtext_detailed(
+      enhanced,
+      ocr_surface=_OCR_SURFACE_TRAINING_FAILURE_DIGITS,
+      allowlist=allowlist,
+      threshold=threshold,
+    )
     # Filter by recognition confidence to discard ghost detections from
-    # button edges / background noise that EasyOCR's text detector picks up
-    # but the recogniser scores very low.
-    confident = [item for item in result if item[2] >= min_confidence]
+    # button edges / background noise that low-confidence OCR can pick up.
+    confident = [item for item in result if float(item[2]) >= min_confidence]
     if not confident:
       continue
-    texts = [item[1] for item in sorted(confident, key=lambda x: x[0][0][0])]
+    texts = [item[1] for item in sorted(confident, key=lambda x: min(pt[0] for pt in x[0]))]
     digits = re.sub(r"[^\d]", "", "".join(texts))
     if digits:
       value = int(digits)
@@ -1417,7 +1436,12 @@ def get_trackblazer_shop_coins():
     best_digits = ""
     for binarize_threshold in thresholds:
       enhanced = enhance_image_for_ocr(pil, resize_factor=4, binarize_threshold=binarize_threshold)
-      text = extract_text(enhanced, allowlist="0123456789,", threshold=0.6)
+      text = extract_text(
+        enhanced,
+        allowlist="0123456789,",
+        threshold=0.6,
+        ocr_surface=_OCR_SURFACE_TRACKBLAZER_SHOP_COINS,
+      )
       digits = re.sub(r"[^\d]", "", text or "")
       if len(digits) > len(best_digits):
         best_text = text or ""
@@ -1547,13 +1571,21 @@ def get_turn(*, use_last_known=True):
   turn = device_action.screenshot(region_xywh=region_xywh)
   record_runtime_ocr_debug("turn", image=turn)
   turn = enhance_image_for_ocr(turn, resize_factor=2)
-  turn_text = extract_allowed_text(turn, allowlist="0123456789")
+  turn_text = extract_allowed_text(
+    turn,
+    allowlist="0123456789",
+    ocr_surface=_OCR_SURFACE_TURN_COUNTER,
+  )
   debug(f"Turn text: {turn_text}")
 
   if constants.SCENARIO_NAME == "unity":
     race_turns = device_action.screenshot(region_xywh=constants.UNITY_RACE_TURNS_REGION)
     race_turns = enhance_image_for_ocr(race_turns, resize_factor=4, binarize_threshold=None)
-    race_turns_text = extract_allowed_text(race_turns, allowlist="0123456789")
+    race_turns_text = extract_allowed_text(
+      race_turns,
+      allowlist="0123456789",
+      ocr_surface=_OCR_SURFACE_UNITY_RACE_TURNS,
+    )
     digits_only = re.sub(r"[^\d]", "", race_turns_text)
     if digits_only:
       digits_only = int(digits_only)
@@ -1598,7 +1630,11 @@ def get_current_year():
   for i in range(10):
     year = enhanced_screenshot(region_xywh)
     record_runtime_ocr_debug("year", image=np.array(year.convert("RGB")))
-    text = extract_text(year, allowlist=constants.OCR_DATE_RECOGNITION_SET)
+    text = extract_text(
+      year,
+      allowlist=constants.OCR_DATE_RECOGNITION_SET,
+      ocr_surface=_OCR_SURFACE_YEAR_BANNER,
+    )
     text = text.replace("Pre Debut", "Pre-Debut")
     text = text.replace("Early- ", "Early ").replace("Late- ", "Late ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -1633,7 +1669,7 @@ def get_criteria():
     region_xywh = constants.CRITERIA_REGION
   img = enhanced_screenshot(region_xywh)
   record_runtime_ocr_debug("criteria", image=np.array(img.convert("RGB")))
-  text = extract_text(img)
+  text = extract_text(img, ocr_surface=_OCR_SURFACE_CRITERIA_BANNER)
   debug(f"Criteria text: {text}")
   return text
 
@@ -1691,16 +1727,29 @@ def get_current_stats(turn, enable_debug=True):
     final_stat_value = -1
     if enable_debug:
       debug_window(cropped_image, save_name=f"stat_{key}_cropped")
-    final_stat_value = extract_text(cropped_image, allowlist="0123456789MAX")
+    final_stat_value = extract_text(
+      cropped_image,
+      allowlist="0123456789MAX",
+      ocr_surface=_OCR_SURFACE_CURRENT_STATS,
+    )
     debug(f"Initial stat value: {final_stat_value}")
     if final_stat_value == "":
       cropped_image = enhance_image_for_ocr(cropped_image, binarize_threshold=None)
-      final_stat_value = extract_text(cropped_image, allowlist="0123456789MAX")
+      final_stat_value = extract_text(
+        cropped_image,
+        allowlist="0123456789MAX",
+        ocr_surface=_OCR_SURFACE_CURRENT_STATS,
+      )
       for threshold in [0.7, 0.6]:
         if final_stat_value != "":
           break
         debug(f"Couldn't recognize stat {key}, retrying with lower threshold: {threshold}")
-        final_stat_value = extract_text(cropped_image, allowlist="0123456789MAX", threshold=threshold)
+        final_stat_value = extract_text(
+          cropped_image,
+          allowlist="0123456789MAX",
+          threshold=threshold,
+          ocr_surface=_OCR_SURFACE_CURRENT_STATS,
+        )
         debug(f"Threshold: {threshold}, stat value: {final_stat_value}")
     if final_stat_value == "MAX":
       final_stat_value = 1200
@@ -1715,10 +1764,18 @@ def get_current_stats(turn, enable_debug=True):
     sp_image = device_action.screenshot(region_xywh=constants.MANT_LOBBY_SKILL_PTS_REGION)
     if enable_debug:
       debug_window(sp_image, save_name="stat_sp_cropped")
-    sp_value = extract_text(sp_image, allowlist="0123456789")
+    sp_value = extract_text(
+      sp_image,
+      allowlist="0123456789",
+      ocr_surface=_OCR_SURFACE_TRACKBLAZER_SKILL_POINTS,
+    )
     if sp_value == "":
       sp_image = enhance_image_for_ocr(sp_image, binarize_threshold=None)
-      sp_value = extract_text(sp_image, allowlist="0123456789")
+      sp_value = extract_text(
+        sp_image,
+        allowlist="0123456789",
+        ocr_surface=_OCR_SURFACE_TRACKBLAZER_SKILL_POINTS,
+      )
     current_stats["sp"] = int(sp_value) if is_number(sp_value) else -1
 
   info(f"Current stats: {current_stats}")

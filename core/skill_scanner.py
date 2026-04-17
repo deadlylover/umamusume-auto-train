@@ -752,17 +752,12 @@ def _stitch_split_skill_rows(rows):
 
 
 _SKILL_NAME_BAND_OCR_SURFACE = "skill_name_band"
+_SKILL_OBTAINED_TEXT_OCR_SURFACE = "skill_obtained_text"
 
-
-def _resolve_skill_name_band_batch_size():
-    """Pick an EasyOCR batch size when the skill-name-band route lands on EasyOCR.
-
-    When the configured route resolves to a non-EasyOCR backend (e.g. Apple
-    Vision) this returns ``None`` so we avoid initializing EasyOCR's reader
-    just to read its device attribute.
-    """
+def _resolve_surface_batch_size(ocr_surface):
+    """Pick an EasyOCR batch size only when the route resolves to EasyOCR."""
     from core import ocr as ocr_facade
-    backend, _reason = ocr_facade.resolve_backend(_SKILL_NAME_BAND_OCR_SURFACE, None)
+    backend, _reason = ocr_facade.resolve_backend(ocr_surface, None)
     if backend != "easyocr":
         return None
     from core import ocr_easyocr
@@ -770,6 +765,10 @@ def _resolve_skill_name_band_batch_size():
     if str(getattr(reader, "device", "cpu")) != "cpu":
         return _SKILL_OCR_GPU_BATCH_SIZE
     return _SKILL_OCR_CPU_BATCH_SIZE
+
+
+def _resolve_skill_name_band_batch_size():
+    return _resolve_surface_batch_size(_SKILL_NAME_BAND_OCR_SURFACE)
 
 
 def _run_skill_name_ocr_pass(crop, bbox_top, allowlist, batch_size, ocr_variant="normal"):
@@ -1312,22 +1311,19 @@ def _detect_obtained_text_tokens(screenshot):
     )
     if crop is None or getattr(crop, "size", 0) == 0:
         return []
-    from core.ocr import get_reader
-    r = get_reader()
+    from core import ocr as ocr_facade
     allowlist = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
-    batch_size = _SKILL_OCR_CPU_BATCH_SIZE
-    if str(getattr(r, "device", "cpu")) != "cpu":
-        batch_size = _SKILL_OCR_GPU_BATCH_SIZE
+    batch_size = _resolve_surface_batch_size(_SKILL_OBTAINED_TEXT_OCR_SURFACE)
     _scroll_left, scroll_top, _scroll_right, _scroll_bottom = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
     ocr_inputs = [crop]
     ocr_inputs.extend(_build_dim_text_variants(crop))
     matches = []
     seen = {}
     for candidate in ocr_inputs:
-        raw_results = r.readtext(
+        raw_results = ocr_facade.readtext_detailed(
             candidate,
+            ocr_surface=_SKILL_OBTAINED_TEXT_OCR_SURFACE,
             allowlist=allowlist,
-            detail=1,
             paragraph=False,
             min_size=_SKILL_OCR_MIN_SIZE,
             canvas_size=_SKILL_OCR_CANVAS_SIZE,
