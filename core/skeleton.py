@@ -4613,7 +4613,34 @@ def _handle_trackblazer_goal_complete_screen(state_obj, action):
       "deferred_work": [],
     }
 
-  sleep(3.0)
+  wait_result = _wait_for_post_action_actionable_state(
+    _TRACKBLAZER_GOAL_COMPLETE_SECOND_SCREEN_WAIT_SECONDS,
+    include_stable_lobby=False,
+    baseline_screenshot=screenshot,
+  )
+  followup_button = str(wait_result.get("advance_button") or "")
+  if followup_button in {"next", "next2"}:
+    second_click = _click_trackblazer_next_button("goal complete second screen", min_search_time=0.3)
+    if second_click:
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "goal_complete",
+        "reason": f"{first_click}_then_{second_click}_clicked",
+        "deferred_work": [],
+      }
+  elif wait_result.get("ready"):
+    followup_reason = str(wait_result.get("reason") or "followup_ready")
+    if followup_button:
+      followup_reason = f"{followup_reason}:{followup_button}"
+    return {
+      "detected": True,
+      "handled": True,
+      "popup_type": "goal_complete",
+      "reason": f"{first_click}_clicked_then_{followup_reason}",
+      "deferred_work": [],
+    }
+
   device_action.flush_screenshot_cache()
   second_click = _click_trackblazer_next_button("goal complete second screen", min_search_time=0.8)
   if second_click:
@@ -4806,6 +4833,10 @@ _POST_ACTION_MAX_WAIT_RACE = 45.0
 _POST_ACTION_MAX_WAIT_DEFAULT = 20.0
 _POST_ACTION_EVENT_CHAIN_MAX = 4
 _POST_ACTION_EVENT_CHAIN_SETTLE_SECONDS = 0.15
+_POST_ACTION_FOLLOWUP_POLL_SECONDS = 0.12
+_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS = 0.8
+_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS = 0.6
+_TRACKBLAZER_GOAL_COMPLETE_SECOND_SCREEN_WAIT_SECONDS = 3.2
 
 
 # Post-action resolution branch order:
@@ -4843,6 +4874,112 @@ def _resolve_post_action_event_chain(screenshot=None, max_events=_POST_ACTION_EV
     current_screenshot = device_action.screenshot()
 
   return resolved_count
+
+
+def _crop_absolute_bbox_from_game_window_screenshot(screenshot, bbox):
+  if screenshot is None or getattr(screenshot, "size", 0) == 0:
+    return None
+  game_window_bbox = getattr(constants, "GAME_WINDOW_BBOX", None)
+  if not isinstance(game_window_bbox, tuple) or len(game_window_bbox) != 4:
+    return None
+  if not isinstance(bbox, tuple) or len(bbox) != 4:
+    return None
+  screenshot_h, screenshot_w = screenshot.shape[:2]
+  left = max(0, int(bbox[0] - game_window_bbox[0]))
+  top = max(0, int(bbox[1] - game_window_bbox[1]))
+  right = min(screenshot_w, int(bbox[2] - game_window_bbox[0]))
+  bottom = min(screenshot_h, int(bbox[3] - game_window_bbox[1]))
+  if right <= left or bottom <= top:
+    return None
+  return screenshot[top:bottom, left:right].copy()
+
+
+def _detect_visible_post_action_advance_button(screenshot=None):
+  screenshot = screenshot if screenshot is not None else device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
+  if screenshot is None or getattr(screenshot, "size", 0) == 0:
+    return ""
+
+  clock_icon_visible = bool(
+    device_action.match_template(
+      "assets/icons/clock_icon.png",
+      screenshot=screenshot,
+      threshold=0.9,
+    )
+  )
+
+  for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
+    if label == "cancel" and clock_icon_visible:
+      continue
+    region_screenshot = screenshot
+    if isinstance(region_ltrb, tuple) and region_ltrb != getattr(constants, "GAME_WINDOW_BBOX", None):
+      region_screenshot = _crop_absolute_bbox_from_game_window_screenshot(screenshot, region_ltrb)
+    if region_screenshot is None or getattr(region_screenshot, "size", 0) == 0:
+      continue
+    if device_action.match_template(template_path, region_screenshot, threshold=0.8):
+      return label
+  return ""
+
+
+def _wait_for_post_action_actionable_state(
+  max_wait,
+  *,
+  poll_interval=_POST_ACTION_FOLLOWUP_POLL_SECONDS,
+  include_event_choice=True,
+  include_stable_lobby=True,
+  include_advance_button=True,
+  baseline_screenshot=None,
+):
+  from utils.screenshot import are_screenshots_same
+
+  deadline = time.time() + max(0.0, float(max_wait or 0.0))
+
+  while time.time() < deadline:
+    if bot.stop_event.is_set():
+      return {"ready": False, "reason": "bot_stopped"}
+
+    device_action.flush_screenshot_cache()
+    screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
+    if (
+      baseline_screenshot is not None
+      and are_screenshots_same(baseline_screenshot, screenshot, diff_threshold=12)
+    ):
+      remaining = deadline - time.time()
+      if remaining > 0:
+        sleep(min(float(poll_interval), remaining))
+      continue
+
+    if include_event_choice:
+      event_choice_icon = find_event_choice_icon(screenshot=screenshot)
+      if event_choice_icon:
+        return {
+          "ready": True,
+          "reason": "event_choice",
+          "event_choice_icon": [int(event_choice_icon[0]), int(event_choice_icon[1])],
+        }
+
+    if include_stable_lobby:
+      stable_lobby, anchor_counts = _is_stable_career_lobby_screen(screenshot=screenshot)
+      if stable_lobby:
+        return {
+          "ready": True,
+          "reason": "stable_lobby",
+          "anchor_counts": dict(anchor_counts or {}),
+        }
+
+    if include_advance_button:
+      advance_button = _detect_visible_post_action_advance_button(screenshot=screenshot)
+      if advance_button:
+        return {
+          "ready": True,
+          "reason": "advance_button",
+          "advance_button": str(advance_button),
+        }
+
+    remaining = deadline - time.time()
+    if remaining > 0:
+      sleep(min(float(poll_interval), remaining))
+
+  return {"ready": False, "reason": "timeout"}
 
 
 def _resolve_post_action_resolution(state_obj, action, max_wait=None):
@@ -4935,7 +5072,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if shop_refresh_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       scheduled_race_result = _handle_trackblazer_scheduled_race_popup(state_obj, action)
@@ -4951,7 +5088,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if scheduled_race_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       climax_race_result = _handle_trackblazer_climax_race_result_screen(state_obj, action)
@@ -4967,7 +5104,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if climax_race_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       post_race_watch_concert_result = _handle_trackblazer_post_race_watch_concert_screen(state_obj, action)
@@ -4983,7 +5120,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if post_race_watch_concert_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       inspiration_go_result = _handle_trackblazer_inspiration_go_screen(state_obj, action)
@@ -4999,7 +5136,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if inspiration_go_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       goal_complete_result = _handle_trackblazer_goal_complete_screen(state_obj, action)
@@ -5015,7 +5152,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if goal_complete_result.get("handled"):
           idle_loops = 0
-          sleep(0.8)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
           continue
 
       insufficient_goal_pts_result = _handle_trackblazer_insufficient_goal_race_result_points_popup(state_obj, action)
@@ -5035,7 +5172,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         )
         if insufficient_goal_pts_result.get("handled"):
           idle_loops = 0
-          sleep(0.6)
+          _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
           continue
 
     generic_step = _generic_post_action_return_to_lobby_step()
@@ -5049,7 +5186,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         reasoning_notes=f"clicked={generic_step}",
       )
       idle_loops = 0
-      sleep(0.6)
+      _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
       continue
 
     idle_loops += 1
@@ -5063,7 +5200,7 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
       )
       device_action.click(target=constants.SAFE_SPACE_MOUSE_POS)
       idle_loops = 0
-      sleep(0.6)
+      _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
       continue
 
     sleep(0.5)
