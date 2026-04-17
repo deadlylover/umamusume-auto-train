@@ -4386,8 +4386,8 @@ def _handle_trackblazer_post_race_watch_concert_screen(state_obj, action):
 
   watch_template = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("post_race_watch_concert")
   next_template = constants.TRACKBLAZER_RESOLUTION_TEMPLATES.get("post_race_watch_concert_next")
-  watch_region = getattr(constants, "TRACKBLAZER_POST_RACE_WATCH_CONCERT_BBOX", None)
-  next_region = getattr(constants, "TRACKBLAZER_POST_RACE_WATCH_CONCERT_NEXT_BBOX", None)
+  watch_region = getattr(constants, "SCREEN_BOTTOM_BBOX", None)
+  next_region = getattr(constants, "SCREEN_BOTTOM_BBOX", None)
   if not watch_template or not next_template or not watch_region or not next_region:
     return {
       "detected": False,
