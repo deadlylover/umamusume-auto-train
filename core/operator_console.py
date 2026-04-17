@@ -1803,12 +1803,14 @@ class OperatorConsole:
   def _format_timing_mapping(self, mapping, indent="  "):
     lines = []
     for key, val in mapping.items():
-      if key in {"backend_debug", "history_context", "note"}:
+      if self._should_hide_timing_key(key):
         continue
       lines.extend(self._format_timing_entry(key, val, indent=indent))
     return lines
 
   def _format_timing_entry(self, key, val, indent="  "):
+    if self._should_hide_timing_key(key):
+      return []
     if isinstance(val, dict):
       lines = [f"{indent}{key}:"]
       lines.extend(self._format_timing_mapping(val, indent=indent + "  "))
@@ -1822,6 +1824,45 @@ class OperatorConsole:
     if isinstance(val, int):
       return [f"{indent}{key:14s} {val}"]
     return [f"{indent}{key:14s} {val}"]
+
+  def _should_hide_timing_key(self, key):
+    key = str(key or "")
+    if not key:
+      return False
+    if key in {
+      "backend",
+      "backend_debug",
+      "history_context",
+      "note",
+      "target",
+      "target_kind",
+      "resolved_click_point",
+      "click_target",
+      "device_id",
+      "display_info",
+      "mapping",
+      "host_target",
+      "host_game_window_bbox",
+      "host_game_window_size",
+      "relative_target",
+      "relative_target_clamped",
+      "adb_frame_size",
+      "adb_frame_source",
+      "mapped_target",
+      "orientation_swapped",
+      "bbox",
+      "thumb_rect",
+      "thumb_center",
+      "track_center_x",
+      "reset_swipe",
+      "forward_swipe",
+      "fallback_swipe",
+      "recovery_swipe",
+    }:
+      return True
+    if key.endswith(("_bbox", "_region", "_region_ltrb", "_xywh", "_rect", "_center", "_size")):
+      return True
+    return False
 
   def _calculate_post_action_unattributed_timing(self, payload):
     if not isinstance(payload, dict):

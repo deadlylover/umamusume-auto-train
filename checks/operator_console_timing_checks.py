@@ -221,6 +221,8 @@ def _manual_snapshot():
               "clicked": True,
               "backend": "adb",
               "target": [224, 1399],
+              "resolved_click_point": [224, 1399],
+              "target_kind": "point",
               "backend_debug": {"device_id": "127.0.0.1:5555"},
               "history_context": "timing_check",
               "note": "debug-only noise",
@@ -269,6 +271,9 @@ def main():
   assert "backend_debug" not in manual_text, manual_text
   assert "history_context" not in manual_text, manual_text
   assert "debug-only noise" not in manual_text, manual_text
+  assert "[224, 1399]" not in manual_text, manual_text
+  assert "target_kind" not in manual_text, manual_text
+  assert "backend        adb" not in manual_text, manual_text
   assert "Planner Runtime" not in manual_text, manual_text
 
   post_action_text = console._format_post_action_timing({
