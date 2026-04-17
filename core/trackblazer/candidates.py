@@ -394,6 +394,17 @@ def enumerate_candidate_actions(observed: ObservedTurnState, derived: DerivedTur
       source_facts={"race_name": scheduled_name, **copy.deepcopy(race_opportunity)},
     )
 
+  if race_opportunity.get("maiden_available"):
+    _append_candidate(
+      candidates,
+      node_id="race:maiden",
+      kind="race",
+      rationale="post-debut Junior maiden banner is visible and maiden recovery must clear before normal race selection",
+      requirements=["race_opportunity"],
+      expected_warnings=["consecutive_race_warning"],
+      source_facts=copy.deepcopy(race_opportunity),
+    )
+
   if str(observed_data.get("turn") or "") == "Race Day":
     _append_candidate(
       candidates,

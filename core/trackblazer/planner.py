@@ -1998,6 +1998,7 @@ def _candidate_item_key(node_id: str) -> str:
 def _candidate_is_forced_race(node_id: str) -> bool:
   node_id = str(node_id or "")
   return node_id.startswith("race:scheduled:") or node_id.startswith("race:goal:") or node_id.startswith("race:g1_today:") or node_id in {
+    "race:maiden",
     "race:mission",
     "race:race_day",
     "race:climax_locked",
@@ -2010,28 +2011,30 @@ def _candidate_order_rank(node_id: str) -> int:
     return 0
   if node_id == "race:race_day":
     return 1
-  if node_id.startswith("race:scheduled:"):
+  if node_id == "race:maiden":
     return 2
-  if node_id.startswith("race:goal:"):
+  if node_id.startswith("race:scheduled:"):
     return 3
-  if node_id.startswith("race:g1_today:"):
+  if node_id.startswith("race:goal:"):
     return 4
-  if node_id == "race:mission":
+  if node_id.startswith("race:g1_today:"):
     return 5
-  if node_id.startswith("train:") and "+items:" in node_id:
+  if node_id == "race:mission":
     return 6
-  if node_id.startswith("train:"):
+  if node_id.startswith("train:") and "+items:" in node_id:
     return 7
-  if node_id == "race:rival":
+  if node_id.startswith("train:"):
     return 8
-  if node_id == "race:fallback":
+  if node_id == "race:rival":
     return 9
-  if node_id == "rest":
+  if node_id == "race:fallback":
     return 10
-  if node_id == "recreation":
+  if node_id == "rest":
     return 11
-  if node_id == "infirmary":
+  if node_id == "recreation":
     return 12
+  if node_id == "infirmary":
+    return 13
   return 20
 
 
@@ -2686,6 +2689,15 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         "race_scout_rejected": race_scout_rejected,
         "race_scout_rejection_reason": race_opportunity.get("race_scout_rejection_reason") or race_opportunity.get("rival_scout_rejection_reason"),
       }
+    elif node_id == "race:maiden":
+      maiden_available = bool(race_opportunity.get("maiden_available"))
+      if not maiden_available:
+        viable = False
+      score = 10000.0 + 115.0
+      score_components = {
+        "forced_race": True,
+        "maiden_available": maiden_available,
+      }
     elif _candidate_is_forced_race(node_id):
       forced_bias = {
         "race:climax_locked": 120.0,
@@ -3034,6 +3046,14 @@ def _selected_payload_from_candidate(selected_candidate, state_obj, action, plan
     if node_id == "race:maiden":
       race_name = "any"
       race_image_path = constants.TRACKBLAZER_RACE_TEMPLATES.get("race_recommend_2_aptitudes") or "assets/ui/match_track.png"
+      race_decision = {
+        **race_decision,
+        "mandatory_maiden_race": True,
+        "reason": race_decision.get("reason") or (
+          "Post-debut Junior maiden banner detected on the lobby screen; "
+          "clear any 2-aptitude maiden race before normal selected races can proceed."
+        ),
+      }
     if node_id.startswith("race:scheduled:"):
       race_name = node_id.split("race:scheduled:", 1)[1] or race_name
       scheduled_race = True

@@ -207,6 +207,7 @@ def _race_opportunity(observed_data, lookahead_summary, timeline_policy):
   )
   return {
     "rival_visible": bool(observed_data.get("rival_indicator_detected")),
+    "maiden_available": bool(observed_data.get("trackblazer_maiden_available")),
     "race_scout": race_scout,
     "race_scout_rejected": race_scout_rejected,
     "race_scout_rejection_reason": str(race_scout.get("reason") or "") if race_scout_rejected else "",
