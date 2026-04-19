@@ -2593,7 +2593,8 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
         opportunity_cost = 0.0
         if item_key == "reset_whistle":
           if timeline_policy.get("is_summer_window"):
-            pass
+            if bool(dict(training.get("usage_context") or {}).get("summer_reroll_preferred")):
+              item_delta += 45.0
           elif finale_training_turn:
             if (
               bool(dict(training.get("usage_context") or {}).get("weak_summer_training"))
@@ -2765,6 +2766,21 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     ),
     default=float("-inf"),
   )
+  summer_whistle_reroll_present = any(
+    _candidate_item_key(entry.get("node_id")) == "reset_whistle"
+    and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf")
+    and bool(
+      dict(
+        (
+          dict(entry.get("source_facts") or {}).get("training")
+          or entry.get("source_facts")
+          or {}
+        ).get("usage_context")
+        or {}
+      ).get("summer_reroll_preferred")
+    )
+    for entry in scored
+  )
 
   if not forced_viable:
     if best_training_base_score >= training_threshold:
@@ -2783,7 +2799,8 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
       rival_score = _safe_float(rival_entry.get("priority_score"), float("-inf")) if rival_entry else float("-inf")
       fallback_score = _safe_float(fallback_entry.get("priority_score"), float("-inf")) if fallback_entry else float("-inf")
       if rival_entry and rival_score != float("-inf"):
-        rival_entry["priority_score"] = max(rival_score, non_forced_best + 1.0)
+        if not summer_whistle_reroll_present:
+          rival_entry["priority_score"] = max(rival_score, non_forced_best + 1.0)
       elif fallback_entry and fallback_score != float("-inf") and best_training_class == "weak":
         fallback_entry["priority_score"] = max(fallback_score, non_race_best + 1.0)
 

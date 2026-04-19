@@ -331,6 +331,7 @@ def _training_value(training_results, state_obj, policy):
         "usage_context": {
           "commit_training_after_items": bool(usage_context.get("commit_training_after_items")),
           "weak_summer_training": bool(usage_context.get("weak_summer_training")),
+          "summer_reroll_preferred": bool(usage_context.get("summer_reroll_preferred")),
           "failure_bypassed_by_items": bool(usage_context.get("failure_bypassed_by_items")),
         },
       }

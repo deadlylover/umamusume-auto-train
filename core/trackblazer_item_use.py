@@ -1186,6 +1186,7 @@ def _usage_context(state_obj, action, policy=None):
     )
     spendable_vita_restore_total += restore_value * spendable_quantity
   held_reset_whistles = _current_held_quantity("reset_whistle", inventory, held_quantities)
+  optional_race_threshold = get_training_behavior_optional_race_threshold(normalized_policy)
   trainings_remaining_upper_bound = _safe_int(
     timeline_policy.get("trainings_remaining_upper_bound"),
     _safe_int(state_obj.get("trackblazer_trainings_remaining_upper_bound"), None),
@@ -1236,6 +1237,15 @@ def _usage_context(state_obj, action, policy=None):
     and matching_stat_gain < 20
     and total_stat_gain < 20
     and score_value < 5.0
+  )
+  summer_reroll_preferred = bool(
+    action_func == "do_training"
+    and summer_window
+    and held_reset_whistles > 0
+    and rainbow_count <= 0
+    and score_value <= optional_race_threshold
+    and matching_stat_gain < 25
+    and total_stat_gain < 45
   )
   weak_climax_training = bool(
     action_func == "do_training"
@@ -1410,7 +1420,8 @@ def _usage_context(state_obj, action, policy=None):
       and raiseable_support_count > 0
       and not past_bond_training_cutoff
     ),
-    "weak_summer_training": weak_summer_training or weak_climax_training or bool(reroll_signal.get("needs_reroll")),
+    "weak_summer_training": weak_summer_training or summer_reroll_preferred or weak_climax_training or bool(reroll_signal.get("needs_reroll")),
+    "summer_reroll_preferred": summer_reroll_preferred,
     "weak_climax_training": weak_climax_training,
     "energy_rescue": bool(reroll_signal.get("energy_rescue")),
     "summer_reroll_target_name": reroll_signal.get("risky_training_name"),
@@ -2011,7 +2022,7 @@ def _evaluate_item_candidate(item, context, held_quantity, hammer_spendable):
       return {
         "defer_reason": "save whistle until energy or a Good-Luck Charm is available",
       }
-    if context["commit_training_after_items"]:
+    if context["commit_training_after_items"] and not context.get("summer_reroll_preferred"):
       return {
         "defer_reason": "current training already worth committing burst items",
       }
@@ -2318,6 +2329,7 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
       "climax_commit_total_stat_threshold": context.get("climax_commit_total_stat_threshold"),
       "strong_burst_training": context.get("strong_burst_training"),
       "weak_summer_training": context.get("weak_summer_training"),
+      "summer_reroll_preferred": context.get("summer_reroll_preferred"),
       "weak_climax_training": context.get("weak_climax_training"),
       "failure_bypassed_by_items": context.get("failure_bypassed_by_items"),
       "held_support_item_names": context.get("held_support_item_names"),
@@ -2332,6 +2344,28 @@ def plan_item_usage(policy=None, state_obj=None, action=None, limit=8):
     },
     "candidates": candidates[: max(0, int(limit))],
     "deferred": deferred[: max(0, int(limit))],
+  }
+
+
+def should_reset_whistle_reroll(policy=None, state_obj=None, action=None, limit=8):
+  plan = plan_item_usage(
+    policy=policy,
+    state_obj=state_obj,
+    action=action,
+    limit=limit,
+  )
+  whistle_entry = next(
+    (
+      dict(entry)
+      for entry in (plan.get("candidates") or [])
+      if entry.get("key") == "reset_whistle"
+    ),
+    {},
+  )
+  return {
+    "should_reroll": bool(whistle_entry),
+    "reason": str(whistle_entry.get("reason") or ""),
+    "context": dict(plan.get("context") or {}),
   }
 
 

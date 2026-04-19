@@ -16,6 +16,7 @@ from core.trackblazer_item_use import (
   get_training_behavior_optional_race_threshold,
   get_training_behavior_settings,
   get_training_behavior_strong_training_score_threshold,
+  should_reset_whistle_reroll,
 )
 from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
 from utils.log import debug, info, warning
@@ -1082,6 +1083,32 @@ def evaluate_trackblazer_race(state_obj, action):
 
   # Summer: only race the rival if training score is weak.
   if summer:
+    whistle_reroll = should_reset_whistle_reroll(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=state_obj,
+      action=action,
+      limit=8,
+    )
+    if whistle_reroll.get("should_reroll"):
+      whistle_reason = str(whistle_reroll.get("reason") or "").strip()
+      return _decision(
+        should_race=False,
+        reason=(
+          "Summer board is weak enough to spend Reset Whistle before committing an optional rival race"
+          + (f" ({whistle_reason})" if whistle_reason else "")
+        ),
+        training_total_stats=training_stats,
+        training_score=training_score,
+        training_supports=training_supports,
+        is_summer=True,
+        g1_forced=False,
+        prefer_rival_race=False,
+        race_tier_target=None,
+        race_name=None,
+        race_available=True,
+        rival_indicator=True,
+        race_tier_info=race_info,
+      )
     if training_score is None or training_score <= weak_training_threshold:
       return _decision(
         should_race=True,

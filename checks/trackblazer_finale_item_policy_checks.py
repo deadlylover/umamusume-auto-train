@@ -508,6 +508,74 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     self.assertIn("reset_whistle", candidate_keys)
     self.assertTrue((plan.get("context") or {}).get("summer_window"))
 
+  def test_summer_rival_turn_prefers_reset_whistle_reassess_over_optional_race(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Senior Year Late Aug"
+    state_obj["turn"] = 9
+    state_obj["current_mood"] = "GREAT"
+    state_obj["energy_level"] = 81
+    state_obj["max_energy"] = 126
+    state_obj["rival_indicator_detected"] = True
+    state_obj["trackblazer_inventory"]["reset_whistle"] = {
+      "detected": True,
+      "held_quantity": 3,
+      "increment_target": (3, 3),
+      "category": "condition",
+    }
+    state_obj["trackblazer_inventory_summary"]["held_quantities"]["reset_whistle"] = 3
+    state_obj["trackblazer_inventory_summary"]["items_detected"].append("reset_whistle")
+    state_obj["trackblazer_inventory_summary"]["actionable_items"].append("reset_whistle")
+    state_obj["training_results"] = {
+      "guts": {
+        "name": "guts",
+        "score_tuple": (31.7, 0),
+        "weighted_stat_score": 31.7,
+        "stat_gains": {"guts": 21, "power": 11, "speed": 6, "sp": 9},
+        "failure": 0,
+        "total_supports": 3,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 2, "green": 1, "yellow": 0, "max": 0},
+        "failure_bypassed_by_items": False,
+      },
+      "speed": {
+        "name": "speed",
+        "score_tuple": (30.0, 0),
+        "weighted_stat_score": 30.0,
+        "stat_gains": {"speed": 20, "power": 10, "sp": 8},
+        "failure": 0,
+        "total_supports": 1,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 1, "green": 0, "yellow": 0, "max": 0},
+        "failure_bypassed_by_items": False,
+      },
+    }
+
+    action = Action()
+    action.func = "do_training"
+    action.available_actions = ["do_training", "do_rest", "do_race"]
+    action["training_name"] = "guts"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["guts"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    decision = evaluate_trackblazer_race(state_obj, action)
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+
+    self.assertFalse(decision.get("should_race"))
+    self.assertIn("Reset Whistle", decision.get("reason") or "")
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertTrue(selected_action.get("reassess_after_item_use"))
+    self.assertEqual((turn_plan.get("race_plan") or {}).get("branch_kind"), "training")
+    self.assertEqual(use_now, ["reset_whistle"])
+
   def test_pre_bond_cutoff_training_scoring_keeps_friendship_sensitive_preference(self):
     state_obj = _base_state()
     state_obj["year"] = "Classic Year Early May"
