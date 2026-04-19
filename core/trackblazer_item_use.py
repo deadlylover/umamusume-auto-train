@@ -85,6 +85,7 @@ _ENERGY_RESTORE_VALUES = {
   "energy_drink_max_ex": 0,    # raises max energy (+8), no direct restore
 }
 _ENERGY_RESCUE_TARGET_RATIO = 0.55
+_SAFE_ENERGY_TARGET_RATIO = 0.60
 _ZERO_ENERGY_SCHEDULED_RACE_PCT = 0.02
 # Keep this aligned with the Trackblazer optional-race gate: spending energy to
 # "rescue" a training only makes sense if the reassess pass would still keep
@@ -804,11 +805,46 @@ def _spendable_item_quantity(
   return spendable_quantity
 
 
-def _smallest_held_vita_item(inventory, held_quantities):
+def _target_energy_floor(max_energy, target_ratio):
+  max_energy = max(_safe_float(max_energy, 0.0), 1.0)
+  target_ratio = max(0.0, _safe_float(target_ratio, 0.0))
+  return max(0, int((max_energy * target_ratio) + 0.9999))
+
+
+def _effective_energy_restore_value(item_key, max_energy):
+  max_energy = max(_safe_float(max_energy, 0.0), 1.0)
+  if item_key in {"vita_20", "vita_40", "vita_65", "royal_kale_juice"}:
+    # Planner/item-use policy treats core Trackblazer energy items as restoring
+    # a percentage-style chunk of the current bar rather than flat points.
+    restore_ratio = (_safe_float(_ENERGY_RESTORE_VALUES.get(item_key), 0.0) or 0.0) / 100.0
+    return max(0, int((max_energy * restore_ratio) + 0.5))
+  return max(0, _safe_int(_ENERGY_RESTORE_VALUES.get(item_key), 0) or 0)
+
+
+def _projected_energy_after_item(energy_level, max_energy, item_key):
+  current_energy = max(0, _safe_int(energy_level, 0))
+  max_energy = max(1, _safe_int(max_energy, current_energy))
+  return min(max_energy, current_energy + _effective_energy_restore_value(item_key, max_energy))
+
+
+def _energy_threshold_target_ratio(context):
+  context = context if isinstance(context, dict) else {}
+  max_failure = _safe_int(context.get("max_allowed_failure"), 5)
+  failure_rate = _safe_int(context.get("failure_rate"), 0)
+  if (
+    context.get("energy_rescue")
+    or context.get("failure_bypassed_by_items")
+    or failure_rate > max_failure
+  ):
+    return _ENERGY_RESCUE_TARGET_RATIO
+  return _SAFE_ENERGY_TARGET_RATIO
+
+
+def _smallest_held_vita_item(inventory, held_quantities, max_energy):
   candidates = []
   for item_key in _VITA_ITEM_KEYS:
     held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
-    restore = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    restore = _effective_energy_restore_value(item_key, max_energy)
     if held_quantity <= 0 or restore <= 0:
       continue
     candidates.append((restore, item_key))
@@ -917,7 +953,7 @@ def _affordable_shop_support_items(state_obj):
 def _min_restore_needed_for_ratio(energy_level, max_energy, target_ratio):
   energy_level = _safe_float(energy_level, 0.0)
   max_energy = max(_safe_float(max_energy, energy_level), 1.0)
-  target_energy = max_energy * _safe_float(target_ratio, 0.0)
+  target_energy = _target_energy_floor(max_energy, target_ratio)
   return max(0, int(target_energy - energy_level + 0.9999))
 
 
@@ -1002,7 +1038,7 @@ def _energy_can_rescue_training(state_obj, candidate):
   copy_entries = []
   for item_key in _ENERGY_ITEM_KEYS:
     held = _current_held_quantity(item_key, inventory, held_quantities)
-    restore = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    restore = _effective_energy_restore_value(item_key, max_energy)
     if held <= 0 or restore <= 0:
       continue
     for _ in range(held):
@@ -1163,7 +1199,8 @@ def _usage_context(state_obj, action, policy=None):
   energy_level = _safe_int(state_obj.get("energy_level"), 0)
   max_energy = _safe_int(state_obj.get("max_energy"), energy_level)
   energy_ratio = energy_level / max(max_energy, 1)
-  safe_energy_target = max_energy * 0.60
+  failure_clear_energy_target = _target_energy_floor(max_energy, _ENERGY_RESCUE_TARGET_RATIO)
+  safe_energy_target = _target_energy_floor(max_energy, _SAFE_ENERGY_TARGET_RATIO)
   failure_rescue_vita_override = bool(
     action_func == "do_training"
     and failure_rate > max_failure
@@ -1174,7 +1211,7 @@ def _usage_context(state_obj, action, policy=None):
     held_quantity = _current_held_quantity(item_key, inventory, held_quantities)
     if held_quantity <= 0:
       continue
-    restore_value = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    restore_value = _effective_energy_restore_value(item_key, max_energy)
     total_held_vita_restore += restore_value * held_quantity
     spendable_quantity = _spendable_item_quantity(
       item_key,
@@ -1348,7 +1385,7 @@ def _usage_context(state_obj, action, policy=None):
   race_lookahead = action.get("trackblazer_race_lookahead") if hasattr(action, "get") else {}
   race_lookahead = race_lookahead if isinstance(race_lookahead, dict) else {}
   scheduled_race_low_energy_vita_item_key = (
-    _smallest_held_vita_item(inventory, held_quantities)
+    _smallest_held_vita_item(inventory, held_quantities, max_energy)
     if (
       scheduled_race_action
       and scheduled_race_vita_enabled
@@ -1380,6 +1417,7 @@ def _usage_context(state_obj, action, policy=None):
     "energy_level": energy_level,
     "max_energy": max_energy,
     "energy_deficit": max(0, max_energy - energy_level),
+    "failure_clear_energy_target": failure_clear_energy_target,
     "safe_energy_target": safe_energy_target,
     "held_vita_restore_total": total_held_vita_restore,
     "spendable_vita_restore_total": spendable_vita_restore_total,
@@ -1506,6 +1544,34 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   max_energy = _safe_int(context.get("max_energy"), energy_level)
   energy_candidates = [entry for entry in candidates if entry.get("usage_group") == "energy"]
   kept_energy = []
+
+  def _threshold_energy_choice():
+    if context.get("action_func") != "do_training":
+      return None, None
+    target_ratio = _energy_threshold_target_ratio(context)
+    target_energy = _target_energy_floor(max_energy, target_ratio)
+    threshold_hits = []
+    for entry in energy_candidates:
+      item_key = entry.get("key")
+      restore = _effective_energy_restore_value(item_key, max_energy)
+      if restore <= 0:
+        continue
+      projected_energy = _projected_energy_after_item(energy_level, max_energy, item_key)
+      if projected_energy < target_energy:
+        continue
+      threshold_hits.append((restore, projected_energy, entry))
+    if not threshold_hits:
+      return None, target_ratio
+    threshold_hits.sort(
+      key=lambda item: (
+        item[0],
+        item[1],
+        -_safe_int(item[2].get("candidate_score"), 0),
+        item[2].get("key", ""),
+      )
+    )
+    return threshold_hits[0][2], target_ratio
+
   if energy_candidates and charm_planned:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
     if context.get("spendable_vita_reaches_safe_energy"):
@@ -1529,7 +1595,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
   elif energy_candidates:
     non_energy = [entry for entry in candidates if entry.get("usage_group") != "energy"]
     if context.get("race_low_energy_vita_rescue"):
-      energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
+      energy_candidates.sort(key=lambda entry: _effective_energy_restore_value(entry["key"], max_energy))
       kept_energy = [energy_candidates[0]]
       for entry in energy_candidates[1:]:
         entry.pop("candidate_score", None)
@@ -1545,7 +1611,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
       )
       rescue_copy_entries = []
       for entry in energy_candidates:
-        restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
+        restore = _effective_energy_restore_value(entry["key"], max_energy)
         spendable_copies = max(
           0,
           _safe_int(entry.get("held_quantity"), 0) - _safe_int(entry.get("reserve_quantity"), 0),
@@ -1562,7 +1628,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
           item_key = selected["entry"].get("key")
           planned_counts[item_key] = planned_counts.get(item_key, 0) + 1
         rescue_kept = []
-        for entry in sorted(energy_candidates, key=lambda item: _ENERGY_RESTORE_VALUES.get(item["key"], 0)):
+        for entry in sorted(energy_candidates, key=lambda item: _effective_energy_restore_value(item["key"], max_energy)):
           item_key = entry.get("key")
           copies_needed = planned_counts.get(item_key, 0)
           if copies_needed <= 0:
@@ -1585,10 +1651,42 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
         candidates = non_energy + rescue_kept
         return candidates, deferred, kept_energy
 
-    energy_candidates.sort(key=lambda entry: _ENERGY_RESTORE_VALUES.get(entry["key"], 0))
+    preferred_entry, target_ratio = _threshold_energy_choice()
+    if preferred_entry:
+      preferred_key = preferred_entry.get("key")
+      projected_energy = _projected_energy_after_item(energy_level, max_energy, preferred_key)
+      preferred_restore = _effective_energy_restore_value(preferred_key, max_energy)
+      preferred_entry = dict(preferred_entry)
+      preferred_entry["reason"] = (
+        f"{preferred_entry.get('reason')}; smallest held energy item that reaches "
+        f"{int(target_ratio * 100)}% energy ({energy_level}->{projected_energy}/{max_energy}, "
+        f"+{preferred_restore})"
+      )
+      kept_energy = [preferred_entry]
+      for entry in energy_candidates:
+        if entry.get("key") == preferred_key:
+          continue
+        restore = _effective_energy_restore_value(entry.get("key"), max_energy)
+        projected_energy = _projected_energy_after_item(energy_level, max_energy, entry.get("key"))
+        entry.pop("candidate_score", None)
+        if projected_energy < _target_energy_floor(max_energy, target_ratio):
+          entry["reason"] = (
+            f"does not reach the {int(target_ratio * 100)}% energy target "
+            f"({energy_level}->{projected_energy}/{max_energy}, +{restore})"
+          )
+        else:
+          entry["reason"] = (
+            f"larger than preferred; {preferred_key} already reaches the "
+            f"{int(target_ratio * 100)}% energy target"
+          )
+        deferred.append(entry)
+      candidates = non_energy + kept_energy
+      return candidates, deferred, kept_energy
+
+    energy_candidates.sort(key=lambda entry: _effective_energy_restore_value(entry["key"], max_energy))
     planned_energy_restored = 0
     for entry in energy_candidates:
-      restore = _ENERGY_RESTORE_VALUES.get(entry["key"], 0)
+      restore = _effective_energy_restore_value(entry["key"], max_energy)
       remaining_deficit = max(0, max_energy - (energy_level + planned_energy_restored))
       if planned_energy_restored > 0 and remaining_deficit <= 0:
         entry.pop("candidate_score", None)
@@ -1613,7 +1711,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
     # planned, another copy is held, and total energy would still be at or
     # below 60 % after the first restore. This is intentionally a narrow rule:
     # no mid-flow reassess, just stage a second increment for the same item.
-    target_energy_floor = max_energy * 0.60
+    target_energy_floor = _target_energy_floor(max_energy, _SAFE_ENERGY_TARGET_RATIO)
     planned_counts = {}
     for entry in kept_energy:
       item_key = entry.get("key")
@@ -1627,7 +1725,7 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
         break
       if projected_energy > target_energy_floor:
         break
-      second_restore = _ENERGY_RESTORE_VALUES.get("vita_20", 20)
+      second_restore = _effective_energy_restore_value("vita_20", max_energy)
       if projected_energy + second_restore > max_energy:
         break
       duplicate_entry = dict(entry)

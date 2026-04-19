@@ -274,7 +274,15 @@ def _training_value(training_results, state_obj, policy):
     held_quantities = dict(((state_obj or {}).get("trackblazer_inventory_summary") or {}).get("held_quantities") or {})
     shop_items = set((state_obj or {}).get("trackblazer_shop_items") or [])
     best_item_key = None
-    if int(held_quantities.get("reset_whistle", 0) or 0) > 0 and usage_context.get("weak_summer_training"):
+    # Do not let Reset Whistle hijack a training that is already viable once a
+    # held failure-bypass item is applied. Finale/climax weak-board logic must
+    # judge the board as it exists after item clear, not treat that same line
+    # as a reroll candidate and award whistle the failure-bypass bonus.
+    if (
+      int(held_quantities.get("reset_whistle", 0) or 0) > 0
+      and usage_context.get("weak_summer_training")
+      and not usage_context.get("failure_bypassed_by_items")
+    ):
       best_item_key = "reset_whistle"
     elif any(int(held_quantities.get(key, 0) or 0) > 0 for key in _MEGAPHONE_KEYS) and usage_context.get("commit_training_after_items"):
       best_item_key = next((key for key in _MEGAPHONE_KEYS if int(held_quantities.get(key, 0) or 0) > 0), None)

@@ -11,8 +11,8 @@ import core.bot as bot
 import core.config as config
 from core.race_selector import get_race_gate_for_turn_label, normalize_operator_race_selector
 from core.trackblazer_item_use import (
-  _ENERGY_RESTORE_VALUES,
   _VITA_ITEM_KEYS,
+  _effective_energy_restore_value,
   get_training_behavior_optional_race_threshold,
   get_training_behavior_settings,
   get_training_behavior_strong_training_score_threshold,
@@ -78,14 +78,15 @@ def _safe_float(value):
     return None
 
 
-def _safe_energy_restore_item(held_quantities, current_energy, target_energy):
+def _safe_energy_restore_item(held_quantities, current_energy, target_energy, max_energy):
   held_quantities = held_quantities if isinstance(held_quantities, dict) else {}
   current_energy = _safe_int(current_energy) or 0
   target_energy = _safe_int(target_energy) or 0
+  max_energy = max(_safe_int(max_energy) or 0, target_energy, current_energy, 1)
 
   matching_items = []
   for item_key in _VITA_ITEM_KEYS:
-    restore_value = _ENERGY_RESTORE_VALUES.get(item_key, 0)
+    restore_value = _effective_energy_restore_value(item_key, max_energy)
     if restore_value <= 0:
       continue
     if (_safe_int(held_quantities.get(item_key)) or 0) <= 0:
@@ -623,6 +624,7 @@ def get_race_lookahead_energy_advice(state_obj, selector=None):
     (state_obj.get("trackblazer_inventory_summary") or {}).get("held_quantities") or {},
     base_advice["current_energy"],
     safe_energy_target,
+    max_energy,
   )
   has_native_energy = base_advice["current_energy"] >= safe_energy_target
   can_train_and_race = has_native_energy or bool(energy_item)

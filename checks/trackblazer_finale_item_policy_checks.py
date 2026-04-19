@@ -5,6 +5,7 @@ import utils.constants as constants
 from core.actions import Action
 from core.strategies import Strategy
 from core.trackblazer import planner as planner_module
+from core.trackblazer_item_use import get_planned_failure_bypass_items
 from core.trackblazer_race_logic import evaluate_trackblazer_race
 from core.trackblazer_item_use import plan_item_usage
 from core.trackblazer.timeline_policy import get_trackblazer_timeline_policy
@@ -73,6 +74,28 @@ def _base_state():
     "state_validation": {"valid": True},
     "trackblazer_shop_priority_preview": [],
   }
+
+
+def _annotate_failure_bypass_items(state_obj, training_name):
+  preview_action = Action()
+  preview_action.func = "do_training"
+  preview_action["training_name"] = training_name
+  preview_action["training_function"] = "stat_weight_training"
+  preview_action["training_data"] = dict((state_obj.get("training_results") or {}).get(training_name) or {})
+  preview_action["available_trainings"] = dict(state_obj.get("training_results") or {})
+  bypass = get_planned_failure_bypass_items(
+    policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+    state_obj=state_obj,
+    action=preview_action,
+    limit=8,
+  )
+  state_obj["training_results"][training_name]["failure_bypassed_by_items"] = bool(bypass.get("can_bypass"))
+  state_obj["training_results"][training_name]["trackblazer_failure_bypass_items"] = [
+    entry.get("key")
+    for entry in list(bypass.get("candidates") or [])
+    if entry.get("key")
+  ]
+  return bypass
 
 
 class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
@@ -393,6 +416,197 @@ class TrackblazerFinaleItemPolicyChecks(unittest.TestCase):
     self.assertNotEqual(selected_action.get("training_name"), "wit")
     self.assertIn("royal_kale_juice", use_now)
     self.assertIn("motivating_megaphone", deferred_use)
+
+  def test_finale_underway_failure_clear_training_beats_reset_whistle_reroll(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_climax_locked_race"] = False
+    state_obj["trackblazer_trainings_remaining_upper_bound"] = 3
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 13
+    state_obj["max_energy"] = 130
+    state_obj["current_mood"] = "GREAT"
+    state_obj["current_stats"] = {
+      "spd": 905,
+      "sta": 859,
+      "pwr": 1036,
+      "guts": 441,
+      "wit": 599,
+      "sp": 1630,
+    }
+    state_obj["training_results"] = {
+      "spd": {
+        "name": "spd",
+        "score_tuple": (56.0, 0),
+        "weighted_stat_score": 56.0,
+        "stat_gains": {"spd": 36, "pwr": 20},
+        "failure": 97,
+        "total_supports": 2,
+        "total_rainbow_friends": 2,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 2},
+      },
+      "guts": {
+        "name": "guts",
+        "score_tuple": (15.4, 0),
+        "weighted_stat_score": 15.4,
+        "stat_gains": {"guts": 12, "pwr": 7},
+        "failure": 99,
+        "total_supports": 2,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 2},
+      },
+      "wit": {
+        "name": "wit",
+        "score_tuple": (13.0, 0),
+        "weighted_stat_score": 13.0,
+        "stat_gains": {"wit": 10, "spd": 3},
+        "failure": 45,
+        "total_supports": 1,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 1},
+      },
+    }
+    state_obj["trackblazer_inventory"] = {
+      "reset_whistle": {"detected": True, "held_quantity": 1, "increment_target": (1, 1), "category": "condition"},
+      "royal_kale_juice": {"detected": True, "held_quantity": 1, "increment_target": (2, 2), "category": "energy"},
+      "vita_20": {"detected": True, "held_quantity": 1, "increment_target": (3, 3), "category": "energy"},
+    }
+    state_obj["trackblazer_inventory_summary"] = {
+      "held_quantities": {
+        "reset_whistle": 1,
+        "royal_kale_juice": 1,
+        "vita_20": 1,
+      },
+      "items_detected": ["reset_whistle", "royal_kale_juice", "vita_20"],
+      "actionable_items": ["reset_whistle", "royal_kale_juice", "vita_20"],
+      "by_category": {
+        "condition": ["reset_whistle"],
+        "energy": ["royal_kale_juice", "vita_20"],
+      },
+      "total_detected": 3,
+    }
+    spd_bypass = _annotate_failure_bypass_items(state_obj, "spd")
+    _annotate_failure_bypass_items(state_obj, "guts")
+
+    action = Action()
+    action.func = "do_training"
+    action.available_actions = ["do_training", "do_rest", "do_race"]
+    action["training_name"] = "guts"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["guts"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+    ranked_candidates = list(turn_plan.get("candidate_ranking") or [])
+
+    self.assertEqual(
+      [entry.get("key") for entry in list(spd_bypass.get("candidates") or [])],
+      ["royal_kale_juice"],
+    )
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertEqual(selected_action.get("training_name"), "spd")
+    self.assertEqual(use_now, ["royal_kale_juice"])
+    self.assertNotIn("reset_whistle", use_now)
+    self.assertEqual((ranked_candidates[0] or {}).get("node_id"), "train:spd+items:royal_kale_juice")
+
+  def test_finale_underway_threshold_clear_still_prefers_vita_20_when_sufficient(self):
+    state_obj = _base_state()
+    state_obj["year"] = "Finale Underway"
+    state_obj["turn"] = 1
+    state_obj["trackblazer_climax"] = True
+    state_obj["trackblazer_climax_race_day"] = False
+    state_obj["trackblazer_climax_locked_race"] = False
+    state_obj["trackblazer_trainings_remaining_upper_bound"] = 3
+    state_obj["criteria"] = "Win the Twinkle Star Climax series Current Rank RANK 1"
+    state_obj["energy_level"] = 46
+    state_obj["max_energy"] = 130
+    state_obj["current_mood"] = "GREAT"
+    state_obj["current_stats"] = {
+      "spd": 950,
+      "sta": 780,
+      "pwr": 1010,
+      "guts": 420,
+      "wit": 620,
+      "sp": 1500,
+    }
+    state_obj["training_results"] = {
+      "spd": {
+        "name": "spd",
+        "score_tuple": (41.0, 0),
+        "weighted_stat_score": 41.0,
+        "stat_gains": {"spd": 26, "pwr": 11},
+        "failure": 21,
+        "total_supports": 2,
+        "total_rainbow_friends": 1,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 2},
+      },
+      "wit": {
+        "name": "wit",
+        "score_tuple": (10.0, 0),
+        "weighted_stat_score": 10.0,
+        "stat_gains": {"wit": 8, "spd": 2},
+        "failure": 0,
+        "total_supports": 1,
+        "total_rainbow_friends": 0,
+        "total_friendship_levels": {"gray": 0, "blue": 0, "green": 0, "yellow": 0, "max": 1},
+      },
+    }
+    state_obj["trackblazer_inventory"] = {
+      "vita_20": {"detected": True, "held_quantity": 1, "increment_target": (1, 1), "category": "energy"},
+      "royal_kale_juice": {"detected": True, "held_quantity": 1, "increment_target": (2, 2), "category": "energy"},
+    }
+    state_obj["trackblazer_inventory_summary"] = {
+      "held_quantities": {
+        "vita_20": 1,
+        "royal_kale_juice": 1,
+      },
+      "items_detected": ["vita_20", "royal_kale_juice"],
+      "actionable_items": ["vita_20", "royal_kale_juice"],
+      "by_category": {
+        "energy": ["vita_20", "royal_kale_juice"],
+      },
+      "total_detected": 2,
+    }
+    spd_bypass = _annotate_failure_bypass_items(state_obj, "spd")
+
+    action = Action()
+    action.func = "do_training"
+    action.available_actions = ["do_training", "do_rest", "do_race"]
+    action["training_name"] = "spd"
+    action["training_function"] = "stat_weight_training"
+    action["training_data"] = dict(state_obj["training_results"]["spd"])
+    action["available_trainings"] = dict(state_obj["training_results"])
+
+    plan = planner_module.plan_once(state_obj, action, limit=8)
+    turn_plan = plan.get("turn_plan") or {}
+    review_context = dict(turn_plan.get("review_context") or {})
+    selected_action = dict(review_context.get("selected_action") or {})
+    item_plan = dict(turn_plan.get("item_plan") or {})
+    use_now = [
+      entry.get("key")
+      for entry in list(((item_plan.get("execution_payload") or {}).get("execution_items") or []))
+    ]
+    ranked_candidates = list(turn_plan.get("candidate_ranking") or [])
+
+    self.assertEqual(
+      [entry.get("key") for entry in list(spd_bypass.get("candidates") or [])],
+      ["vita_20"],
+    )
+    self.assertEqual(selected_action.get("func"), "do_training")
+    self.assertEqual(selected_action.get("training_name"), "spd")
+    self.assertEqual(use_now, ["vita_20"])
+    self.assertEqual((ranked_candidates[0] or {}).get("node_id"), "train:spd+items:vita_20")
 
   def test_legacy_race_logic_suppresses_finale_optional_fallback_race(self):
     state_obj = _base_state()
