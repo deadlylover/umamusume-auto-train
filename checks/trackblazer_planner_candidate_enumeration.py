@@ -137,6 +137,16 @@ def main():
   _, _, low_energy_rival_candidates = _run(low_energy_rival_state)
   assert "race:rival" not in _node_ids(low_energy_rival_candidates)
 
+  maiden_state = _base_state()
+  maiden_state["year"] = "Junior Year Early Jul"
+  maiden_state["turn"] = 12
+  maiden_state["trackblazer_maiden_available"] = True
+  maiden_state["trackblazer_maiden_detection"] = {"detected": True}
+  maiden_observed, maiden_derived, maiden_candidates = _run(maiden_state)
+  assert maiden_observed.get("trackblazer_maiden_available") is True
+  assert maiden_derived.get("race_opportunity", {}).get("maiden_available") is True
+  assert "race:maiden" in _node_ids(maiden_candidates)
+
   status_state = _base_state()
   status_state["status_effect_names"] = ["Headache"]
   _, _, status_candidates = _run(status_state)

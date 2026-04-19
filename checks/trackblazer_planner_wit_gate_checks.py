@@ -192,6 +192,65 @@ class TrackblazerPlannerWitGateChecks(unittest.TestCase):
     self.assertNotEqual(wit_entry["priority_score"], float("-inf"))
     self.assertTrue(wit_entry["source_facts"]["wit_failure_gate"]["allowed"])
 
+  def test_adequate_safe_wit_beats_mid_energy_rest(self):
+    observed_data = {
+      "year": "Junior Year Early Jul",
+      "turn": 12,
+      "energy_level": 58.1,
+      "max_energy": 125.8,
+      "current_mood": "GREAT",
+      "training_results": {
+        "wit": {
+          "failure": 0,
+          "total_supports": 2,
+          "total_rainbow_friends": 0,
+        },
+      },
+      "missing_inputs": [],
+      "rival_indicator_detected": False,
+      "trackblazer_lobby_scheduled_race": False,
+      "race_mission_available": False,
+      "trackblazer_climax_locked_race": False,
+      "trackblazer_climax_race_day": False,
+      "status_effect_names": [],
+    }
+    derived_data = {
+      "energy_ratio": observed_data["energy_level"] / observed_data["max_energy"],
+      "training_value": [
+        {
+          "name": "wit",
+          "score": 47.8,
+          "total_stat_gain": 16.0,
+          "matching_stat_gain": 11.0,
+          "failure": 0,
+          "support_count": 2,
+          "rainbow_count": 0,
+          "value_class": "adequate",
+          "usage_context": {},
+        },
+      ],
+      "lookahead_summary": {},
+      "race_opportunity": {},
+      "timeline_policy": {
+        "optional_races_allowed": True,
+      },
+    }
+    candidates = [
+      {"node_id": "train:wit", "requirements": [], "rationale": "wit candidate"},
+      {"node_id": "rest", "requirements": [], "rationale": "rest candidate"},
+    ]
+
+    ranked = _score_planner_native_candidates(
+      observed_data,
+      derived_data,
+      getattr(config, "TRACKBLAZER_PLANNER_POLICY", {}),
+      candidates,
+    )
+
+    self.assertEqual(ranked[0]["node_id"], "train:wit")
+    rest_entry = next(entry for entry in ranked if entry["node_id"] == "rest")
+    self.assertIn("adequate-or-better training", rest_entry["rationale"])
+
 
 if __name__ == "__main__":
   unittest.main()

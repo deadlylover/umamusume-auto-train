@@ -2467,6 +2467,7 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
   }
   training_threshold = _safe_float(policy.get("training_overrides_race_threshold"), 40.0)
   rival_min_energy = _safe_float(policy.get("rival_race_min_energy_ratio"), 0.02)
+  rest_adequate_training_penalty = _safe_float(policy.get("rest_adequate_training_penalty"), 7.0)
   energy_cutoffs = policy.get("energy_class_cutoffs") if isinstance(policy.get("energy_class_cutoffs"), dict) else {}
   scout_failed_train_energy_ratio = _safe_float(
     policy.get("race_scout_failed_train_energy_ratio", policy.get("rival_scout_failed_train_energy_ratio")),
@@ -2840,6 +2841,23 @@ def _score_planner_native_candidates(observed_data, derived_data, policy, planne
     for entry in scored:
       if entry.get("node_id") == "rest" and _safe_float(entry.get("priority_score"), float("-inf")) != float("-inf"):
         entry["priority_score"] = _safe_float(entry.get("priority_score"), 0.0) + 6.0
+
+  if (
+    not forced_viable
+    and rest_entry
+    and _safe_float(rest_entry.get("priority_score"), float("-inf")) != float("-inf")
+    and best_training_score != float("-inf")
+    and best_training_class in {"adequate", "strong", "very_strong"}
+    and not bool(lookahead.get("projected_energy_deficit"))
+    and rest_adequate_training_penalty > 0.0
+  ):
+    rest_entry["priority_score"] = (
+      _safe_float(rest_entry.get("priority_score"), 0.0) - rest_adequate_training_penalty
+    )
+    rest_entry["rationale"] = (
+      f"{rest_entry.get('rationale') or ''}; penalized because an adequate-or-better "
+      f"training ({best_training_class}) is already available"
+    ).strip("; ")
 
   if (
     not forced_viable

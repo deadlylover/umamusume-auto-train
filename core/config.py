@@ -13,6 +13,7 @@ TRACKBLAZER_PLANNER_POLICY = {
   "training_overrides_race_threshold": 30,
   "rival_race_min_energy_ratio": 0.02,
   "race_scout_failed_train_energy_ratio": 0.70,
+  "rest_adequate_training_penalty": 7,
   "lookahead_horizon_turns": 3,
   "max_fallback_depth": 3,
   "bond_training_cutoff_turn": None,
@@ -77,6 +78,9 @@ def normalize_trackblazer_planner_policy(raw_policy=None):
         "race_scout_failed_train_energy_ratio",
         raw_policy.get("rival_scout_failed_train_energy_ratio", defaults["race_scout_failed_train_energy_ratio"]),
       )
+    ),
+    "rest_adequate_training_penalty": float(
+      raw_policy.get("rest_adequate_training_penalty", defaults["rest_adequate_training_penalty"])
     ),
     "lookahead_horizon_turns": int(raw_policy.get("lookahead_horizon_turns", defaults["lookahead_horizon_turns"])),
     "max_fallback_depth": int(raw_policy.get("max_fallback_depth", defaults["max_fallback_depth"])),
