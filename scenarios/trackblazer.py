@@ -5374,7 +5374,7 @@ def check_climax_race_day_button():
 
 def inspect_maiden_detection(screenshot=None, log_result=True):
     """Inspect the post-debut Junior maiden banner on the Trackblazer lobby."""
-    region_ltrb = getattr(constants, "TRACKBLAZER_MAIDEN_BBOX", None)
+    region_ltrb = getattr(constants, "SCREEN_BOTTOM_BBOX", None)
     result = {
         "detected": False,
         "region_ltrb": [int(v) for v in region_ltrb] if region_ltrb else None,
