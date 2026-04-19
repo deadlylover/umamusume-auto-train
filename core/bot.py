@@ -61,6 +61,8 @@ debug_history = []          # Ring buffer of recent template match / action even
 DEBUG_HISTORY_MAX = 1000
 pending_trackblazer_shop_check = False
 pending_trackblazer_shop_check_reason = ""
+trackblazer_finale_shop_scan_completed = False
+trackblazer_finale_shop_scan_turn_key = ""
 trackblazer_training_items_button_observation = {}
 review_waiting = False
 review_event = threading.Event()
@@ -667,6 +669,8 @@ def get_runtime_state():
       "execution_intent": execution_intent,
       "pending_trackblazer_shop_check": pending_trackblazer_shop_check,
       "pending_trackblazer_shop_check_reason": pending_trackblazer_shop_check_reason,
+      "trackblazer_finale_shop_scan_completed": trackblazer_finale_shop_scan_completed,
+      "trackblazer_finale_shop_scan_turn_key": trackblazer_finale_shop_scan_turn_key,
       "trackblazer_training_items_button_observation": dict(trackblazer_training_items_button_observation or {}),
       "trackblazer_use_items_enabled": trackblazer_use_items_enabled,
       "trackblazer_use_new_planner_enabled": trackblazer_use_new_planner_enabled,
@@ -803,6 +807,53 @@ def has_pending_trackblazer_shop_check():
 def get_pending_trackblazer_shop_check_reason():
   with runtime_lock:
     return str(pending_trackblazer_shop_check_reason or "")
+
+
+def mark_trackblazer_finale_shop_scan_completed(turn_key=""):
+  global trackblazer_finale_shop_scan_completed, trackblazer_finale_shop_scan_turn_key, runtime_updated_at
+  with runtime_lock:
+    was_completed = trackblazer_finale_shop_scan_completed
+    previous_turn_key = trackblazer_finale_shop_scan_turn_key
+    trackblazer_finale_shop_scan_completed = True
+    trackblazer_finale_shop_scan_turn_key = str(turn_key or "")
+    runtime_updated_at = time.time()
+    if (not was_completed) or previous_turn_key != trackblazer_finale_shop_scan_turn_key:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "trackblazer_finale_shop_scan",
+        "result": "set",
+        "context": "runtime_flow",
+        "turn_key": trackblazer_finale_shop_scan_turn_key,
+        "previous_turn_key": previous_turn_key,
+      })
+
+
+def clear_trackblazer_finale_shop_scan_completed():
+  global trackblazer_finale_shop_scan_completed, trackblazer_finale_shop_scan_turn_key, runtime_updated_at
+  with runtime_lock:
+    was_completed = trackblazer_finale_shop_scan_completed
+    previous_turn_key = trackblazer_finale_shop_scan_turn_key
+    trackblazer_finale_shop_scan_completed = False
+    trackblazer_finale_shop_scan_turn_key = ""
+    runtime_updated_at = time.time()
+    if was_completed or previous_turn_key:
+      push_debug_history({
+        "event": "runtime_flag",
+        "asset": "trackblazer_finale_shop_scan",
+        "result": "cleared",
+        "context": "runtime_flow",
+        "turn_key": previous_turn_key,
+      })
+
+
+def has_trackblazer_finale_shop_scan_completed():
+  with runtime_lock:
+    return bool(trackblazer_finale_shop_scan_completed)
+
+
+def get_trackblazer_finale_shop_scan_turn_key():
+  with runtime_lock:
+    return str(trackblazer_finale_shop_scan_turn_key or "")
 
 
 def begin_review_wait():

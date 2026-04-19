@@ -172,9 +172,15 @@ TRACKBLAZER_INVENTORY_STATE_KEYS = (
   "trackblazer_inventory_summary",
   "trackblazer_inventory_flow",
 )
+TRACKBLAZER_SHOP_STATE_KEYS = (
+  "trackblazer_shop_items",
+  "trackblazer_shop_summary",
+  "trackblazer_shop_flow",
+)
 last_trackblazer_shop_refresh_turn = None
 _cached_trackblazer_inventory = None
 _cached_trackblazer_inventory_turn = None
+_cached_trackblazer_shop_state = None
 _TRACKBLAZER_INVENTORY_CACHE_MAX_TURNS = 3
 
 
@@ -272,6 +278,38 @@ def _restore_cached_trackblazer_inventory(state_obj, current_turn_number=None):
   return True
 
 
+def _cache_trackblazer_shop_state(state_obj):
+  global _cached_trackblazer_shop_state
+  if not isinstance(state_obj, dict):
+    return False
+  payload = {}
+  for key in TRACKBLAZER_SHOP_STATE_KEYS:
+    if state_obj.get(key) is not None:
+      payload[key] = copy.deepcopy(state_obj.get(key))
+  if not payload:
+    return False
+  _cached_trackblazer_shop_state = payload
+  return True
+
+
+def _restore_cached_trackblazer_shop_state(state_obj):
+  if not isinstance(state_obj, dict) or not isinstance(_cached_trackblazer_shop_state, dict):
+    return False
+  restored = False
+  for key in TRACKBLAZER_SHOP_STATE_KEYS:
+    if state_obj.get(key):
+      continue
+    cached_value = _cached_trackblazer_shop_state.get(key)
+    if cached_value is None:
+      continue
+    state_obj[key] = copy.deepcopy(cached_value)
+    restored = True
+  if restored and isinstance(state_obj.get("trackblazer_shop_flow"), dict):
+    state_obj["trackblazer_shop_flow"]["cached_from_previous_scan"] = True
+    state_obj["trackblazer_shop_flow"]["cache_reason"] = "finale_window_static_shop"
+  return restored
+
+
 def _trackblazer_inventory_flow_cacheable(flow):
   if not isinstance(flow, dict):
     return False
@@ -296,6 +334,22 @@ def _invalidate_trackblazer_inventory_cache():
   global _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
   _cached_trackblazer_inventory = None
   _cached_trackblazer_inventory_turn = None
+
+
+def _trackblazer_climax_window_active(state_obj):
+  if not isinstance(state_obj, dict):
+    return False
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  return bool(timeline_policy.get("is_climax_window"))
+
+
+def _trackblazer_finale_static_shop_active(state_obj):
+  return bool(
+    _trackblazer_climax_window_active(state_obj)
+    and bot.has_trackblazer_finale_shop_scan_completed()
+    and isinstance(_cached_trackblazer_shop_state, dict)
+    and bool(_cached_trackblazer_shop_state)
+  )
 
 
 def _apply_trackblazer_used_items_to_state(state_obj, used_item_keys):
@@ -477,6 +531,17 @@ def _sync_planner_pending_shop_scan_request(state_obj):
     return {}
   runtime_state = ensure_planner_runtime_state(state_obj)
   pending = dict(runtime_state.get("pending_shop_scan") or {})
+  if _trackblazer_finale_static_shop_active(state_obj):
+    if bot.has_pending_trackblazer_shop_check() and bot.get_pending_trackblazer_shop_check_reason().startswith("planner_"):
+      bot.clear_trackblazer_shop_check_request()
+    pending.update({
+      "status": "satisfied",
+      "reason": "",
+      "source": "finale_window_static_shop",
+    })
+    runtime_state["pending_shop_scan"] = pending
+    state_obj[PLANNER_RUNTIME_KEY] = runtime_state
+    return pending
   current_turn_key = f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}"
   pending_status = str(pending.get("status") or "idle")
   pending_turn_key = str(pending.get("turn_key") or "")
@@ -530,15 +595,27 @@ def _handle_trackblazer_shop_refresh_popup():
   if dismiss_target:
     click_metrics = device_action.click_with_metrics(dismiss_target)
     if click_metrics.get("clicked"):
-      bot.request_trackblazer_shop_check("refresh_dialog_popup")
-      info("[TB_SHOP] Refresh popup detected; dismissed it and queued a shop check.")
+      finale_static_shop_active = bool(
+        bot.has_trackblazer_finale_shop_scan_completed()
+        and isinstance(_cached_trackblazer_shop_state, dict)
+        and bool(_cached_trackblazer_shop_state)
+      )
+      if finale_static_shop_active:
+        info("[TB_SHOP] Refresh popup detected during static finale shop window; dismissed without queuing a recheck.")
+      else:
+        bot.request_trackblazer_shop_check("refresh_dialog_popup")
+        info("[TB_SHOP] Refresh popup detected; dismissed it and queued a shop check.")
       bot.push_debug_history({"event": "click", "asset": "shop_refresh_cancel", "result": "clicked", "context": "trackblazer_refresh_popup"})
       return {
         "detected": True,
         "handled": True,
         "popup_type": "shop_refresh_popup",
-        "reason": "dismissed_and_queued_shop_check",
-        "deferred_work": ["shop_check_pending"],
+        "reason": (
+          "dismissed_static_finale_shop"
+          if finale_static_shop_active
+          else "dismissed_and_queued_shop_check"
+        ),
+        "deferred_work": [] if finale_static_shop_active else ["shop_check_pending"],
       }
 
   warning("[TB_SHOP] Refresh popup detected but dismiss button was not clickable; shop check NOT queued.")
@@ -5867,6 +5944,7 @@ def _run_trackblazer_shop_purchases(state_obj, action):
   state_obj["trackblazer_shop_items"] = result.get("trackblazer_shop_items")
   state_obj["trackblazer_shop_summary"] = result.get("trackblazer_shop_summary")
   state_obj["trackblazer_shop_flow"] = result.get("trackblazer_shop_flow")
+  _cache_trackblazer_shop_state(state_obj)
 
   if not result.get("success"):
     flow = result.get("trackblazer_shop_flow") or {}
@@ -6969,15 +7047,17 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       return "execute"
 
 def career_lobby(dry_run_turn=False):
-  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn
+  global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn, _cached_trackblazer_shop_state
   non_match_count = 0
   action_count=0
   scenario_detection_attempts = 0
   last_trackblazer_shop_refresh_turn = None
   _cached_trackblazer_inventory = None
   _cached_trackblazer_inventory_turn = None
+  _cached_trackblazer_shop_state = None
   bot.reset_turn_metrics()
   bot.clear_trackblazer_shop_check_request()
+  bot.clear_trackblazer_finale_shop_scan_completed()
   bot.clear_trackblazer_training_items_button_observation()
   sleep(1)
   bot.PREFERRED_POSITION_SET = False
@@ -7347,13 +7427,33 @@ def career_lobby(dry_run_turn=False):
             _invalidate_trackblazer_inventory_cache()
         _copy_trackblazer_inventory_snapshot(state_obj)
         current_trackblazer_turn = _trackblazer_turn_key(state_obj)
+        finale_static_shop_active = _trackblazer_finale_static_shop_active(state_obj)
+        finale_entry_scan_required = bool(
+          _trackblazer_climax_window_active(state_obj)
+          and not finale_static_shop_active
+        )
+        if finale_static_shop_active and _restore_cached_trackblazer_shop_state(state_obj):
+          info("[TB_SHOP] Using cached shop state for static finale window.")
         _sync_planner_pending_shop_scan_request(state_obj)
         pending_shop_check = bot.has_pending_trackblazer_shop_check()
         pending_shop_reason = bot.get_pending_trackblazer_shop_check_reason()
+        if finale_static_shop_active and pending_shop_check:
+          info(
+            "[TB_SHOP] Suppressing queued shop recheck during static finale window. "
+            f"reason={pending_shop_reason or 'pending_shop_check'}."
+          )
+          bot.clear_trackblazer_shop_check_request()
+          pending_shop_check = False
+          pending_shop_reason = ""
         never_scanned = last_trackblazer_shop_refresh_turn is None
         automatic_turn_scan = (
           never_scanned
-          or (execution_intent == "check_only" and current_trackblazer_turn != last_trackblazer_shop_refresh_turn)
+          or finale_entry_scan_required
+          or (
+            execution_intent == "check_only"
+            and not finale_static_shop_active
+            and current_trackblazer_turn != last_trackblazer_shop_refresh_turn
+          )
         )
         shop_flow = {}
         ready_after_shop_scan = True
@@ -7366,6 +7466,8 @@ def career_lobby(dry_run_turn=False):
               f"pending={bool(pending_shop_check)}; "
               f"pending_reason={pending_shop_reason or '-'}; "
               f"automatic={bool(automatic_turn_scan)}; "
+              f"finale_entry_required={bool(finale_entry_scan_required)}; "
+              f"finale_static_shop={bool(finale_static_shop_active)}; "
               f"current_turn={current_trackblazer_turn}; "
               f"last_refresh_turn={last_trackblazer_shop_refresh_turn}"
             ),
@@ -7375,7 +7477,15 @@ def career_lobby(dry_run_turn=False):
           )
           update_operator_snapshot(phase="checking_shop", message="Scanning Trackblazer shop.", sub_phase="scan_shop")
           from scenarios.trackblazer import check_trackblazer_shop_inventory
-          trigger = pending_shop_reason or ("first_scan" if never_scanned else "automatic" if automatic_turn_scan else "pending_shop_check")
+          trigger = pending_shop_reason or (
+            "finale_entry"
+            if finale_entry_scan_required else
+            "first_scan"
+            if never_scanned else
+            "automatic"
+            if automatic_turn_scan else
+            "pending_shop_check"
+          )
           with _timed_turn_step("Trackblazer shop", "scan", key="trackblazer_shop") as step:
             shop_result = check_trackblazer_shop_inventory(
               trigger=trigger,
@@ -7565,6 +7675,11 @@ def career_lobby(dry_run_turn=False):
               )
               continue
           if shop_flow.get("entered") and shop_flow.get("closed"):
+            _cache_trackblazer_shop_state(state_obj)
+            if _trackblazer_climax_window_active(state_obj):
+              bot.mark_trackblazer_finale_shop_scan_completed(
+                turn_key=f"{state_obj.get('year') or '?'}|{state_obj.get('turn') or '?'}"
+              )
             ready_after_shop_scan = _wait_for_lobby_after_shop_purchase()
             if not ready_after_shop_scan:
               warning("[TB_SHOP] Ready screen not confirmed after shop scan; forced-race detection may be stale.")
@@ -7574,17 +7689,31 @@ def career_lobby(dry_run_turn=False):
               f"reason={shop_flow.get('reason') or 'unknown'}."
             )
         elif execution_intent == "check_only":
-          info(
-            "[TB_SHOP] Skipping automatic shop recheck for this turn; "
-            f"already refreshed inventory after shop for {current_trackblazer_turn}."
-          )
+          if finale_static_shop_active:
+            info("[TB_SHOP] Skipping shop recheck during static finale window; cached finale shop state remains valid.")
+          else:
+            info(
+              "[TB_SHOP] Skipping automatic shop recheck for this turn; "
+              f"already refreshed inventory after shop for {current_trackblazer_turn}."
+            )
           bot.record_turn_timing_step(
             label="Trackblazer shop",
             category="decision",
             key="trackblazer_shop",
             duration=0.0,
-            detail="Skipped automatic shop recheck for this turn.",
-            data={"skipped": True, "reason": "already_refreshed_this_turn"},
+            detail=(
+              "Skipped shop recheck during static finale window."
+              if finale_static_shop_active else
+              "Skipped automatic shop recheck for this turn."
+            ),
+            data={
+              "skipped": True,
+              "reason": (
+                "finale_window_static_shop"
+                if finale_static_shop_active else
+                "already_refreshed_this_turn"
+              ),
+            },
           )
         else:
           _push_flow_decision_debug(
@@ -7593,6 +7722,8 @@ def career_lobby(dry_run_turn=False):
             result="skip_scan",
             note=(
               f"pending={bool(pending_shop_check)}; automatic={bool(automatic_turn_scan)}; "
+              f"finale_entry_required={bool(finale_entry_scan_required)}; "
+              f"finale_static_shop={bool(finale_static_shop_active)}; "
               f"execution_intent={execution_intent}; current_turn={current_trackblazer_turn}; "
               f"last_refresh_turn={last_trackblazer_shop_refresh_turn}"
             ),
@@ -8581,6 +8712,7 @@ def record_and_finalize_turn(state_obj, action):
   if (
     action.func == "do_race"
     and constants.SCENARIO_NAME in ("mant", "trackblazer")
+    and not _trackblazer_finale_static_shop_active(state_obj)
   ):
     bot.request_trackblazer_shop_check("post_race_coins")
 

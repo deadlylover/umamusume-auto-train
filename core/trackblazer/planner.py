@@ -3509,6 +3509,11 @@ def _resolve_pending_shop_scan_state(
 ):
   current_turn_key = _turn_key(state_obj)
   existing = PendingShopScanState(**dict((runtime_state or {}).get("pending_shop_scan") or {}))
+  timeline_policy = get_trackblazer_timeline_policy(state_obj)
+  finale_static_shop_active = bool(
+    timeline_policy.get("is_climax_window")
+    and bot.has_trackblazer_finale_shop_scan_completed()
+  )
   if decision_path == "legacy":
     return PendingShopScanState(
       status="idle",
@@ -3532,7 +3537,10 @@ def _resolve_pending_shop_scan_state(
   reason = ""
   source = ""
   status = "satisfied"
-  if shop_status == "scanned" and shop_current_turn:
+  if finale_static_shop_active and has_shop_payload:
+    status = "satisfied"
+    source = "finale_window_static_shop"
+  elif shop_status == "scanned" and shop_current_turn:
     status = "satisfied"
     source = "shop_scan_current_turn"
   elif shop_status == "open_failed_to_close":
