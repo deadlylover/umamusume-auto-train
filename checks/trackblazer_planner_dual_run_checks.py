@@ -1171,6 +1171,74 @@ def main():
     assert "vita_40" in healthy_deferred, "healthy >50% energy training should explicitly defer the held Vita"
     assert "energy healthy" in (healthy_deferred["vita_40"].get("reason") or ""), healthy_deferred["vita_40"]
 
+    failed_training_action = Action()
+    failed_training_action.func = "do_training"
+    failed_training_action.available_actions = ["do_training", "do_rest", "do_race"]
+    failed_training_action["training_name"] = "spd"
+    failed_training_action["training_function"] = "stat_weight_training"
+    failed_training_action["training_data"] = {
+      "name": "spd",
+      "weighted_stat_score": 58.0,
+      "score_tuple": (58.0, 0),
+      "stat_gains": {"spd": 29, "pwr": 19, "sp": 6},
+      "failure": 99,
+      "total_supports": 3,
+      "total_rainbow_friends": 1,
+      "total_friendship_levels": {"blue": 0, "green": 0, "yellow": 1, "max": 2},
+      "failure_bypassed_by_items": False,
+    }
+    failed_training_action["available_trainings"] = {
+      "spd": dict(failed_training_action["training_data"]),
+    }
+
+    partial_rescue_state = _base_state()
+    partial_rescue_state["year"] = "Classic Year Early Jan"
+    partial_rescue_state["turn"] = 24
+    partial_rescue_state["energy_level"] = 5
+    partial_rescue_state["max_energy"] = 126
+    partial_rescue_state["trackblazer_inventory"] = {
+      "vita_20": {"detected": True, "held_quantity": 2, "increment_target": (1, 1), "category": "energy"},
+    }
+    partial_rescue_state["trackblazer_inventory_summary"] = {
+      "held_quantities": {"vita_20": 2},
+      "items_detected": ["vita_20"],
+      "actionable_items": ["vita_20"],
+      "by_category": {"energy": ["vita_20"]},
+      "total_detected": 1,
+    }
+    partial_rescue_plan = item_use_module.plan_item_usage(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=partial_rescue_state,
+      action=failed_training_action,
+      limit=8,
+    )
+    partial_rescue_candidates = [entry.get("key") for entry in partial_rescue_plan.get("candidates") or []]
+    partial_rescue_deferred = {
+      entry.get("key"): entry
+      for entry in partial_rescue_plan.get("deferred") or []
+      if entry.get("key")
+    }
+    assert "vita_20" not in partial_rescue_candidates, "near-zero high-fail training should not spend Vita 20s unless they can clear the rescue floor"
+    assert "vita_20" in partial_rescue_deferred, partial_rescue_plan
+    assert "partial energy rescue" in (partial_rescue_deferred["vita_20"].get("reason") or ""), partial_rescue_deferred["vita_20"]
+
+    sufficient_rescue_state = copy.deepcopy(partial_rescue_state)
+    sufficient_rescue_state["trackblazer_inventory"]["vita_20"]["held_quantity"] = 3
+    sufficient_rescue_state["trackblazer_inventory_summary"]["held_quantities"]["vita_20"] = 3
+    sufficient_rescue_plan = item_use_module.plan_item_usage(
+      policy=getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None),
+      state_obj=sufficient_rescue_state,
+      action=failed_training_action,
+      limit=8,
+    )
+    sufficient_rescue_candidates = [entry.get("key") for entry in sufficient_rescue_plan.get("candidates") or []]
+    assert sufficient_rescue_candidates.count("vita_20") == 3, sufficient_rescue_plan
+    assert any(
+      "rescue floor" in (entry.get("reason") or "")
+      for entry in sufficient_rescue_plan.get("candidates") or []
+      if entry.get("key") == "vita_20"
+    ), sufficient_rescue_plan
+
     rest_race_state = _base_state()
     rest_race_state["year"] = "Junior Year Late Sep"
     rest_race_state["turn"] = 7

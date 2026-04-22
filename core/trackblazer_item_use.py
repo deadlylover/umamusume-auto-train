@@ -1603,7 +1603,12 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
         deferred.append(entry)
       candidates = non_energy + kept_energy
       return candidates, deferred, kept_energy
-    if context.get("energy_rescue"):
+    failure_needs_energy_rescue = bool(
+      context.get("action_func") == "do_training"
+      and not context.get("failure_bypassed_by_items")
+      and _safe_int(context.get("failure_rate"), 0) > _safe_int(context.get("max_allowed_failure"), 5)
+    )
+    if context.get("energy_rescue") or failure_needs_energy_rescue:
       required_restore = _min_restore_needed_for_ratio(
         context.get("energy_level"),
         context.get("max_energy"),
@@ -1641,14 +1646,33 @@ def _apply_energy_candidate_stacking(candidates, deferred, context):
             continue
           for copy_index in range(copies_needed):
             planned_entry = dict(entry)
+            if failure_needs_energy_rescue and not context.get("energy_rescue"):
+              planned_entry["reason"] = (
+                f"{entry.get('reason')}; fail {context.get('failure_rate', 0)}% "
+                f"needs enough energy to reach the "
+                f"{_ENERGY_RESCUE_TARGET_RATIO * 100:.0f}% rescue floor"
+              )
             if copy_index > 0:
               planned_entry["reason"] = (
-                f"{entry.get('reason')}; extra copy to satisfy "
+                f"{planned_entry.get('reason')}; extra copy to satisfy "
                 f"{_ENERGY_RESCUE_TARGET_RATIO * 100:.0f}% rescue floor"
               )
             rescue_kept.append(planned_entry)
         kept_energy = rescue_kept
         candidates = non_energy + rescue_kept
+        return candidates, deferred, kept_energy
+      if failure_needs_energy_rescue:
+        target_energy = _target_energy_floor(max_energy, _ENERGY_RESCUE_TARGET_RATIO)
+        for entry in energy_candidates:
+          entry.pop("candidate_score", None)
+          entry["reason"] = (
+            f"partial energy rescue would still leave fail above limit; "
+            f"held spendable energy cannot reach the "
+            f"{_ENERGY_RESCUE_TARGET_RATIO * 100:.0f}% rescue floor "
+            f"({energy_level}/{max_energy} -> target {target_energy})"
+          )
+          deferred.append(entry)
+        candidates = non_energy
         return candidates, deferred, kept_energy
 
     preferred_entry, target_ratio = _threshold_energy_choice()
