@@ -71,6 +71,8 @@ _INCREMENT_Y_TOLERANCE = 50       # Looser than shop — skill cards are taller
 _INCREMENT_FALLBACK_Y_TOLERANCE = 90
 _INCREMENT_TEMPLATE = "assets/buttons/skill_increment.png"
 _INVERSE_GLOBAL_SCALE = 1.0 / device_action.GLOBAL_TEMPLATE_SCALING
+_SKILL_TITLE_CONTROL_MIN_Y_OFFSET = 18
+_SKILL_TITLE_CONTROL_MAX_Y_OFFSET = 92
 
 # "Obtained" badge detection — used to suppress increment pairing for already-learned skills.
 _OBTAINED_TEMPLATE = "assets/custom/skill_obtained.png"
@@ -514,6 +516,7 @@ def _compact_target_match(row):
         "increment_match": list(row.get("increment_match")) if row.get("increment_match") else None,
         "increment_pairing": row.get("increment_pairing"),
         "increment_vertical_distance": row.get("increment_vertical_distance"),
+        "increment_title_offset": row.get("increment_title_offset"),
     }
 
 
@@ -653,9 +656,14 @@ def _build_dim_text_variants(crop):
 
 @lru_cache(maxsize=512)
 def _extract_key_tokens(normalized_text):
+    return frozenset(_extract_key_token_sequence(normalized_text))
+
+
+@lru_cache(maxsize=512)
+def _extract_key_token_sequence(normalized_text):
     tokens = [tok for tok in str(normalized_text or "").split() if tok]
     if not tokens:
-        return frozenset()
+        return tuple()
     key_tokens = [
         tok for tok in tokens
         if len(tok) >= 3 and not tok.isdigit() and tok not in _SKILL_TOKEN_STOPWORDS
@@ -664,7 +672,22 @@ def _extract_key_tokens(normalized_text):
         key_tokens = [tok for tok in tokens if len(tok) >= 3 and not tok.isdigit()]
     if len(key_tokens) < 2:
         key_tokens = tokens
-    return frozenset(key_tokens)
+    return tuple(key_tokens)
+
+
+def _skill_key_tokens_in_order(row_key_sequence, skill_key_sequence):
+    row_key_sequence = tuple(row_key_sequence or ())
+    skill_key_sequence = tuple(skill_key_sequence or ())
+    if not row_key_sequence or not skill_key_sequence:
+        return False
+    pos = 0
+    for token in skill_key_sequence:
+        try:
+            found = row_key_sequence.index(token, pos)
+        except ValueError:
+            return False
+        pos = found + 1
+    return True
 
 
 def _canonicalize_skill_tokens(tokens):
@@ -881,12 +904,14 @@ def _normalize_skill_shortlist(skill_shortlist):
         seen.add(normalized_name)
         skill_tokens = frozenset(normalized_name.split())
         skill_key_tokens = _extract_key_tokens(normalized_name)
+        skill_key_sequence = _extract_key_token_sequence(normalized_name)
         normalized.append({
             "skill_name": skill_name,
             "skill_normalized": normalized_name,
             "skill_compact": normalized_name.replace(" ", ""),
             "skill_tokens": skill_tokens,
             "skill_key_tokens": skill_key_tokens,
+            "skill_key_sequence": skill_key_sequence,
             "skill_family_tokens": _canonicalize_skill_tokens(skill_tokens),
             "skill_distinctive_tokens": _extract_distinctive_skill_tokens(skill_key_tokens),
         })
@@ -932,12 +957,14 @@ def _build_row_skill_match_metrics(row, skill_entry):
     normalized_compact = normalized.replace(" ", "")
     row_tokens = frozenset(normalized.split())
     row_key_tokens = _extract_key_tokens(normalized)
+    row_key_sequence = _extract_key_token_sequence(normalized)
     row_family_tokens = _canonicalize_skill_tokens(row_tokens)
 
     skill_normalized = skill_entry["skill_normalized"]
     skill_compact = skill_entry["skill_compact"]
     skill_tokens = skill_entry["skill_tokens"]
     skill_key_tokens = skill_entry.get("skill_key_tokens") or skill_tokens
+    skill_key_sequence = skill_entry.get("skill_key_sequence") or tuple(skill_key_tokens)
 
     score = max(
         Levenshtein.ratio(normalized, skill_normalized),
@@ -954,12 +981,14 @@ def _build_row_skill_match_metrics(row, skill_entry):
     shared_key_tokens = _shared_skill_tokens(row_key_tokens, skill_key_tokens)
     key_coverage = shared_key_tokens / max(1, len(skill_key_tokens))
     row_key_coverage = shared_key_tokens / max(1, len(row_key_tokens))
+    key_tokens_in_order = _skill_key_tokens_in_order(row_key_sequence, skill_key_sequence)
     if (
         len(skill_key_tokens) >= _TOKEN_MERGE_MIN_SHARED
         and len(row_tokens) <= _TOKEN_MERGE_MAX_ROW_TOKENS
         and shared_key_tokens >= _TOKEN_MERGE_MIN_SHARED
         and key_coverage >= _TOKEN_MERGE_MIN_COVERAGE
         and row_key_coverage >= 0.5
+        and key_tokens_in_order
     ):
         token_score = 0.74 + (key_coverage * 0.16) + min(0.08, row_key_coverage * 0.08)
         if token_score > score:
@@ -968,15 +997,15 @@ def _build_row_skill_match_metrics(row, skill_entry):
 
     shared_tokens = 0
     token_overlap = 0.0
-    if skill_tokens:
-        shared_tokens = _shared_skill_tokens(row_tokens, skill_tokens)
-        token_overlap = shared_tokens / max(1, len(skill_tokens))
+    if skill_key_tokens:
+        shared_tokens = shared_key_tokens
+        token_overlap = shared_tokens / max(1, len(skill_key_tokens))
         # Do not promote a match on a single shared generic token.
         # That let rows like "Straightaway Spurt" clear the fuzzy
         # threshold for "Straightaway Recovery".
-        if shared_tokens >= 2 and token_overlap >= 0.66:
+        if shared_tokens >= 2 and token_overlap >= 0.66 and key_tokens_in_order and row_key_coverage >= 0.5:
             score = max(score, 0.78 + (token_overlap * 0.18))
-        elif shared_tokens >= 2 and token_overlap >= 0.5:
+        elif shared_tokens >= 2 and token_overlap >= 0.5 and key_tokens_in_order and row_key_coverage >= 0.5:
             score = max(score, 0.72 + (token_overlap * 0.12))
 
     accepted = False
@@ -986,7 +1015,15 @@ def _build_row_skill_match_metrics(row, skill_entry):
         accepted = True
     elif score >= _FUZZY_MATCH_THRESHOLD and len(normalized) >= _FUZZY_MATCH_MIN_LENGTH:
         accepted = True
-    if accepted and score < _EXACT_MATCH_THRESHOLD and method == "fuzzy" and skill_tokens and len(skill_tokens) >= 2 and shared_tokens < 2:
+    if (
+        accepted
+        and score < _EXACT_MATCH_THRESHOLD
+        and score < 0.88
+        and method == "fuzzy"
+        and skill_tokens
+        and len(skill_tokens) >= 2
+        and shared_tokens < 2
+    ):
         accepted = False
 
     return {
@@ -999,6 +1036,7 @@ def _build_row_skill_match_metrics(row, skill_entry):
         "key_token_coverage": round(float(key_coverage), 4),
         "shared_tokens": int(shared_tokens),
         "token_overlap": round(float(token_overlap), 4),
+        "key_tokens_in_order": bool(key_tokens_in_order),
         "row_tokens": row_tokens,
         "row_key_tokens": row_key_tokens,
         "row_family_tokens": row_family_tokens,
@@ -1099,7 +1137,7 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
         if cached is not None:
             return [dict(row) for row in cached]
 
-    matched_by_skill = {}
+    matched_candidates = []
     for row_group in _group_ocr_rows_by_physical_row(ocr_rows):
         group_metrics = []
         for skill_entry in normalized_shortlist:
@@ -1196,13 +1234,10 @@ def _match_skill_rows_to_shortlist(ocr_rows, skill_shortlist, normalized_shortli
                 "token_evidence": token_evidence,
                 "reject_reason": "",
             }
-            skill_key = _normalize_skill_text(skill_name)
-            existing = matched_by_skill.get(skill_key)
-            if existing is None or _match_candidate_rank(candidate) > _match_candidate_rank(existing):
-                matched_by_skill[skill_key] = candidate
+            matched_candidates.append(candidate)
 
     matched = sorted(
-        matched_by_skill.values(),
+        matched_candidates,
         key=lambda item: (
             float(item.get("abs_y_center") or 0.0),
             int((item.get("crop_bbox") or [0, 0, 0, 0])[0]),
@@ -1297,7 +1332,11 @@ def _row_has_obtained_badge(row, obtained_matches, y_tolerance=None):
     tolerance = _OBTAINED_Y_TOLERANCE if y_tolerance is None else int(y_tolerance)
     for match in obtained_matches:
         badge_abs_cy = scroll_bbox_top + match[1] + match[3] // 2
-        if abs(badge_abs_cy - row_abs_y) <= tolerance:
+        offset = badge_abs_cy - row_abs_y
+        if (
+            abs(offset) <= tolerance
+            and _skill_title_control_offset_is_safe(offset)
+        ):
             return True
     return False
 
@@ -1379,7 +1418,11 @@ def _row_has_obtained_text(row, obtained_text_matches, y_tolerance=None):
         return False
     tolerance = _OBTAINED_TEXT_Y_TOLERANCE if y_tolerance is None else int(y_tolerance)
     for match in obtained_text_matches:
-        if abs(float(match.get("abs_y_center") or 0.0) - row_abs_y) <= tolerance:
+        offset = float(match.get("abs_y_center") or 0.0) - row_abs_y
+        if (
+            abs(offset) <= tolerance
+            and _skill_title_control_offset_is_safe(offset)
+        ):
             return True
     return False
 
@@ -1464,7 +1507,11 @@ def _pair_skill_row_to_increment(row, increment_matches):
     for match in increment_matches:
         # Convert increment match Y to absolute
         inc_abs_cy = scroll_bbox_top + match[1] + match[3] // 2
-        if abs(inc_abs_cy - row_abs_y) <= _INCREMENT_Y_TOLERANCE:
+        offset = inc_abs_cy - row_abs_y
+        if (
+            abs(offset) <= _INCREMENT_Y_TOLERANCE
+            and _skill_title_control_offset_is_safe(offset)
+        ):
             candidates.append((match, inc_abs_cy))
     if not candidates:
         return None
@@ -1489,6 +1536,30 @@ def _increment_match_vertical_distance(row, match):
     return abs(float(_increment_match_abs_center_y(match)) - row_abs_y)
 
 
+def _skill_title_control_offset_is_safe(offset):
+    """Whether OCR row Y looks like a title line above its row control."""
+    try:
+        offset = float(offset)
+    except (TypeError, ValueError):
+        return False
+    return (
+        _SKILL_TITLE_CONTROL_MIN_Y_OFFSET
+        <= offset
+        <= _SKILL_TITLE_CONTROL_MAX_Y_OFFSET
+    )
+
+
+def _increment_match_title_offset(row, match):
+    """Return signed Y offset from OCR row to its increment button center."""
+    if not row or not match:
+        return None
+    try:
+        row_abs_y = float(row.get("abs_y_center"))
+    except (TypeError, ValueError):
+        return None
+    return float(_increment_match_abs_center_y(match)) - row_abs_y
+
+
 def _match_has_safe_increment(target_match):
     """Whether the matched row has a safe increment pairing for live clicks."""
     if not isinstance(target_match, dict):
@@ -1498,6 +1569,10 @@ def _match_has_safe_increment(target_match):
         return False
     pairing = target_match.get("increment_pairing")
     distance = target_match.get("increment_vertical_distance")
+    if not _skill_title_control_offset_is_safe(
+        target_match.get("increment_title_offset")
+    ):
+        return False
     if pairing == "vertical":
         return True
     if pairing == "fallback_nearest":
@@ -1551,6 +1626,7 @@ def _analyze_skill_frame(frame_payload):
             target["increment_match"] = None
             target["increment_pairing"] = None
             target["increment_vertical_distance"] = None
+            target["increment_title_offset"] = None
             target["obtained"] = True
             target["obtained_evidence"] = "template"
             continue
@@ -1559,6 +1635,7 @@ def _analyze_skill_frame(frame_payload):
             target["increment_match"] = list(inc)
             target["increment_pairing"] = "vertical"
             target["increment_vertical_distance"] = round(_increment_match_vertical_distance(target, inc) or 0.0, 1)
+            target["increment_title_offset"] = round(_increment_match_title_offset(target, inc) or 0.0, 1)
             target["obtained"] = False
             target["obtained_evidence"] = "none"
             paired_increment_keys.add(tuple(int(v) for v in inc))
@@ -1566,6 +1643,7 @@ def _analyze_skill_frame(frame_payload):
             target["increment_match"] = None
             target["increment_pairing"] = None
             target["increment_vertical_distance"] = None
+            target["increment_title_offset"] = None
             target["obtained"] = bool(target.get("obtained"))
             target["obtained_evidence"] = target.get("obtained_evidence") or ("template" if target.get("obtained") else "none")
 
@@ -1588,6 +1666,9 @@ def _analyze_skill_frame(frame_payload):
                     distance = _increment_match_vertical_distance(target, inc)
                     if distance is None:
                         continue
+                    offset = _increment_match_title_offset(target, inc)
+                    if not _skill_title_control_offset_is_safe(offset):
+                        continue
                     candidate = (float(distance), target, inc)
                     if best_pair is None or candidate[0] < best_pair[0]:
                         best_pair = candidate
@@ -1597,6 +1678,7 @@ def _analyze_skill_frame(frame_payload):
             target["increment_match"] = list(inc)
             target["increment_pairing"] = "fallback_nearest"
             target["increment_vertical_distance"] = round(distance, 1)
+            target["increment_title_offset"] = round(_increment_match_title_offset(target, inc) or 0.0, 1)
             target["obtained"] = False
             target["obtained_evidence"] = "none"
             paired_increment_keys.add(tuple(int(v) for v in inc))
@@ -2352,6 +2434,7 @@ def _build_reacquire_result(frame, match, seek_ratio=None, nudge_attempts=None):
         "obtained_evidence": (match or {}).get("obtained_evidence") or ("template" if (match or {}).get("obtained") else "none"),
         "increment_pairing": (match or {}).get("increment_pairing"),
         "increment_vertical_distance": (match or {}).get("increment_vertical_distance"),
+        "increment_title_offset": (match or {}).get("increment_title_offset"),
         "increment_present": bool((match or {}).get("increment_match")),
         "scrollbar_ratio": scrollbar.get("position_ratio"),
         "seek_ratio": seek_ratio,
@@ -2378,6 +2461,7 @@ def _click_increment_for_match(target_match, dry_run):
             "reason": "unsafe_increment_pairing",
             "increment_pairing": target_match.get("increment_pairing"),
             "increment_vertical_distance": target_match.get("increment_vertical_distance"),
+            "increment_title_offset": target_match.get("increment_title_offset"),
         }
     scroll_left, scroll_top, _, _ = [int(v) for v in constants.SCROLLING_SKILL_SCREEN_BBOX]
     click_x = scroll_left + inc[0] + inc[2] // 2
@@ -2392,6 +2476,7 @@ def _click_increment_for_match(target_match, dry_run):
             "increment_match": list(inc),
             "increment_pairing": target_match.get("increment_pairing"),
             "increment_vertical_distance": target_match.get("increment_vertical_distance"),
+            "increment_title_offset": target_match.get("increment_title_offset"),
         }
     info(f"Skill scanner: clicking increment for '{target_match['match_name']}' "
          f"at ({click_x}, {click_y})...")
@@ -2404,6 +2489,7 @@ def _click_increment_for_match(target_match, dry_run):
         "increment_match": list(inc),
         "increment_pairing": target_match.get("increment_pairing"),
         "increment_vertical_distance": target_match.get("increment_vertical_distance"),
+        "increment_title_offset": target_match.get("increment_title_offset"),
     }
 
 
@@ -2747,6 +2833,9 @@ def _build_hint_candidate(target_skill, hint):
     increment_vertical_distance = reacquire_result.get("increment_vertical_distance")
     if increment_vertical_distance is None:
         increment_vertical_distance = candidate.get("increment_vertical_distance")
+    increment_title_offset = reacquire_result.get("increment_title_offset")
+    if increment_title_offset is None:
+        increment_title_offset = candidate.get("increment_title_offset")
     return {
         "frame_index": frame_index,
         "scrollbar_ratio": ratio,
@@ -2755,6 +2844,7 @@ def _build_hint_candidate(target_skill, hint):
             "match_score": match_score,
             "increment_pairing": increment_pairing,
             "increment_vertical_distance": increment_vertical_distance,
+            "increment_title_offset": increment_title_offset,
             "ocr_variant": candidate.get("ocr_variant_used") or reacquire_result.get("ocr_variant_used"),
             "chosen_variant": candidate.get("chosen_variant") or reacquire_result.get("chosen_variant"),
             "ocr_variants_seen": list(candidate.get("ocr_variants_seen") or reacquire_result.get("ocr_variants_seen") or []),
@@ -2840,6 +2930,7 @@ def _queue_hint_targets(target_skills, target_hints, skill_shortlist, normalized
             "match_score": hint_candidate_row.get("match_score"),
             "increment_pairing": hint_candidate_row.get("increment_pairing"),
             "increment_vertical_distance": hint_candidate_row.get("increment_vertical_distance"),
+            "increment_title_offset": hint_candidate_row.get("increment_title_offset"),
             "ocr_variant_used": hint_candidate_row.get("ocr_variant"),
             "chosen_variant": hint_candidate_row.get("chosen_variant") or hint_candidate_row.get("ocr_variant"),
             "ocr_variants_seen": list(hint_candidate_row.get("ocr_variants_seen") or []),
@@ -2983,6 +3074,7 @@ def _build_preview_candidate_payload(candidate_row, candidate):
         "match_score": candidate_row.get("match_score"),
         "increment_pairing": candidate_row.get("increment_pairing"),
         "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
+        "increment_title_offset": candidate_row.get("increment_title_offset"),
         "ocr_variant_used": candidate_row.get("ocr_variant"),
         "chosen_variant": candidate_row.get("chosen_variant") or candidate_row.get("ocr_variant"),
         "ocr_variants_seen": list(candidate_row.get("ocr_variants_seen") or []),
@@ -3379,6 +3471,7 @@ def scan_and_increment_skills(target_skills, dry_run=False,
                     "match_score": candidate_row.get("match_score"),
                     "increment_pairing": candidate_row.get("increment_pairing"),
                     "increment_vertical_distance": candidate_row.get("increment_vertical_distance"),
+                    "increment_title_offset": candidate_row.get("increment_title_offset"),
                     "ocr_variant_used": candidate_row.get("ocr_variant"),
                     "chosen_variant": candidate_row.get("chosen_variant") or candidate_row.get("ocr_variant"),
                     "ocr_variants_seen": list(candidate_row.get("ocr_variants_seen") or []),
