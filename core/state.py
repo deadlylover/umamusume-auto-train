@@ -829,9 +829,9 @@ def _correct_failure_outliers(training_results):
 
   The four energy trainings (spd/sta/pwr/guts) normally have similar failure
   rates.  Wit is excluded because it legitimately reads much lower.  When
-  exactly one of the four reads drastically lower than the median of the
-  others it is almost certainly an OCR misread, so we replace it with the
-  median and log a warning.
+  exactly one of the four reads drastically different from the others it is
+  almost certainly an OCR misread, so we replace it with the peer median and
+  log a warning.
   """
   rates = {}
   for name in _ENERGY_TRAINING_NAMES:
@@ -843,21 +843,28 @@ def _correct_failure_outliers(training_results):
   if len(rates) < 3:
     return training_results
 
-  med = median(rates.values())
-  if med < _FAILURE_OUTLIER_THRESHOLD:
-    # All rates are low — nothing to correct (early-game or low-energy usage).
-    return training_results
+  outliers = {}
+  for name, val in rates.items():
+    peer_rates = [peer_val for peer_name, peer_val in rates.items() if peer_name != name]
+    peer_median = median(peer_rates)
+    peer_spread = max(peer_rates) - min(peer_rates)
+    if (
+      abs(val - peer_median) >= _FAILURE_OUTLIER_THRESHOLD
+      and peer_spread < _FAILURE_OUTLIER_THRESHOLD
+    ):
+      outliers[name] = {
+        "value": val,
+        "corrected": int(peer_median),
+        "peer_spread": peer_spread,
+      }
 
-  outliers = {
-    name: val for name, val in rates.items()
-    if med - val >= _FAILURE_OUTLIER_THRESHOLD
-  }
   if len(outliers) == 1:
-    name, bad_val = next(iter(outliers.items()))
-    corrected = int(med)
+    name, outlier = next(iter(outliers.items()))
+    bad_val = outlier["value"]
+    corrected = outlier["corrected"]
     warning(
       f"[STATE] Failure OCR outlier corrected: {name} {bad_val}% → {corrected}% "
-      f"(median of energy trainings: {corrected}%, rates: {rates})"
+      f"(peer median: {corrected}%, peer spread: {outlier['peer_spread']}%, rates: {rates})"
     )
     training_results[name]["failure"] = corrected
     training_results[name]["failure_corrected_from"] = bad_val
