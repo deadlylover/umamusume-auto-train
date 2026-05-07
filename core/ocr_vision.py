@@ -37,6 +37,7 @@ _RECOGNITION_LEVEL_FAST = 1
 
 
 _IMPORT_LOCK = threading.Lock()
+_REQUEST_LOCK = threading.Lock()
 _IMPORT_STATE = {"attempted": False, "ok": False, "error": None}
 _VISION = None
 _FOUNDATION = None
@@ -79,8 +80,15 @@ def last_import_error() -> Optional[str]:
   return _IMPORT_STATE.get("error")
 
 
-def _pil_to_ci_image(pil_img: Image.Image):
-  """Convert a PIL/NumPy image into a Quartz CIImage via PNG bytes."""
+def _pil_to_cg_image(pil_img: Image.Image):
+  """Convert a PIL/NumPy image into a Quartz CGImage via encoded image bytes.
+
+  VNImageRequestHandler can consume either CIImage or CGImage.  The CIImage
+  path asks CoreImage/Vision to materialize an internal CVPixelBuffer for each
+  request, which has proven flaky for repeated small OCR crops on macOS.  A
+  CGImageSource-created CGImage avoids that conversion path while keeping the
+  adapter isolated from Apple framework objects.
+  """
   if isinstance(pil_img, np.ndarray):
     pil_img = Image.fromarray(pil_img)
   if pil_img.mode not in ("RGB", "RGBA", "L"):
@@ -91,18 +99,13 @@ def _pil_to_ci_image(pil_img: Image.Image):
   png_bytes = buffer.getvalue()
 
   ns_data = _FOUNDATION.NSData.dataWithBytes_length_(png_bytes, len(png_bytes))
-  # Quartz re-exports CIImage from the CoreImage framework on macOS.
-  CIImage = getattr(_QUARTZ, "CIImage", None)
-  if CIImage is None:  # pragma: no cover — depends on PyObjC build
-    try:
-      import CoreImage  # type: ignore
-      CIImage = CoreImage.CIImage
-    except Exception as exc:
-      raise RuntimeError(f"CoreImage.CIImage unavailable: {exc}") from exc
-  ci_image = CIImage.imageWithData_(ns_data)
-  if ci_image is None:
-    raise RuntimeError("CIImage.imageWithData_ returned nil")
-  return ci_image, pil_img.size  # (W, H)
+  image_source = _QUARTZ.CGImageSourceCreateWithData(ns_data, None)
+  if image_source is None:
+    raise RuntimeError("CGImageSourceCreateWithData returned nil")
+  cg_image = _QUARTZ.CGImageSourceCreateImageAtIndex(image_source, 0, None)
+  if cg_image is None:
+    raise RuntimeError("CGImageSourceCreateImageAtIndex returned nil")
+  return cg_image, pil_img.size  # (W, H)
 
 
 def _normalized_bbox_to_quad(bbox, image_size) -> List[Tuple[int, int]]:
@@ -153,9 +156,9 @@ def _apply_settings_to_request(request, settings: Optional[dict]):
       pass
 
 
-def _perform_request(ci_image, request) -> bool:
+def _perform_request(cg_image, request) -> bool:
   Handler = _VISION.VNImageRequestHandler
-  handler = Handler.alloc().initWithCIImage_options_(ci_image, None)
+  handler = Handler.alloc().initWithCGImage_options_(cg_image, None)
   try:
     ok, err = handler.performRequests_error_([request], None)
   except Exception as exc:
@@ -206,16 +209,17 @@ def readtext_detailed(
     raise RuntimeError("Apple Vision backend is not available on this system")
 
   settings = settings or {}
-  ci_image, image_size = _pil_to_ci_image(pil_img)
-  request = _VISION.VNRecognizeTextRequest.alloc().init()
-  _apply_settings_to_request(request, settings)
+  with _REQUEST_LOCK:
+    cg_image, image_size = _pil_to_cg_image(pil_img)
+    request = _VISION.VNRecognizeTextRequest.alloc().init()
+    _apply_settings_to_request(request, settings)
+    _perform_request(cg_image, request)
+    rows = _collect_observations(
+      request,
+      image_size,
+      float((settings.get("minimum_confidence") if settings.get("minimum_confidence") is not None else threshold) or 0.0),
+    )
 
-  _perform_request(ci_image, request)
-
-  min_conf_setting = settings.get("minimum_confidence")
-  if min_conf_setting is None:
-    min_conf_setting = threshold if threshold is not None else 0.0
-  rows = _collect_observations(request, image_size, float(min_conf_setting or 0.0))
 
   if allowlist:
     filtered: List[Tuple[list, str, float]] = []

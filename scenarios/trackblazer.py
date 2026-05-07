@@ -126,6 +126,16 @@ _ITEM_VARIANT_FAMILIES = (
         "stamina_manual",
         "wit_manual",
     )),
+    ("scroll", (
+        "speed_scroll",
+        "stamina_scroll",
+        "power_scroll",
+        "guts_scroll",
+    )),
+    ("notepad", (
+        "speed_notepad",
+        "guts_notepad",
+    )),
     ("training_application", (
         "guts_training_application",
         "wit_training_application",
@@ -519,6 +529,26 @@ def _drag_trackblazer_shop_scrollbar_to_ratio(scrollbar_state, position_ratio, d
     }
 
 
+def _shop_scrollbar_state_for_ratio(scrollbar_state, position_ratio):
+    """Build a synthetic scrollbar state from cached geometry and a known ratio."""
+    base = dict(scrollbar_state or {})
+    bbox = base.get("bbox") or [int(v) for v in constants.MANT_SHOP_SCROLLBAR_BBOX]
+    track_center_x = int(base.get("track_center_x") or 0)
+    thumb_height = int(base.get("thumb_height") or 0)
+    travel_pixels = int(base.get("travel_pixels") or 0)
+    if track_center_x <= 0 or thumb_height <= 0:
+        return base
+    clamped_ratio = min(1.0, max(0.0, float(position_ratio or 0.0)))
+    thumb_top = int(round(clamped_ratio * max(0, travel_pixels)))
+    thumb_center = [
+        track_center_x,
+        int(bbox[1] + thumb_top + max(1, thumb_height // 2)),
+    ]
+    base["thumb_center"] = thumb_center
+    base["position_ratio"] = clamped_ratio
+    return base
+
+
 
 
 def inspect_trackblazer_inventory_scrollbar(screenshot=None):
@@ -781,12 +811,16 @@ def scroll_trackblazer_inventory(direction="down", duration=0.6, settle_seconds=
     if normalized not in ("down", "up"):
         raise ValueError(f"Unsupported inventory scroll direction: {direction}")
 
+    rx, ry, rw, rh = [int(v) for v in constants.MANT_INVENTORY_ITEMS_REGION]
+    x = rx + int(max(1, rw) * 0.68)
+    top_y = ry + int(max(1, rh) * 0.22)
+    bottom_y = ry + int(max(1, rh) * 0.78)
     if normalized == "down":
-        start = constants.MANT_INVENTORY_SCROLL_BOTTOM_MOUSE_POS
-        end = constants.MANT_INVENTORY_SCROLL_TOP_MOUSE_POS
+        start = (x, bottom_y)
+        end = (x, top_y)
     else:
-        start = constants.MANT_INVENTORY_SCROLL_TOP_MOUSE_POS
-        end = constants.MANT_INVENTORY_SCROLL_BOTTOM_MOUSE_POS
+        start = (x, top_y)
+        end = (x, bottom_y)
 
     resolved_settle_seconds = float(_INV_SCROLLBAR_SETTLE_SECONDS if settle_seconds is None else settle_seconds)
     swiped = device_action.swipe(
@@ -2460,6 +2494,8 @@ def scan_training_items_inventory(threshold=0.8):
         "scrollbar_detected": scrollbar_pre.get("detected", False),
         "scrollable": needs_scroll,
         "pages_scanned": 1,
+        "blind_reset_swipe": None,
+        "scrollbar_after_blind_reset": None,
         "reset_swipe": None,
         "forward_swipe": None,
         "fallback_swipe": None,
@@ -2471,6 +2507,23 @@ def scan_training_items_inventory(threshold=0.8):
         "scrollbar_post": None,
         "scrollbar_recovery_post": None,
     }
+
+    if not needs_scroll:
+        # Inventory scrollbar detection can fail when the thumb blends into
+        # the list edge, especially after a previous scan left the list away
+        # from the top. A harmless in-list upward swipe gives the scan a
+        # stable top-page starting point before deciding whether the list is
+        # single-page.
+        scroll_flow["blind_reset_swipe"] = scroll_trackblazer_inventory("up")
+        if scroll_flow["blind_reset_swipe"].get("swiped"):
+            device_action.flush_screenshot_cache()
+            scrollbar_after_blind = inspect_trackblazer_inventory_scrollbar()
+            scroll_flow["scrollbar_after_blind_reset"] = scrollbar_after_blind
+            needs_scroll = scrollbar_after_blind.get("detected") and scrollbar_after_blind.get("scrollable")
+            scroll_flow["scrollbar_detected"] = scrollbar_after_blind.get("detected", False)
+            scroll_flow["scrollable"] = needs_scroll
+            if needs_scroll:
+                scrollbar_pre = scrollbar_after_blind
 
     if needs_scroll and not scrollbar_pre.get("is_at_top"):
         scroll_flow["reset_swipe"] = _drag_trackblazer_inventory_scrollbar(
@@ -2515,7 +2568,32 @@ def scan_training_items_inventory(threshold=0.8):
                 else:
                     scroll_flow["recovery_reason"] = "scrollbar_detected_after_top_scan_but_drag_skipped"
             else:
-                scroll_flow["recovery_reason"] = "fallback_skipped_no_scrollbar"
+                scroll_flow["recovery_reason"] = "in_list_fallback_after_scrollbar_missed"
+                scroll_flow["fallback_swipe"] = scroll_trackblazer_inventory("down")
+                if scroll_flow["fallback_swipe"].get("swiped"):
+                    device_action.flush_screenshot_cache()
+                    page2, page2_timing = _scan_inventory_page(threshold=threshold)
+                    scroll_flow["fallback_page_timing"] = page2_timing
+                    page2_items = _inventory_detected_item_names(page2)
+                    page1_items = _inventory_detected_item_names(page1)
+                    if page2_items and page2_items != page1_items:
+                        scroll_flow["pages_scanned"] = 2
+                        page1 = _merge_inventory_pages(page1, page2)
+                        page1_timing = {
+                            "total": round(page1_timing.get("total", 0) + page2_timing.get("total", 0), 4),
+                            "held_ocr": round(page1_timing.get("held_ocr", 0) + page2_timing.get("held_ocr", 0), 4),
+                            "templates": round(page1_timing.get("templates", 0) + page2_timing.get("templates", 0), 4),
+                            "families": round(page1_timing.get("families", 0) + page2_timing.get("families", 0), 4),
+                            "families_resolved": page1_timing.get("families_resolved", 0) + page2_timing.get("families_resolved", 0),
+                            "families_skipped": page1_timing.get("families_skipped", 0) + page2_timing.get("families_skipped", 0),
+                            "items_detected": len(_inventory_detected_item_names(page1)),
+                            "quantity_reads": page1_timing.get("quantity_reads", 0) + page2_timing.get("quantity_reads", 0),
+                            "fallback_pages": [page1_timing, page2_timing],
+                        }
+                    else:
+                        scroll_flow["recovery_reason"] = "in_list_fallback_no_new_rows"
+                else:
+                    scroll_flow["recovery_reason"] = "in_list_fallback_swipe_skipped"
         # Single-page inventory, or fallback drag did not reveal a scrollbar.
         t_total_elapsed = _time() - t_total
         page1_timing["total"] = round(t_total_elapsed, 4)
@@ -3455,7 +3533,7 @@ def _order_inventory_execution_items(requested_items, inventory, current_scroll=
     return [item_name for _, item_name in indexed_items]
 
 
-def _match_single_shop_item(screenshot, item_name, threshold=0.7):
+def _match_single_shop_item(screenshot, item_name, threshold=0.7, expected_row_center_y=None):
     """Match a single item template against a shop screenshot.
 
     Returns a row dict compatible with scan_trackblazer_shop_inventory rows,
@@ -3470,10 +3548,15 @@ def _match_single_shop_item(screenshot, item_name, threshold=0.7):
     family_items = _ITEM_VARIANT_FAMILY_MAP.get(item_name)
     if family_items and len(family_items) > 1:
         family_rows = _resolve_shop_family_rows(screenshot, family_items, threshold)
-        for row in family_rows:
-            if row.get("item_name") == item_name:
-                return row
-        return None
+        matching_rows = [row for row in family_rows if row.get("item_name") == item_name]
+        if not matching_rows:
+            return None
+        if expected_row_center_y is None:
+            return min(matching_rows, key=lambda row: int(row.get("row_center_y") or 9999))
+        return min(
+            matching_rows,
+            key=lambda row: abs(int(row.get("row_center_y") or 0) - int(expected_row_center_y)),
+        )
     icon_screenshot, icon_offset_y = _shop_icon_search_crop(screenshot)
     if icon_screenshot is None:
         return None
@@ -3486,7 +3569,13 @@ def _match_single_shop_item(screenshot, item_name, threshold=0.7):
     )
     if not matches:
         return None
-    best = min(matches, key=lambda m: m[1])
+    if expected_row_center_y is None:
+        best = min(matches, key=lambda m: m[1])
+    else:
+        best = min(
+            matches,
+            key=lambda m: abs(int(m[1] + icon_offset_y + m[3] // 2) - int(expected_row_center_y)),
+        )
     match = (int(best[0]), int(best[1] + icon_offset_y), int(best[2]), int(best[3]))
     return {
         "item_name": item_name,
@@ -3502,6 +3591,8 @@ def prepare_trackblazer_shop_item_selection(
     checkbox_threshold=0.8,
     confirm_threshold=0.7,
     scan_result=None,
+    cached_scrollbar_state=None,
+    current_scroll_ratio_ref=None,
 ):
     """Find a shop item, select its row checkbox once, and stop before confirm."""
     requested_item = str(item_name or "").strip()
@@ -3565,11 +3656,14 @@ def prepare_trackblazer_shop_item_selection(
     # scrollbar is in motion so any single ratio may not exactly reproduce
     # the original view.  Using every observed ratio (with offsets) gives the
     # selection loop the best chance of re-finding the item.
-    observed_ratios = sorted(set(
-        float((entry.get("scrollbar") or {}).get("position_ratio"))
-        for entry in target_candidates
-        if (entry.get("scrollbar") or {}).get("position_ratio") is not None
-    ))
+    observed_positions = []
+    for entry in target_candidates:
+        ratio = (entry.get("scrollbar") or {}).get("position_ratio")
+        if ratio is None:
+            continue
+        row_center_y = (entry.get("row") or {}).get("row_center_y")
+        observed_positions.append((float(ratio), row_center_y))
+    observed_ratios = sorted(set(ratio for ratio, _row_center_y in observed_positions))
     # Pick the median as the primary reference for flow logging.
     target_page = min(
         target_candidates,
@@ -3589,32 +3683,48 @@ def prepare_trackblazer_shop_item_selection(
     ratio_candidates = []
     if observed_ratios:
         # Start with each observed ratio, then fan out with offsets.
-        for obs_ratio in observed_ratios:
-            ratio_candidates.append(obs_ratio)
-        for obs_ratio in observed_ratios:
+        for obs_ratio, row_center_y in observed_positions:
+            ratio_candidates.append((obs_ratio, row_center_y))
+        for obs_ratio, _row_center_y in observed_positions:
             for delta in (-0.04, 0.04, -0.08, 0.08, -0.12, 0.12):
-                ratio_candidates.append(min(1.0, max(0.0, obs_ratio + delta)))
+                ratio_candidates.append((min(1.0, max(0.0, obs_ratio + delta)), None))
     else:
-        ratio_candidates.append(0.0)
+        ratio_candidates.append((0.0, None))
 
     seen_ratios = set()
     ratio_candidates = [
-        ratio for ratio in ratio_candidates
+        (ratio, row_center_y) for ratio, row_center_y in ratio_candidates
         if not (round(float(ratio), 4) in seen_ratios or seen_ratios.add(round(float(ratio), 4)))
     ]
 
-    for ratio in ratio_candidates:
+    for ratio, expected_row_center_y in ratio_candidates:
         current_scrollbar = inspect_trackblazer_shop_scrollbar()
+        if (
+            cached_scrollbar_state
+            and not current_scrollbar.get("detected")
+            and current_scroll_ratio_ref is not None
+        ):
+            current_scrollbar = _shop_scrollbar_state_for_ratio(
+                cached_scrollbar_state,
+                current_scroll_ratio_ref.get("ratio", 0.0),
+            )
         seek_result = _drag_trackblazer_shop_scrollbar_to_ratio(current_scrollbar, ratio)
+        if seek_result.get("swiped") and current_scroll_ratio_ref is not None:
+            current_scroll_ratio_ref["ratio"] = float(ratio)
         flow["seek_result"] = seek_result
         live_screenshot = _capture_live_trackblazer_ui_screenshot()
         live_scrollbar = inspect_trackblazer_shop_scrollbar(screenshot=live_screenshot)
-        # Direct single-template match — bypasses family variant resolution
-        # so that sibling items (e.g. artisan/master cleat hammer) visible on
-        # the same page don't suppress the item we're looking for.
-        matched_row = _match_single_shop_item(live_screenshot, requested_item, threshold=threshold)
+        # Reacquire the target near the row observed during the scan so a
+        # similar icon elsewhere on the visible page does not steal the click.
+        matched_row = _match_single_shop_item(
+            live_screenshot,
+            requested_item,
+            threshold=threshold,
+            expected_row_center_y=expected_row_center_y,
+        )
         attempt = {
             "target_ratio": round(float(ratio), 4),
+            "expected_row_center_y": expected_row_center_y,
             "scrollbar": live_scrollbar,
             "row_found": bool(matched_row),
             "row": matched_row,
@@ -3654,8 +3764,12 @@ def prepare_trackblazer_shop_item_selection(
         })
         attempt["click_result"] = click_result
         verify_screenshot = _capture_live_trackblazer_ui_screenshot()
-        # Direct match for verification too — same family resolution bypass.
-        verify_row = _match_single_shop_item(verify_screenshot, requested_item, threshold=threshold)
+        verify_row = _match_single_shop_item(
+            verify_screenshot,
+            requested_item,
+            threshold=threshold,
+            expected_row_center_y=matched_row.get("row_center_y"),
+        )
         verify_state = _resolve_shop_row_checkbox_state(
             verify_screenshot,
             verify_row.get("match") if verify_row else None,
@@ -3798,12 +3912,19 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_sh
             settle_seconds=0.3,
         )
 
-        # Sort items by their scan scroll position (top-to-bottom) so seeks
-        # are short monotonic drags rather than back-and-forth jumps.
+        cached_scrollbar_state = inspect_trackblazer_shop_scrollbar()
+        flow["pre_select_scrollbar"] = cached_scrollbar_state
+        current_scroll_ratio_ref = {
+            "ratio": float(cached_scrollbar_state.get("position_ratio") or 0.0),
+        }
+
+        # Sort items by their scan scroll position (top-to-bottom) so cached
+        # scrollbar drags are monotonic even when selected rows grey out and
+        # live scrollbar detection becomes unreliable.
         def _item_scroll_ratio(key):
             for page in (shared_scan.get("pages") or []):
                 for row in (page.get("rows") or []):
-                    if row.get("item_name") == key:
+                    if row.get("item_name") == key and not row.get("purchased"):
                         return (page.get("scrollbar") or {}).get("position_ratio") or 0.0
             return 999.0
         sorted_keys = sorted(requested_keys, key=_item_scroll_ratio)
@@ -3811,7 +3932,12 @@ def execute_trackblazer_shop_purchases(item_keys, trigger="automatic", cached_sh
         for item_key in sorted_keys:
             catalog_entry = catalog.get(item_key) or {}
             item_name = catalog_entry.get("display_name") or str(item_key).replace("_", " ").title()
-            selection_result = prepare_trackblazer_shop_item_selection(item_key, scan_result=shared_scan)
+            selection_result = prepare_trackblazer_shop_item_selection(
+                item_key,
+                scan_result=shared_scan,
+                cached_scrollbar_state=cached_scrollbar_state,
+                current_scroll_ratio_ref=current_scroll_ratio_ref,
+            )
             attempt = {
                 "item_key": item_key,
                 "item_name": item_name,
@@ -4124,6 +4250,12 @@ def execute_training_items(item_names, trigger="automatic", commit_mode="full"):
                                 device_action.flush_screenshot_cache()
                                 current_scroll = desired_edge
                                 scrolled_for_item = bool(drag_result.get("swiped"))
+                            else:
+                                fallback_direction = "up" if desired_edge == "top" else "down"
+                                fallback_scroll = scroll_trackblazer_inventory(fallback_direction)
+                                device_action.flush_screenshot_cache()
+                                current_scroll = desired_edge if fallback_scroll.get("swiped") else current_scroll
+                                scrolled_for_item = bool(fallback_scroll.get("swiped"))
                         # Re-scan single page for fresh increment targets.
                         # Update ALL requested items visible on this page so
                         # later iterations don't use stale coordinates.

@@ -138,6 +138,66 @@ class TrackblazerShopRecoveryChecks(unittest.TestCase):
             "shop_items_not_purchasable_in_scan",
         )
 
+    def test_shop_match_single_item_uses_scroll_family_resolution(self):
+        with patch.dict(
+            trackblazer._ITEM_VARIANT_FAMILY_MAP,
+            {"power_scroll": ("speed_scroll", "stamina_scroll", "power_scroll", "guts_scroll")},
+            clear=False,
+        ), patch.object(
+            trackblazer,
+            "_resolve_shop_family_rows",
+            return_value=[
+                {"item_name": "guts_scroll", "match": [60, 740, 80, 80], "row_center_y": 780},
+                {"item_name": "power_scroll", "match": [60, 900, 80, 80], "row_center_y": 940},
+            ],
+        ) as family_mock:
+            row = trackblazer._match_single_shop_item(
+                object(),
+                "power_scroll",
+                threshold=0.7,
+                expected_row_center_y=935,
+            )
+
+        family_mock.assert_called_once()
+        self.assertEqual(row.get("item_name"), "power_scroll")
+        self.assertEqual(row.get("row_center_y"), 940)
+
+    def test_shop_match_single_family_item_prefers_expected_row(self):
+        with patch.dict(
+            trackblazer._ITEM_VARIANT_FAMILY_MAP,
+            {"power_scroll": ("speed_scroll", "stamina_scroll", "power_scroll", "guts_scroll")},
+            clear=False,
+        ), patch.object(
+            trackblazer,
+            "_resolve_shop_family_rows",
+            return_value=[
+                {"item_name": "power_scroll", "match": [60, 560, 80, 80], "row_center_y": 600},
+                {"item_name": "power_scroll", "match": [60, 900, 80, 80], "row_center_y": 940},
+            ],
+        ):
+            row = trackblazer._match_single_shop_item(
+                object(),
+                "power_scroll",
+                threshold=0.7,
+                expected_row_center_y=935,
+            )
+
+        self.assertEqual(row.get("row_center_y"), 940)
+
+    def test_cached_shop_scrollbar_state_tracks_ratio(self):
+        state = trackblazer._shop_scrollbar_state_for_ratio(
+            {
+                "bbox": [735, 630, 758, 1151],
+                "track_center_x": 750,
+                "thumb_height": 170,
+                "travel_pixels": 351,
+            },
+            0.5,
+        )
+
+        self.assertEqual(state.get("thumb_center"), [750, 891])
+        self.assertEqual(state.get("position_ratio"), 0.5)
+
     def test_inventory_detection_rejects_shop_screen_overlap(self):
         with patch.object(trackblazer, "_trackblazer_ui_region", return_value=(1, 2, 3, 4)), patch.object(
             trackblazer.device_action,
