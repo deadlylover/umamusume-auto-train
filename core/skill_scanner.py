@@ -2114,7 +2114,11 @@ def _click_learn_and_close():
     t_close = _time()
     close_clicked = device_action.locate_and_click(
         _CLOSE_TEMPLATE,
-        min_search_time=get_secs(2),
+        # Outlast the skill-learn animation: the "skills learned" summary (with
+        # Close) only appears after the per-skill animation finishes, which can
+        # run >2s for multiple skills. locate_and_click clicks the instant the
+        # button appears, so a larger budget adds no latency in the fast case.
+        min_search_time=get_secs(5),
     )
     result["close_clicked"] = bool(close_clicked)
     result["timing"]["close"] = round(_time() - t_close, 4)
