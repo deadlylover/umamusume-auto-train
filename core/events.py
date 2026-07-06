@@ -5,7 +5,7 @@ import utils.device_action_wrapper as device_action
 
 import core.config as config
 import utils.constants as constants
-from core.ocr import extract_text
+from core.ocr import extract_text, readtext_detailed
 from utils.log import debug, info, warning, error
 from utils.screenshot import enhanced_screenshot
 from utils.tools import sleep, get_secs
@@ -156,39 +156,49 @@ def select_event(event_choices_icon=None, screenshot=None, settle_seconds=_DEFAU
     return True
   
   if event["event_name"] == "A Team at Last":
+    # This runs ONLY for the "A Team at Last" main-scenario event (gated by
+    # event_name above), so normal events never pay for this extra OCR pass.
+    #
+    # The number of team choices varies (2-5) and their vertical positions shift
+    # with the count, so we can't step a fixed row gap. Some choice icons (e.g.
+    # the pink Team Carrot horseshoe) also don't match the event-choice template,
+    # so icon detection is unreliable too. Instead we OCR the whole choice band
+    # in one pass and click the row whose text contains the target team name.
     debug(f"Team selection event entered")
-    current_coords = event_choices_icon
     choice_texts = ["Hoppers", "Runners", "Pudding", "Bloom", "Carrot"]
     test_against = choice_texts[chosen - 1]
     debug(f"test against: {test_against}")
-    debug(f"Outside while, coord compare: {current_coords[1]} < {constants.SCREEN_MIDDLE_BBOX[3]}")
-    while current_coords[1] < constants.SCREEN_MIDDLE_BBOX[3]:
-      debug(f"Coord compare: {current_coords[1]} < {constants.SCREEN_MIDDLE_BBOX[3]}")
 
-      region_xywh = (
-        current_coords[0] + 90,
-        current_coords[1] - 25,
-        500,
-        35)
-      screenshot = enhanced_screenshot(region_xywh)
-      text = extract_text(screenshot)
-      debug(f"Text: {text}")
-      if test_against == "Carrot":
-        debug(f"test against: {test_against} in text: {text}")
-        if "Pudding" not in text and "Carrot" in text:
-          debug(f"Clicking: {current_coords}")
-          device_action.click(target=current_coords, text=f"Selecting optimal choice: {event_name}")
-          if settle_seconds > 0:
-            sleep(settle_seconds)
-          break
-      elif test_against in text:
-        debug(f"test against: {test_against} in text: {text}")
-        debug(f"Clicking: {current_coords}")
-        device_action.click(target=current_coords, text=f"Selecting optimal choice: {event_name}")
-        if settle_seconds > 0:
-          sleep(settle_seconds)
+    region_left = event_choices_icon[0] + 40
+    region_top = event_choices_icon[1] - 55
+    region_xywh = (region_left, region_top, 560, 700)
+    ocr_img = enhanced_screenshot(region_xywh)
+    rows = readtext_detailed(ocr_img)
+
+    def _row_center_abs(bbox_quad):
+      xs = [pt[0] for pt in bbox_quad]
+      ys = [pt[1] for pt in bbox_quad]
+      # enhanced_screenshot upscales the captured region 2x, so halve the bbox
+      # pixels back to screen scale, then offset by the region origin.
+      cx = region_left + (sum(xs) / len(xs)) / 2.0
+      cy = region_top + (sum(ys) / len(ys)) / 2.0
+      return int(cx), int(cy)
+
+    click_target = None
+    for row in rows:
+      bbox_quad, text = row[0], (row[1] or "")
+      if test_against.lower() in text.lower():
+        click_target = _row_center_abs(bbox_quad)
+        debug(f"Matched '{test_against}' in row '{text}' at {click_target}")
         break
-      current_coords = (current_coords[0], current_coords[1] + _EVENT_CHOICE_VERTICAL_GAP)
+
+    if click_target is None:
+      warning(f"Could not locate team choice '{test_against}' for '{event_name}'")
+      return False
+
+    device_action.click(target=click_target, text=f"Selecting optimal choice: {event_name}")
+    if settle_seconds > 0:
+      sleep(settle_seconds)
   else:
     x = event_choices_icon[0]
     y = event_choices_icon[1] + ((chosen - 1) * _EVENT_CHOICE_VERTICAL_GAP)
