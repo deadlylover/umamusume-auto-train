@@ -363,8 +363,10 @@ class OperatorConsole:
     actions.columnconfigure(0, weight=1)
     primary_controls = tk.Frame(actions, bg="#101418")
     primary_controls.grid(row=0, column=0, sticky="w")
+    tool_controls = tk.Frame(actions, bg="#101418")
+    tool_controls.grid(row=1, column=0, sticky="w", pady=(4, 0))
     secondary_controls = tk.Frame(actions, bg="#101418")
-    secondary_controls.grid(row=1, column=0, sticky="w", pady=(6, 0))
+    secondary_controls.grid(row=2, column=0, sticky="w", pady=(4, 0))
 
     self._start_bot_button = tk.Button(primary_controls, text="Start Bot", command=self._start_bot)
     self._start_bot_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -376,13 +378,31 @@ class OperatorConsole:
     self._resume_button.pack(side=tk.LEFT, padx=(0, 8))
     self._continue_button = tk.Button(primary_controls, text="Continue (F2)", command=self._continue_review)
     self._continue_button.pack(side=tk.LEFT, padx=(0, 8))
-    tk.Button(primary_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
+    tk.Button(primary_controls, text="Race Selector", command=self._open_race_selector_window).pack(side=tk.LEFT, padx=(12, 0))
+    self._race_selector_status_var = tk.StringVar(value=self._race_selector_status_text())
+    tk.Label(
+      primary_controls,
+      textvariable=self._race_selector_status_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(6, 0))
+    tk.Button(primary_controls, text="Skills", command=self._open_skill_selector_window).pack(side=tk.LEFT, padx=(12, 0))
+    self._skill_selector_status_var = tk.StringVar(value=self._skill_selector_status_text())
+    tk.Label(
+      primary_controls,
+      textvariable=self._skill_selector_status_var,
+      fg="#9aa4ad",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT, padx=(6, 0))
+    tk.Button(tool_controls, text="Open OCR Adjuster", command=self._launch_adjuster).pack(side=tk.LEFT, padx=(0, 4))
     self._region_adjuster_profiles, active_profile = self._get_region_adjuster_profile_options()
     self._region_adjuster_profile_var = tk.StringVar(value=active_profile)
-    tk.Label(primary_controls, text="OCR preset:", fg="#9aa4ad", bg="#101418").pack(side=tk.LEFT, padx=(8, 4))
+    tk.Label(tool_controls, text="OCR preset:", fg="#9aa4ad", bg="#101418").pack(side=tk.LEFT, padx=(8, 4))
     profile_names = list(self._region_adjuster_profiles.keys()) or [active_profile]
     self._region_adjuster_profile_menu = tk.OptionMenu(
-      primary_controls,
+      tool_controls,
       self._region_adjuster_profile_var,
       *profile_names,
       command=self._set_region_adjuster_profile,
@@ -398,10 +418,10 @@ class OperatorConsole:
     )
     self._region_adjuster_profile_menu["menu"].configure(bg="#192028", fg="white")
     self._region_adjuster_profile_menu.pack(side=tk.LEFT, padx=(0, 8))
-    tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
-    tk.Button(primary_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
-    tk.Button(primary_controls, text="Planner Flow", command=self._open_planner_flow_window).pack(side=tk.LEFT, padx=(4, 0))
-    tk.Button(primary_controls, text="Unity", command=self._open_unity_weights_window).pack(side=tk.LEFT, padx=(4, 0))
+    tk.Button(tool_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
+    tk.Button(tool_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
+    tk.Button(tool_controls, text="Planner Flow", command=self._open_planner_flow_window).pack(side=tk.LEFT, padx=(4, 0))
+    tk.Button(tool_controls, text="Unity", command=self._open_unity_weights_window).pack(side=tk.LEFT, padx=(4, 0))
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "execute"):
       tk.Radiobutton(
@@ -474,24 +494,6 @@ class OperatorConsole:
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
     tk.Button(secondary_controls, text="Save Position", command=self._save_and_test_position).pack(side=tk.LEFT, padx=(12, 0))
-    tk.Button(secondary_controls, text="Race Selector", command=self._open_race_selector_window).pack(side=tk.LEFT, padx=(12, 0))
-    self._race_selector_status_var = tk.StringVar(value=self._race_selector_status_text())
-    tk.Label(
-      secondary_controls,
-      textvariable=self._race_selector_status_var,
-      fg="#9aa4ad",
-      bg="#101418",
-      anchor="w",
-    ).pack(side=tk.LEFT, padx=(6, 0))
-    tk.Button(secondary_controls, text="Skills", command=self._open_skill_selector_window).pack(side=tk.LEFT, padx=(12, 0))
-    self._skill_selector_status_var = tk.StringVar(value=self._skill_selector_status_text())
-    tk.Label(
-      secondary_controls,
-      textvariable=self._skill_selector_status_var,
-      fg="#9aa4ad",
-      bg="#101418",
-      anchor="w",
-    ).pack(side=tk.LEFT, padx=(6, 0))
 
     left = tk.LabelFrame(root, text="Flow", fg="white", bg="#101418", padx=6, pady=6)
     left.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=6)
@@ -730,11 +732,11 @@ class OperatorConsole:
   def _make_stat(self, parent, column, title):
     row = 0 if column < 5 else 1
     actual_column = column if column < 5 else column - 5
-    frame = tk.Frame(parent, bg="#151b22", padx=6, pady=3)
-    frame.grid(row=row, column=actual_column, sticky="ew", padx=2, pady=2)
-    tk.Label(frame, text=title, fg="#8a949e", bg="#151b22", font=("Helvetica", 9)).pack(anchor="w")
+    frame = tk.Frame(parent, bg="#151b22", padx=6, pady=2)
+    frame.grid(row=row, column=actual_column, sticky="ew", padx=2, pady=1)
+    tk.Label(frame, text=f"{title}:", fg="#8a949e", bg="#151b22", font=("Helvetica", 9)).pack(side=tk.LEFT)
     value = tk.StringVar(value="-")
-    tk.Label(frame, textvariable=value, fg="white", bg="#151b22", font=("Helvetica", 10, "bold")).pack(anchor="w")
+    tk.Label(frame, textvariable=value, fg="white", bg="#151b22", font=("Helvetica", 10, "bold")).pack(side=tk.LEFT, padx=(4, 0))
     return value
 
   def _rebalance_right_pane_weights(self):
@@ -4814,8 +4816,8 @@ class OperatorConsole:
     window = tk.Toplevel(self._root)
     window.title("Training Behavior")
     window.configure(bg="#101418")
-    window.geometry("820x760")
-    window.minsize(720, 560)
+    window.geometry("760x680")
+    window.minsize(700, 480)
     window.rowconfigure(1, weight=1)
     window.columnconfigure(0, weight=1)
     window.bind(
@@ -4878,651 +4880,316 @@ class OperatorConsole:
     canvas.bind("<Enter>", _bind_mousewheel)
     canvas.bind("<Leave>", _unbind_mousewheel)
 
-    active = self._get_active_stat_weights()
-    self._stat_weights_entries = {}
-    stat_weights_frame = tk.Frame(body, bg="#101418")
-    stat_weights_frame.pack(fill=tk.X)
-    tk.Label(
-      stat_weights_frame,
-      text="Stat weights for stat_focused scoring (gain × weight)",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
-    for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
-      label = self._STAT_LABELS.get(stat, stat)
-      tk.Label(
-        stat_weights_frame, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
-      ).grid(row=row_idx + 1, column=0, sticky="w", pady=2)
-      var = tk.StringVar(value=str(active.get(stat, 1.0)))
-      entry = tk.Entry(stat_weights_frame, textvariable=var, width=8, bg="#192028", fg="white", insertbackground="white")
-      entry.grid(row=row_idx + 1, column=1, sticky="w", padx=(8, 0), pady=2)
-      self._stat_weights_entries[stat] = var
+    # Two-column card layout. Every section is a self-contained card packed into
+    # one of the two columns; helper closures keep the per-section code compact.
+    CARD_BG = "#151b22"
+    body.pack_propagate(True)
+    left_col = tk.Frame(body, bg="#101418")
+    left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+    right_col = tk.Frame(body, bg="#101418")
+    right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-    stat_caps_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    stat_caps_frame.pack(fill=tk.X)
-    tk.Label(
-      stat_caps_frame,
-      text="Stat caps (global)",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=10, sticky="w", pady=(0, 4))
-    active_caps = self._get_active_stat_caps()
-    self._stat_caps_entries = {}
-    for col_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
-      cell = tk.Frame(stat_caps_frame, bg="#101418")
-      cell.grid(row=1, column=col_idx, sticky="w", padx=(0, 12))
+    def _mk_section(parent, title):
+      card = tk.Frame(parent, bg=CARD_BG, padx=10, pady=8)
+      card.pack(fill=tk.X, pady=(0, 8))
       tk.Label(
-        cell, text=self._STAT_LABELS.get(stat, stat), fg="#9aa4ad", bg="#101418", anchor="w",
-      ).pack(anchor="w")
+        card, text=title, fg="#d6dde5", bg=CARD_BG,
+        font=("Helvetica", 10, "bold"), anchor="w",
+      ).pack(fill=tk.X, pady=(0, 6))
+      return card
+
+    def _mk_help(parent, text):
+      tk.Label(
+        parent, text=text, fg="#8b949e", bg=CARD_BG,
+        justify="left", anchor="w", wraplength=320,
+      ).pack(fill=tk.X, pady=(6, 0))
+
+    def _mk_field(parent, label, var, from_, to, width=5):
+      row = tk.Frame(parent, bg=CARD_BG)
+      row.pack(fill=tk.X, pady=1)
+      tk.Label(row, text=label, fg="#d6dde5", bg=CARD_BG, anchor="w").pack(side=tk.LEFT)
+      tk.Spinbox(
+        row, from_=from_, to=to, width=width, textvariable=var,
+        bg="#192028", fg="white", buttonbackground="#2d333b",
+      ).pack(side=tk.RIGHT)
+
+    def _mk_check(parent, label, var, command=None):
+      tk.Checkbutton(
+        parent, text=label, variable=var, command=command,
+        fg="#d6dde5", bg=CARD_BG, selectcolor="#192028",
+        activebackground=CARD_BG, activeforeground="white",
+        wraplength=300, justify="left", anchor="w",
+      ).pack(fill=tk.X, anchor="w")
+
+    training_behavior = self._get_active_training_behavior()
+
+    # --- Stat weights & caps (3-column table: Stat | Weight | Cap) ------------
+    active = self._get_active_stat_weights()
+    active_caps = self._get_active_stat_caps()
+    self._stat_weights_entries = {}
+    self._stat_caps_entries = {}
+    stat_card = _mk_section(left_col, "Stat weights & caps")
+    tk.Label(
+      stat_card,
+      text="stat_focused scoring multiplies each training's stat gain by its weight.",
+      fg="#8b949e", bg=CARD_BG, justify="left", anchor="w", wraplength=320,
+    ).pack(fill=tk.X, pady=(0, 6))
+    stat_grid = tk.Frame(stat_card, bg=CARD_BG)
+    stat_grid.pack(fill=tk.X)
+    stat_grid.columnconfigure(0, weight=1)
+    for col_idx, heading in enumerate(("Stat", "Weight", "Cap")):
+      tk.Label(
+        stat_grid, text=heading, fg="#9aa4ad", bg=CARD_BG,
+        font=("Helvetica", 9, "bold"),
+        anchor="w" if col_idx == 0 else "center",
+      ).grid(row=0, column=col_idx, sticky="w" if col_idx == 0 else "", padx=(0, 8), pady=(0, 2))
+    for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
+      tk.Label(
+        stat_grid, text=self._STAT_LABELS.get(stat, stat),
+        fg="#d6dde5", bg=CARD_BG, anchor="w",
+      ).grid(row=row_idx + 1, column=0, sticky="w", pady=2)
+      weight_var = tk.StringVar(value=str(active.get(stat, 1.0)))
+      tk.Entry(
+        stat_grid, textvariable=weight_var, width=7, justify="center",
+        bg="#192028", fg="white", insertbackground="white",
+      ).grid(row=row_idx + 1, column=1, padx=(0, 8), pady=2)
+      self._stat_weights_entries[stat] = weight_var
       cap_var = tk.StringVar(value=str(active_caps.get(stat, 1200)))
       tk.Entry(
-        cell, textvariable=cap_var, width=6,
+        stat_grid, textvariable=cap_var, width=7, justify="center",
         bg="#192028", fg="white", insertbackground="white",
-      ).pack(anchor="w")
+      ).grid(row=row_idx + 1, column=2, pady=2)
       self._stat_caps_entries[stat] = cap_var
 
-    overcap_frame = tk.Frame(stat_caps_frame, bg="#101418")
-    overcap_frame.grid(row=2, column=0, columnspan=10, sticky="w", pady=(6, 0))
+    overcap_row = tk.Frame(stat_card, bg=CARD_BG)
+    overcap_row.pack(fill=tk.X, pady=(8, 0))
     tk.Label(
-      overcap_frame,
-      text="Over-cap gain weight",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="w",
+      overcap_row, text="Over-cap gain weight (all stats)",
+      fg="#d6dde5", bg=CARD_BG, anchor="w",
     ).pack(side=tk.LEFT)
     self._stat_overcap_weight_var = tk.StringVar(
       value=str(getattr(config, "STAT_OVERCAP_WEIGHT", 0.15))
     )
     tk.Entry(
-      overcap_frame, textvariable=self._stat_overcap_weight_var, width=6,
+      overcap_row, textvariable=self._stat_overcap_weight_var, width=7, justify="center",
       bg="#192028", fg="white", insertbackground="white",
-    ).pack(side=tk.LEFT, padx=(8, 0))
-    tk.Label(
-      stat_caps_frame,
-      text=(
-        "Stat gains that keep a stat at or below its cap count fully; the portion "
-        "above the cap is multiplied by the over-cap weight (0 = discard over-cap "
-        "gains and skip capped trainings, 1 = ignore caps). This keeps a capped "
-        "training worthwhile for the secondary stats it still raises."
-      ),
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).grid(row=3, column=0, columnspan=10, sticky="ew", pady=(4, 0))
+    ).pack(side=tk.RIGHT)
+    _mk_help(
+      stat_card,
+      "Gains that keep a stat at or below its cap count fully; the portion above the "
+      "cap is scaled by this weight. 0 = ignore over-cap gains and skip a fully-capped "
+      "training, 1 = ignore caps. Default 0.15 keeps a capped training worthwhile for "
+      "the secondary stats it still raises.",
+    )
 
-    training_behavior = self._get_active_training_behavior()
-    behavior_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    behavior_frame.pack(fill=tk.X)
+    # --- Wit failure gate -----------------------------------------------------
+    wit_card = _mk_section(left_col, "Wit failure gate")
     tk.Label(
-      behavior_frame,
-      text="Wit failure gate",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
-    tk.Label(
-      behavior_frame,
-      text="Wit gate supports",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=0, sticky="e", padx=(0, 4), pady=2)
-    self._wit_gate_supports_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_supports", 2)))
-    tk.Spinbox(
-      behavior_frame,
-      from_=0,
-      to=2,
-      width=4,
-      textvariable=self._wit_gate_supports_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=1, sticky="w", pady=2)
-    tk.Label(
-      behavior_frame,
-      text="Wit gate rainbows",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
-    self._wit_gate_rainbows_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_rainbows", 1)))
-    tk.Spinbox(
-      behavior_frame,
-      from_=0,
-      to=2,
-      width=4,
-      textvariable=self._wit_gate_rainbows_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=3, sticky="w", pady=2)
-    tk.Label(
-      behavior_frame,
-      text="Wit energy bypass %",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=4, sticky="e", padx=(12, 4), pady=2)
+      wit_card,
+      text="Wit rarely fails and refunds energy, so a bare Wit turn needs a reason.",
+      fg="#8b949e", bg=CARD_BG, justify="left", anchor="w", wraplength=320,
+    ).pack(fill=tk.X, pady=(0, 6))
     self._wit_gate_energy_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_high_energy_pct", 80)))
-    tk.Spinbox(
-      behavior_frame,
-      from_=0,
-      to=100,
-      width=5,
-      textvariable=self._wit_gate_energy_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=5, sticky="w", pady=2)
-    tk.Label(
-      behavior_frame,
-      text="Strong score gate",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=6, sticky="e", padx=(12, 4), pady=2)
+    _mk_field(wit_card, "Energy bypass %", self._wit_gate_energy_var, 0, 100)
+    self._wit_gate_supports_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_supports", 2)))
+    _mk_field(wit_card, "Min supports on Wit", self._wit_gate_supports_var, 0, 2, width=4)
+    self._wit_gate_rainbows_var = tk.StringVar(value=str(training_behavior.get("wit_failure_gate_min_rainbows", 1)))
+    _mk_field(wit_card, "Min rainbows on Wit", self._wit_gate_rainbows_var, 0, 2, width=4)
     self._strong_training_score_threshold_var = tk.StringVar(
       value=str(training_behavior.get("strong_training_score_threshold", 40))
     )
-    tk.Spinbox(
-      behavior_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._strong_training_score_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=7, sticky="w", pady=2)
-    tk.Label(
-      behavior_frame,
-      text="Below the bypass, wit only stays eligible when it has enough supports or rainbows. Above the bypass, wit is always allowed. Training scores at or above the strong score gate keep the turn on training.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=640,
-    ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+    _mk_field(wit_card, "Strong score gate", self._strong_training_score_threshold_var, 0, 200)
+    _mk_help(
+      wit_card,
+      "Wit stays eligible when energy is ABOVE the bypass %, OR the Wit slot has at "
+      "least the min supports, OR at least the min rainbows (either count alone is "
+      "enough). Below the bypass with too few of both, Wit is skipped for rest/racing. "
+      "Set bypass to 100 to always require supports/rainbows; set it to 0 to always "
+      "allow Wit.\n\n"
+      "Strong score gate: if the turn would rest but the best training's stat_focused "
+      "score is at or above this, the turn is promoted back to that training.",
+    )
 
-    planner_behavior_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    planner_behavior_frame.pack(fill=tk.X)
-    tk.Label(
-      planner_behavior_frame,
-      text="Race / commit thresholds",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
     planner_behavior = self._get_active_planner_policy()
-    tk.Label(
-      planner_behavior_frame,
-      text="Optional race below",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=0, sticky="e", padx=(0, 4), pady=2)
+    thresholds_card = _mk_section(left_col, "Race / commit thresholds")
     self._optional_race_training_threshold_var = tk.StringVar(
       value=str(
         int(planner_behavior.get("training_overrides_race_threshold", get_training_behavior_optional_race_threshold()))
       )
     )
-    tk.Spinbox(
-      planner_behavior_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._optional_race_training_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=1, sticky="w", pady=2)
-    tk.Label(
-      planner_behavior_frame,
-      text="Commit training at",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
+    _mk_field(thresholds_card, "Optional race below", self._optional_race_training_threshold_var, 0, 200)
     self._committed_training_score_threshold_var = tk.StringVar(
       value=str(get_training_behavior_committed_training_score_threshold())
     )
-    tk.Spinbox(
-      planner_behavior_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._committed_training_score_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=1, column=3, sticky="w", pady=2)
-    tk.Label(
-      planner_behavior_frame,
-      text=(
-        "If the visible board is below the optional race threshold, racing stays valid. "
-        "The commit threshold controls when item-use logic treats a training as strong enough to commit/rescue."
-      ),
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).grid(row=2, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+    _mk_field(thresholds_card, "Commit training at", self._committed_training_score_threshold_var, 0, 200)
+    _mk_help(
+      thresholds_card,
+      "If the visible board scores below the optional-race threshold, racing stays "
+      "valid. The commit threshold controls when item-use logic treats a training as "
+      "strong enough to commit to or rescue.",
+    )
 
-    optional_race_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    optional_race_frame.pack(fill=tk.X)
-    tk.Label(
-      optional_race_frame,
-      text="Zero-energy optional race",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).pack(anchor="w", pady=(0, 4))
+    optional_race_card = _mk_section(right_col, "Zero-energy optional race")
     self._zero_energy_optional_race_rest_var = tk.BooleanVar(
       value=bool(training_behavior.get("prefer_rest_on_zero_energy_optional_race", True))
     )
-    tk.Checkbutton(
-      optional_race_frame,
-      text="Prefer rest over fallback rival race at 2% energy or lower",
-      variable=self._zero_energy_optional_race_rest_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(anchor="w")
+    _mk_check(
+      optional_race_card,
+      "Prefer rest over fallback rival race at 2% energy or lower",
+      self._zero_energy_optional_race_rest_var,
+    )
     self._zero_energy_optional_race_vita_var = tk.BooleanVar(
       value=bool(training_behavior.get("allow_zero_energy_optional_race_with_vita", True))
     )
-    tk.Checkbutton(
-      optional_race_frame,
-      text="Allow zero-energy rival race if a Vita / energy item is held",
-      variable=self._zero_energy_optional_race_vita_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(anchor="w")
+    _mk_check(
+      optional_race_card,
+      "Allow zero-energy rival race if a Vita / energy item is held",
+      self._zero_energy_optional_race_vita_var,
+    )
     self._zero_energy_optional_race_recovery_var = tk.BooleanVar(
       value=bool(training_behavior.get("allow_zero_energy_optional_race_with_recovery_items", True))
     )
-    tk.Checkbutton(
-      optional_race_frame,
-      text="Allow zero-energy rival race if Miracle Cure or Rich Hand Cream is held",
-      variable=self._zero_energy_optional_race_recovery_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(anchor="w")
-    tk.Label(
-      optional_race_frame,
-      text="Scheduled races still ignore this safety gate. Vita cover stages one energy item before the rival race.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).pack(anchor="w", pady=(4, 0))
+    _mk_check(
+      optional_race_card,
+      "Allow zero-energy rival race if Miracle Cure or Rich Hand Cream is held",
+      self._zero_energy_optional_race_recovery_var,
+    )
+    _mk_help(
+      optional_race_card,
+      "Scheduled races still ignore this safety gate. Vita cover stages one energy item "
+      "before the rival race.",
+    )
 
-    fallback_race_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    fallback_race_frame.pack(fill=tk.X)
-    tk.Label(
-      fallback_race_frame,
-      text="Weak-training fallback race",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 4))
+    fallback_race_card = _mk_section(right_col, "Weak-training fallback race")
     self._fallback_race_enabled_var = tk.BooleanVar(
       value=bool(training_behavior.get("weak_training_fallback_race_enabled", True))
     )
-    tk.Checkbutton(
-      fallback_race_frame,
-      text="Prefer a schedule race over weak training when no rival indicator",
-      variable=self._fallback_race_enabled_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).grid(row=1, column=0, columnspan=8, sticky="w")
-    tk.Label(
-      fallback_race_frame,
-      text="Earliest turn",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=1, column=2, sticky="e", padx=(12, 4), pady=2)
+    _mk_check(
+      fallback_race_card,
+      "Prefer a schedule race over weak training when no rival indicator",
+      self._fallback_race_enabled_var,
+    )
+    earliest_turn_row = tk.Frame(fallback_race_card, bg=CARD_BG)
+    earliest_turn_row.pack(fill=tk.X, pady=1)
+    tk.Label(earliest_turn_row, text="Earliest turn", fg="#d6dde5", bg=CARD_BG, anchor="w").pack(side=tk.LEFT)
     earliest_turn_default = str(training_behavior.get("weak_training_fallback_race_earliest_turn", "Classic Year Early Sep"))
     self._fallback_race_earliest_turn_var = tk.StringVar(value=earliest_turn_default)
     earliest_turn_menu = tk.OptionMenu(
-      fallback_race_frame,
+      earliest_turn_row,
       self._fallback_race_earliest_turn_var,
       *constants.TIMELINE,
     )
-    earliest_turn_menu.config(bg="#192028", fg="white", activebackground="#2d333b", activeforeground="white", highlightthickness=0, width=22)
+    earliest_turn_menu.config(bg="#192028", fg="white", activebackground="#2d333b", activeforeground="white", highlightthickness=0, width=20)
     earliest_turn_menu["menu"].config(bg="#192028", fg="white", activebackground="#2d333b", activeforeground="white")
-    earliest_turn_menu.grid(row=1, column=3, columnspan=3, sticky="w", pady=2)
-    tk.Label(
-      fallback_race_frame,
-      text="Score threshold",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    earliest_turn_menu.pack(side=tk.RIGHT)
     self._fallback_race_score_threshold_var = tk.StringVar(
       value=str(training_behavior.get("weak_training_fallback_race_score_threshold", 30))
     )
-    tk.Spinbox(
-      fallback_race_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._fallback_race_score_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=1, sticky="w", pady=2)
-    tk.Label(
-      fallback_race_frame,
-      text="Low-energy rest %",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=2, sticky="e", padx=(12, 4), pady=2)
+    _mk_field(fallback_race_card, "Score threshold", self._fallback_race_score_threshold_var, 0, 200)
     self._fallback_race_low_energy_rest_pct_var = tk.StringVar(
       value=str(training_behavior.get("weak_training_fallback_race_low_energy_rest_pct", 2))
     )
-    tk.Spinbox(
-      fallback_race_frame,
-      from_=0,
-      to=100,
-      width=5,
-      textvariable=self._fallback_race_low_energy_rest_pct_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=3, sticky="w", pady=2)
-    tk.Label(
-      fallback_race_frame,
-      text="Rest exempt score",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=4, sticky="e", padx=(12, 4), pady=2)
+    _mk_field(fallback_race_card, "Low-energy rest %", self._fallback_race_low_energy_rest_pct_var, 0, 100)
     self._fallback_race_rest_exempt_score_var = tk.StringVar(
       value=str(training_behavior.get("weak_training_fallback_race_low_energy_rest_exempt_score", 35))
     )
-    tk.Spinbox(
-      fallback_race_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._fallback_race_rest_exempt_score_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=5, sticky="w", pady=2)
-    tk.Label(
-      fallback_race_frame,
-      text="When training score is below the threshold and no rival is on screen, race any available schedule race instead. "
-           "Consecutive-race warnings always cancel. At very low energy (below rest %), prefer rest over both racing and "
-           "wasting a Good-Luck Charm on weak training — unless training score exceeds the rest exempt score.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+    _mk_field(fallback_race_card, "Rest exempt score", self._fallback_race_rest_exempt_score_var, 0, 200)
+    _mk_help(
+      fallback_race_card,
+      "When training score is below the threshold and no rival is on screen, race any "
+      "available schedule race instead. Consecutive-race warnings always cancel. At very "
+      "low energy (below rest %), prefer rest over both racing and wasting a Good-Luck "
+      "Charm on weak training — unless training score exceeds the rest exempt score.",
+    )
 
-    race_lookahead_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    race_lookahead_frame.pack(fill=tk.X)
-    tk.Label(
-      race_lookahead_frame,
-      text="Race lookahead energy conservation",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    race_lookahead_card = _mk_section(right_col, "Race lookahead energy conservation")
     self._race_lookahead_enabled_var = tk.BooleanVar(
       value=bool(training_behavior.get("race_lookahead_enabled", True))
     )
-    tk.Checkbutton(
-      race_lookahead_frame,
-      text="Conserve energy before back-to-back scheduled races",
-      variable=self._race_lookahead_enabled_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).grid(row=1, column=0, columnspan=6, sticky="w")
-    tk.Label(
-      race_lookahead_frame,
-      text="Energy threshold %",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    _mk_check(
+      race_lookahead_card,
+      "Conserve energy before back-to-back scheduled races",
+      self._race_lookahead_enabled_var,
+    )
     self._race_lookahead_threshold_var = tk.StringVar(
       value=str(training_behavior.get("race_lookahead_conserve_threshold", 60))
     )
-    tk.Spinbox(
-      race_lookahead_frame,
-      from_=0,
-      to=100,
-      width=5,
-      textvariable=self._race_lookahead_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=1, sticky="w", pady=2)
-    tk.Label(
-      race_lookahead_frame,
-      text="Min exceptional training score",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=2, sticky="e", padx=(12, 4), pady=2)
+    _mk_field(race_lookahead_card, "Energy threshold %", self._race_lookahead_threshold_var, 0, 100)
     self._race_lookahead_score_var = tk.StringVar(
       value=str(training_behavior.get("race_lookahead_exceptional_score", 40))
     )
-    tk.Spinbox(
-      race_lookahead_frame,
-      from_=0,
-      to=200,
-      width=5,
-      textvariable=self._race_lookahead_score_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=3, sticky="w", pady=2)
-    tk.Label(
-      race_lookahead_frame,
-      text="When enabled, the bot rests before consecutive scheduled races unless training score exceeds the threshold and native energy or one held Vita can still cover the race sequence. Year-end Late Dec races do not trigger this guard.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+    _mk_field(race_lookahead_card, "Min exceptional score", self._race_lookahead_score_var, 0, 200)
+    _mk_help(
+      race_lookahead_card,
+      "When enabled, the bot rests before consecutive scheduled races unless training "
+      "score exceeds the threshold and native energy or one held Vita can still cover the "
+      "race sequence. Year-end Late Dec races do not trigger this guard.",
+    )
 
-    scheduled_race_vita_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    scheduled_race_vita_frame.pack(fill=tk.X)
-    tk.Label(
-      scheduled_race_vita_frame,
-      text="Back-to-back race Vita safeguard",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 4))
+    scheduled_race_vita_card = _mk_section(right_col, "Back-to-back race Vita safeguard")
     self._scheduled_race_vita_enabled_var = tk.BooleanVar(
       value=bool(training_behavior.get("back_to_back_scheduled_race_vita_enabled", True))
     )
-    tk.Checkbutton(
-      scheduled_race_vita_frame,
-      text="Use one Vita before a scheduled race when OCR reads near 0 energy and another scheduled race follows",
-      variable=self._scheduled_race_vita_enabled_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).grid(row=1, column=0, columnspan=6, sticky="w")
-    tk.Label(
-      scheduled_race_vita_frame,
-      text="Near-0 threshold %",
-      fg="#d6dde5",
-      bg="#101418",
-      anchor="e",
-    ).grid(row=2, column=0, sticky="e", padx=(0, 4), pady=2)
+    _mk_check(
+      scheduled_race_vita_card,
+      "Use one Vita before a scheduled race when OCR reads near 0 energy and another scheduled race follows",
+      self._scheduled_race_vita_enabled_var,
+    )
     self._scheduled_race_vita_threshold_var = tk.StringVar(
       value=str(training_behavior.get("back_to_back_scheduled_race_vita_threshold_pct", 2))
     )
-    tk.Spinbox(
-      scheduled_race_vita_frame,
-      from_=0,
-      to=20,
-      width=5,
-      textvariable=self._scheduled_race_vita_threshold_var,
-      bg="#192028",
-      fg="white",
-      buttonbackground="#2d333b",
-    ).grid(row=2, column=1, sticky="w", pady=2)
-    tk.Label(
-      scheduled_race_vita_frame,
-      text="This does not fire on lone scheduled races or on fallback bad-training races. It only covers the first leg of an immediate back-to-back scheduled sequence.",
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(4, 0))
+    _mk_field(scheduled_race_vita_card, "Near-0 threshold %", self._scheduled_race_vita_threshold_var, 0, 20)
+    _mk_help(
+      scheduled_race_vita_card,
+      "This does not fire on lone scheduled races or on fallback bad-training races. It "
+      "only covers the first leg of an immediate back-to-back scheduled sequence.",
+    )
 
-    vita_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    vita_frame.pack(fill=tk.X)
-    tk.Label(
-      vita_frame,
-      text="Energy item conservation",
-      fg="#d6dde5",
-      bg="#101418",
-      font=("Helvetica", 10, "bold"),
-      anchor="w",
-    ).pack(anchor="w", pady=(0, 4))
+    vita_card = _mk_section(right_col, "Energy item conservation")
     self._save_vita_for_summer_var = tk.BooleanVar(
       value=bool(training_behavior.get("save_vita_for_summer", True))
     )
-    tk.Checkbutton(
-      vita_frame,
-      text="Save Vita items for summer burst windows",
-      variable=self._save_vita_for_summer_var,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(anchor="w")
-    tk.Label(
-      vita_frame,
-      text=(
-        "When enabled, Vita items are deferred outside summer windows (Early Jul \u2013 Late Aug). "
-        "High-fail trainings that need energy to clear failure will be skipped in favor of rest or racing. "
-        "Disable to allow Vita use year-round for strong trainings."
-      ),
-      fg="#8b949e",
-      bg="#101418",
-      justify="left",
-      anchor="w",
-      wraplength=700,
-    ).pack(anchor="w", pady=(4, 0))
+    _mk_check(
+      vita_card,
+      "Save Vita items for summer burst windows",
+      self._save_vita_for_summer_var,
+    )
+    _mk_help(
+      vita_card,
+      "When enabled, Vita items are deferred outside summer windows (Early Jul \u2013 Late "
+      "Aug). High-fail trainings that need energy to clear failure will be skipped in "
+      "favor of rest or racing. Disable to allow Vita use year-round for strong trainings.",
+    )
 
-    bond_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    bond_frame.pack(fill=tk.X)
+    # --- Trackblazer bond boost / buff override (left column) -----------------
+    bond_card = _mk_section(left_col, "Trackblazer boosts")
     self._bond_boost_var = tk.BooleanVar(value=bot.get_trackblazer_bond_boost_enabled())
-    tk.Checkbutton(
-      bond_frame,
-      text="Bond boost (+10/friend, +15 on wit)",
-      variable=self._bond_boost_var,
+    _mk_check(
+      bond_card,
+      "Bond boost (+10/friend, +15 on wit)",
+      self._bond_boost_var,
       command=self._toggle_bond_boost,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(side=tk.LEFT)
-
-    cutoff_frame = tk.Frame(body, bg="#101418", padx=16, pady=0)
-    cutoff_frame.pack(fill=tk.X)
-    tk.Label(
-      cutoff_frame, text="Active until:", fg="#9aa4ad", bg="#101418",
-    ).pack(side=tk.LEFT)
+    )
+    cutoff_row = tk.Frame(bond_card, bg=CARD_BG)
+    cutoff_row.pack(fill=tk.X, pady=(2, 0))
+    tk.Label(cutoff_row, text="Active until", fg="#9aa4ad", bg=CARD_BG, anchor="w").pack(side=tk.LEFT)
     self._bond_boost_cutoff_var = tk.StringVar(value=bot.get_trackblazer_bond_boost_cutoff())
     cutoff_menu = tk.OptionMenu(
-      cutoff_frame,
+      cutoff_row,
       self._bond_boost_cutoff_var,
       *constants.TIMELINE[:-1],
       command=self._set_bond_boost_cutoff,
     )
-    cutoff_menu.configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white", highlightthickness=0, width=24)
+    cutoff_menu.configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white", highlightthickness=0, width=22)
     cutoff_menu["menu"].configure(bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white")
-    cutoff_menu.pack(side=tk.LEFT, padx=(4, 0))
-
-    buff_override_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
-    buff_override_frame.pack(fill=tk.X)
+    cutoff_menu.pack(side=tk.RIGHT)
     self._buff_override_var = tk.BooleanVar(value=bot.get_trackblazer_allow_buff_override())
-    tk.Checkbutton(
-      buff_override_frame,
-      text="Allow megaphone buff override (60% over 40%)",
-      variable=self._buff_override_var,
+    _mk_check(
+      bond_card,
+      "Allow megaphone buff override (60% over 40%)",
+      self._buff_override_var,
       command=self._toggle_buff_override,
-      fg="#d6dde5",
-      bg="#101418",
-      selectcolor="#192028",
-      activebackground="#101418",
-      activeforeground="white",
-      wraplength=640,
-      justify="left",
-      anchor="w",
-    ).pack(side=tk.LEFT)
+    )
 
     buttons = tk.Frame(window, bg="#101418", padx=8, pady=8)
     buttons.grid(row=2, column=0, sticky="ew")
