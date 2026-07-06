@@ -2978,6 +2978,36 @@ def _planned_clicks_for_action(action):
         _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
       ]
       return clicks
+    if is_race_day:
+      # Forced/goal race day (non-Climax): the lobby shows only Skills + the "Race Day"
+      # button, so do_race uses race_day() — click the forced race button, confirm the
+      # prompt, then start the race. No Races list to open and scan.
+      year = _action_value(action, "year")
+      if year == "Finale Underway":
+        forced_race_button = _planned_click(
+          "Click Finale race button",
+          "assets/ura/ura_race_btn.png",
+          region_key="SCREEN_BOTTOM_BBOX",
+          note="Race-day lobby shows only Skills + the forced race button; no race list to scan.",
+        )
+      else:
+        forced_race_button = _planned_click(
+          "Click forced Race Day button",
+          "assets/buttons/race_day_btn.png",
+          region_key="SCREEN_BOTTOM_BBOX",
+          note="Race-day lobby shows only Skills + the forced race button; no race list to scan.",
+        )
+      return skill_clicks + shop_clicks + pre_action_clicks + [
+        forced_race_button,
+        _planned_click(
+          "Confirm race-day prompt",
+          "assets/buttons/ok_btn.png",
+          region_key="GAME_WINDOW_BBOX",
+          note="Advance from the race-day prompt after entering the forced race.",
+        ),
+        _planned_click("Confirm race", "assets/buttons/race_btn.png"),
+        _planned_click("Fallback BlueStacks confirm", "assets/buttons/bluestacks/race_btn.png"),
+      ]
     clicks = skill_clicks + shop_clicks + pre_action_clicks + [
       _planned_click("Open race menu", "assets/buttons/races_btn.png", region_key="SCREEN_BOTTOM_BBOX"),
       _planned_click(
@@ -4944,14 +4974,25 @@ def _handle_unity_post_race_result_screen(state_obj, action):
   }
 
 
-def _generic_post_action_return_to_lobby_step():
-  for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
-    if label == "cancel":
+def _click_post_action_generic_advance(label):
+  """Targeted click for a single generic-advance button already detected on the
+  current frame by ``_detect_visible_post_action_advance_button``.
+
+  The main resolver loop detects with a single-shot, non-blocking scan on the
+  screenshot it already captured, then calls this to click only the winning
+  button. This replaces the old blocking sweep that searched all eight
+  templates (each up to ~0.4s) on every idle iteration.
+  """
+  for entry_label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
+    if entry_label != label:
+      continue
+    if entry_label == "cancel":
       screenshot = device_action.screenshot()
       if device_action.match_template("assets/icons/clock_icon.png", screenshot=screenshot, threshold=0.9):
-        continue
+        return ""
     if device_action.locate_and_click(template_path, min_search_time=get_secs(0.4), region_ltrb=region_ltrb):
-      return label
+      return entry_label
+    return ""
   return ""
 
 
@@ -5579,7 +5620,13 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         continue
 
     generic_started_at = _time_mod.time()
-    generic_step = _generic_post_action_return_to_lobby_step()
+    # Single-shot, non-blocking detect on the screenshot already captured at the
+    # top of this iteration, then click only the matched button. The old
+    # blocking sweep searched all eight templates (each up to ~0.4s) every idle
+    # iteration; this catches the button the frame it appears with no blocking
+    # wait when nothing is present.
+    advance_label = _detect_visible_post_action_advance_button(screenshot=screenshot)
+    generic_step = _click_post_action_generic_advance(advance_label) if advance_label else ""
     generic_duration = _time_mod.time() - generic_started_at
     if generic_step:
       metrics["timing_generic_recovery"] = round(metrics.get("timing_generic_recovery", 0.0) + generic_duration, 4)
@@ -8098,6 +8145,16 @@ def career_lobby(dry_run_turn=False):
         action = strategy.check_scheduled_races(state_obj, action)
       if not _trackblazer_planner_mode_enabled() and "race_name" in action.options:
         action.func = "do_race"
+        if state_obj.get("turn") == "Race Day":
+          # The selected scheduled race coincides with the forced (goal) race day.
+          # On a race day the lobby shows only Skills + the "Race Day" button — there
+          # is no Races list to open and scroll. Route through the race_day() flow so
+          # do_race clicks the forced race button directly instead of trying to open
+          # and scan a race list that isn't on screen (which otherwise flails until
+          # the lobby-scan safety net picks up the race button).
+          action["is_race_day"] = True
+          action["year"] = state_obj.get("year")
+          info("[RACE] Scheduled race coincides with forced race day. Using race-day flow (no race-list scan).")
         action = _attach_trackblazer_pre_action_item_plan(state_obj, action)
         info(f"Taking action: {action.func}")
         update_pre_action_phase(

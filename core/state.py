@@ -935,7 +935,8 @@ def collect_training_state(state_object, training_function_name):
   if (
     training_function_name == "meta_training"
     or training_function_name == "most_stat_gain"
-    or constants.SCENARIO_NAME in ("mant", "trackblazer")
+    or training_function_name == "stat_weight_training"
+    or constants.SCENARIO_NAME in ("mant", "trackblazer", "unity")
   ):
     check_stat_gains = True
 
@@ -1044,7 +1045,8 @@ def refresh_selected_training_state(state_object, training_name, training_functi
   if (
     training_function_name == "meta_training"
     or training_function_name == "most_stat_gain"
-    or constants.SCENARIO_NAME in ("mant", "trackblazer")
+    or training_function_name == "stat_weight_training"
+    or constants.SCENARIO_NAME in ("mant", "trackblazer", "unity")
   ):
     check_stat_gains = True
 
