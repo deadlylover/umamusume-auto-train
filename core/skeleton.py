@@ -4974,6 +4974,80 @@ def _handle_unity_post_race_result_screen(state_obj, action):
   }
 
 
+_GOAL_COMPLETE_BANNER_TEMPLATE = "assets/ui/goal_complete_banner.png"
+
+
+def _handle_goal_complete_screen(state_obj, action):
+  """Fast fork for the "GOAL COMPLETE!" career-goal celebration screen.
+
+  This screen slides in with a green banner animation, so the ``Next``
+  button is not matchable for the first ~1-2s. Left to the generic advance
+  sweep, the resolver idles through several 0.5s loops (and a blind
+  safe-space tap after three) before Next finally appears, which is the
+  multi-second "lingering" seen on goal-complete turns.
+
+  When the banner is detected this fork commits to a short blocking wait on
+  the Next button, which re-screenshots every 0.5s and clicks the instant
+  Next slides in — no idle/safe-space detour. Action-agnostic on purpose:
+  goal races resolve through ``do_race``, Unity, and Trackblazer flows alike,
+  and there can be more than one visual style of the screen.
+  """
+  screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
+  banner = device_action.match_template(
+    _GOAL_COMPLETE_BANNER_TEMPLATE,
+    screenshot,
+    threshold=0.8,
+    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+  )
+  if not banner:
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "goal_complete",
+      "reason": "goal_complete_banner_not_found",
+      "deferred_work": [],
+    }
+
+  info("[POST_ACTION] Goal complete screen detected; waiting for Next to slide in.")
+  bot.push_debug_history({
+    "event": "template_match",
+    "asset": "goal_complete_banner.png",
+    "result": "found",
+    "context": "post_action_resolution",
+  })
+  for label, template_path in (
+    ("next", "assets/buttons/next_btn.png"),
+    ("next2", "assets/buttons/next2_btn.png"),
+  ):
+    if device_action.locate_and_click(
+      template_path,
+      min_search_time=get_secs(1.5),
+      region_ltrb=constants.GAME_WINDOW_BBOX,
+      text=f"Clicked {label} on goal complete screen.",
+    ):
+      bot.push_debug_history({
+        "event": "click",
+        "asset": template_path,
+        "result": "clicked",
+        "context": "post_action_resolution",
+      })
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "goal_complete",
+        "reason": f"clicked_{label}",
+        "deferred_work": [],
+      }
+
+  return {
+    "detected": True,
+    "handled": False,
+    "popup_type": "goal_complete",
+    "reason": "next_button_not_found",
+    "deferred_work": [],
+  }
+
+
 def _click_post_action_generic_advance(label):
   """Targeted click for a single generic-advance button already detected on the
   current frame by ``_detect_visible_post_action_advance_button``.
@@ -5617,6 +5691,27 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         idle_loops = 0
         wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
         _record_post_action_wait(wait_result, label="after_unity_race_result", kind="followup_wait")
+        continue
+
+    branch_started_at = _time_mod.time()
+    goal_complete_result = _handle_goal_complete_screen(state_obj, action)
+    branch_duration = _time_mod.time() - branch_started_at
+    metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+    _record_popup_branch("goal_complete_screen", goal_complete_result, branch_duration)
+    if goal_complete_result.get("detected"):
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message="Resolved goal complete screen." if goal_complete_result.get("handled") else "Goal complete screen detected but Next was not matched.",
+        sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+        popup_type=goal_complete_result.get("popup_type"),
+        deferred_work=goal_complete_result.get("deferred_work"),
+        reasoning_notes=goal_complete_result.get("reason"),
+      )
+      if goal_complete_result.get("handled"):
+        idle_loops = 0
+        wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+        _record_post_action_wait(wait_result, label="after_goal_complete", kind="followup_wait")
         continue
 
     generic_started_at = _time_mod.time()
