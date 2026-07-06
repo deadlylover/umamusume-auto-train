@@ -4974,32 +4974,46 @@ def _handle_unity_post_race_result_screen(state_obj, action):
   }
 
 
-_GOAL_COMPLETE_BANNER_TEMPLATE = "assets/ui/goal_complete_banner.png"
+# Each goal-race completion advances through two celebration screens that both
+# slide in with a green banner animation and both need a Next click:
+#   1. "GOAL COMPLETE!"      -> goal_complete_banner
+#   2. the goals-list recap  -> goals_achieved_banner ("Goals Achieved N/M")
+# Detecting either banner triggers the same fast Next-wait below.
+_GOAL_COMPLETE_BANNER_TEMPLATES = (
+  ("goal_complete", "assets/ui/goal_complete_banner.png"),
+  ("goals_list", "assets/ui/goals_achieved_banner.png"),
+)
 
 
 def _handle_goal_complete_screen(state_obj, action):
-  """Fast fork for the "GOAL COMPLETE!" career-goal celebration screen.
+  """Fast fork for the career-goal celebration screens.
 
-  This screen slides in with a green banner animation, so the ``Next``
-  button is not matchable for the first ~1-2s. Left to the generic advance
-  sweep, the resolver idles through several 0.5s loops (and a blind
+  A completed goal race chains through the "GOAL COMPLETE!" screen and then
+  a goals-list recap; both slide in with a green banner animation, so the
+  ``Next`` button is not matchable for the first ~1-2s. Left to the generic
+  advance sweep, the resolver idles through several 0.5s loops (and a blind
   safe-space tap after three) before Next finally appears, which is the
   multi-second "lingering" seen on goal-complete turns.
 
-  When the banner is detected this fork commits to a short blocking wait on
-  the Next button, which re-screenshots every 0.5s and clicks the instant
+  When either banner is detected this fork commits to a short blocking wait
+  on the Next button, which re-screenshots every 0.5s and clicks the instant
   Next slides in — no idle/safe-space detour. Action-agnostic on purpose:
-  goal races resolve through ``do_race``, Unity, and Trackblazer flows alike,
-  and there can be more than one visual style of the screen.
+  goal races resolve through ``do_race``, Unity, and Trackblazer flows alike.
+  It returns after each handled click, so the resolver loop re-enters and the
+  second banner is caught on the following iteration.
   """
   screenshot = device_action.screenshot(region_ltrb=constants.GAME_WINDOW_BBOX)
-  banner = device_action.match_template(
-    _GOAL_COMPLETE_BANNER_TEMPLATE,
-    screenshot,
-    threshold=0.8,
-    template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
-  )
-  if not banner:
+  banner_label = ""
+  for label, template_path in _GOAL_COMPLETE_BANNER_TEMPLATES:
+    if device_action.match_template(
+      template_path,
+      screenshot,
+      threshold=0.8,
+      template_scaling=1.0 / device_action.GLOBAL_TEMPLATE_SCALING,
+    ):
+      banner_label = label
+      break
+  if not banner_label:
     return {
       "detected": False,
       "handled": False,
@@ -5008,10 +5022,10 @@ def _handle_goal_complete_screen(state_obj, action):
       "deferred_work": [],
     }
 
-  info("[POST_ACTION] Goal complete screen detected; waiting for Next to slide in.")
+  info(f"[POST_ACTION] Goal complete screen ({banner_label}) detected; waiting for Next to slide in.")
   bot.push_debug_history({
     "event": "template_match",
-    "asset": "goal_complete_banner.png",
+    "asset": f"{banner_label}_banner.png",
     "result": "found",
     "context": "post_action_resolution",
   })
