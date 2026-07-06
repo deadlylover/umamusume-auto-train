@@ -823,6 +823,73 @@ def collect_trackblazer_inventory(state_object, allow_open_non_execute=False, tr
 _ENERGY_TRAINING_NAMES = ("spd", "sta", "pwr", "guts")
 _FAILURE_OUTLIER_THRESHOLD = 20  # percentage-point gap from median to flag
 
+# Unity "purple super-spirit explosion" — a new patch gimmick that forces the
+# affected training's failure rate to 0%. It renders as a purple burst shield with
+# yellow chevrons on that training's button. The asset is captured at native screen
+# resolution, so it needs the inverse global template scale (like Trackblazer
+# assets). The badge animates/bounces a few px between frames, so the match
+# threshold is intentionally low. Matches above the bottom strip (the support-card
+# copy, which sits high near the mood label) are ignored.
+_UNITY_PURPLE_SPIRIT_ASSET = "assets/unity/unity_spirit_explosion_purple.png"
+# The badge bounces, so its own match score swings ~0.44..0.90 between animation
+# frames while empty buttons top out near ~0.54. A single screenshot can catch a
+# dip and miss it, so we sample a few frames and treat any clearing frame as
+# present. 0.60 sits clear of the empty-button noise floor.
+_UNITY_PURPLE_SPIRIT_THRESHOLD = 0.60
+_UNITY_PURPLE_SPIRIT_SCALE = 1.0 / float(device_action.GLOBAL_TEMPLATE_SCALING)
+_UNITY_PURPLE_SPIRIT_MIN_Y = 900  # region-relative; below this is the button strip
+_UNITY_PURPLE_SPIRIT_MAX_DX = 55  # a match this far from a button center is noise
+_UNITY_PURPLE_SPIRIT_SAMPLES = 5
+_UNITY_PURPLE_SPIRIT_SAMPLE_DELAY = 0.18  # seconds between animation samples
+_UNITY_TRAINING_SWIPE_ATTRS = {
+  "spd": "TRAINING_SWIPE_SPD_BBOX",
+  "sta": "TRAINING_SWIPE_STA_BBOX",
+  "pwr": "TRAINING_SWIPE_PWR_BBOX",
+  "guts": "TRAINING_SWIPE_GUTS_BBOX",
+  "wit": "TRAINING_SWIPE_WIT_BBOX",
+}
+
+
+def _detect_unity_purple_spirit_trainings():
+  """Detect Unity purple super-spirit explosions on the bottom training buttons.
+
+  Returns ``{training_key: 1}`` for each training showing the badge. The game
+  forces those trainings' failure rate to 0%, so the caller marks them to bypass
+  OCR outlier correction. Matches are tied to a training by nearest swipe-box
+  center x; the higher support-card badge is filtered out by
+  ``_UNITY_PURPLE_SPIRIT_MIN_Y``. Several animation frames are sampled and any
+  clearing frame counts as present, to survive the badge's per-frame bounce.
+  """
+  region = constants.GAME_WINDOW_REGION
+  centers = {}
+  for key, attr in _UNITY_TRAINING_SWIPE_ATTRS.items():
+    bbox = getattr(constants, attr)
+    centers[key] = (bbox[0] + bbox[2]) // 2
+
+  detected = {}
+  for sample in range(_UNITY_PURPLE_SPIRIT_SAMPLES):
+    if sample:
+      device_action.flush_screenshot_cache()
+      sleep(_UNITY_PURPLE_SPIRIT_SAMPLE_DELAY)
+    screenshot = device_action.screenshot(region_xywh=region)
+    if screenshot is None or getattr(screenshot, "size", 0) == 0:
+      continue
+    matches = device_action.match_template(
+      _UNITY_PURPLE_SPIRIT_ASSET,
+      screenshot,
+      _UNITY_PURPLE_SPIRIT_THRESHOLD,
+      template_scaling=_UNITY_PURPLE_SPIRIT_SCALE,
+    )
+    for (mx, my, mw, mh) in matches:
+      if int(my) < _UNITY_PURPLE_SPIRIT_MIN_Y:
+        continue  # support-card copy sits high near the mood label; skip it
+      abs_cx = region[0] + int(mx) + mw // 2
+      nearest = min(centers, key=lambda k: abs(centers[k] - abs_cx))
+      if abs(centers[nearest] - abs_cx) > _UNITY_PURPLE_SPIRIT_MAX_DX:
+        continue  # too far from any button center to be a real badge
+      detected[nearest] = 1
+  return detected
+
 
 def _correct_failure_outliers(training_results):
   """Replace failure-rate outliers among energy-consuming trainings.
@@ -836,6 +903,13 @@ def _correct_failure_outliers(training_results):
   rates = {}
   for name in _ENERGY_TRAINING_NAMES:
     if name in training_results:
+      # A purple super-spirit explosion (Unity gimmick) forces that training's
+      # failure rate to 0%. That legitimately-low read looks like an OCR outlier
+      # next to the other trainings, so we exclude such trainings entirely: they
+      # must not be "corrected" upward, and their 0% must not drag down the peer
+      # median used to correct genuine misreads.
+      if training_results[name].get("unity_purple_spirit_explosions"):
+        continue
       val = training_results[name].get("failure", -1)
       if isinstance(val, (int, float)) and val >= 0:
         rates[name] = int(val)
@@ -1014,6 +1088,20 @@ def collect_training_state(state_object, training_function_name):
       pyautogui_actions.release()
 
     debug(f"Training results: {training_results}")
+
+    if constants.SCENARIO_NAME == "unity":
+      purple_spirits = _detect_unity_purple_spirit_trainings()
+      for name, count in purple_spirits.items():
+        if name not in training_results:
+          continue
+        training_results[name]["unity_purple_spirit_explosions"] = count
+        # A purple spirit is still a spirit explosion for gimmick scoring, and the
+        # normal-spirit asset does not match the purple variant, so add it here.
+        training_results[name]["unity_spirit_explosions"] = (
+          int(training_results[name].get("unity_spirit_explosions") or 0) + count
+        )
+      if purple_spirits:
+        info(f"[STATE] Unity purple super-spirit (0% fail) on: {purple_spirits}")
 
     training_results = _correct_failure_outliers(training_results)
     training_results = _correct_stat_gain_outliers(training_results)
