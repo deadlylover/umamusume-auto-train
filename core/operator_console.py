@@ -251,6 +251,8 @@ class OperatorConsole:
     self._planner_flow_node_items = {}
     self._stat_weights_window = None
     self._stat_weights_entries = {}
+    self._stat_caps_entries = {}
+    self._stat_overcap_weight_var = None
     self._unity_weights_window = None
     self._unity_weights_entries = {}
     self._unity_gimmick_year_vars = {}
@@ -4140,6 +4142,13 @@ class OperatorConsole:
 
   _DEFAULT_STAT_WEIGHTS = {"spd": 1.0, "sta": 1.0, "pwr": 1.0, "guts": 1.0, "wit": 1.0}
   _STAT_LABELS = {"spd": "Speed", "sta": "Stamina", "pwr": "Power", "guts": "Guts", "wit": "Wit"}
+  _DEFAULT_STAT_CAPS = {"spd": 1200, "sta": 1200, "pwr": 1200, "guts": 900, "wit": 800}
+
+  def _get_active_stat_caps(self):
+    caps = getattr(config, "STAT_CAPS", None)
+    if isinstance(caps, dict) and caps:
+      return {stat: caps.get(stat, self._DEFAULT_STAT_CAPS[stat]) for stat in self._DEFAULT_STAT_WEIGHTS}
+    return dict(self._DEFAULT_STAT_CAPS)
 
   def _get_active_stat_weights(self):
     weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
@@ -4891,6 +4900,62 @@ class OperatorConsole:
       entry.grid(row=row_idx + 1, column=1, sticky="w", padx=(8, 0), pady=2)
       self._stat_weights_entries[stat] = var
 
+    stat_caps_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
+    stat_caps_frame.pack(fill=tk.X)
+    tk.Label(
+      stat_caps_frame,
+      text="Stat caps (global)",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).grid(row=0, column=0, columnspan=10, sticky="w", pady=(0, 4))
+    active_caps = self._get_active_stat_caps()
+    self._stat_caps_entries = {}
+    for col_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
+      cell = tk.Frame(stat_caps_frame, bg="#101418")
+      cell.grid(row=1, column=col_idx, sticky="w", padx=(0, 12))
+      tk.Label(
+        cell, text=self._STAT_LABELS.get(stat, stat), fg="#9aa4ad", bg="#101418", anchor="w",
+      ).pack(anchor="w")
+      cap_var = tk.StringVar(value=str(active_caps.get(stat, 1200)))
+      tk.Entry(
+        cell, textvariable=cap_var, width=6,
+        bg="#192028", fg="white", insertbackground="white",
+      ).pack(anchor="w")
+      self._stat_caps_entries[stat] = cap_var
+
+    overcap_frame = tk.Frame(stat_caps_frame, bg="#101418")
+    overcap_frame.grid(row=2, column=0, columnspan=10, sticky="w", pady=(6, 0))
+    tk.Label(
+      overcap_frame,
+      text="Over-cap gain weight",
+      fg="#d6dde5",
+      bg="#101418",
+      anchor="w",
+    ).pack(side=tk.LEFT)
+    self._stat_overcap_weight_var = tk.StringVar(
+      value=str(getattr(config, "STAT_OVERCAP_WEIGHT", 0.15))
+    )
+    tk.Entry(
+      overcap_frame, textvariable=self._stat_overcap_weight_var, width=6,
+      bg="#192028", fg="white", insertbackground="white",
+    ).pack(side=tk.LEFT, padx=(8, 0))
+    tk.Label(
+      stat_caps_frame,
+      text=(
+        "Stat gains that keep a stat at or below its cap count fully; the portion "
+        "above the cap is multiplied by the over-cap weight (0 = discard over-cap "
+        "gains and skip capped trainings, 1 = ignore caps). This keeps a capped "
+        "training worthwhile for the secondary stats it still raises."
+      ),
+      fg="#8b949e",
+      bg="#101418",
+      justify="left",
+      anchor="w",
+      wraplength=700,
+    ).grid(row=3, column=0, columnspan=10, sticky="ew", pady=(4, 0))
+
     training_behavior = self._get_active_training_behavior()
     behavior_frame = tk.Frame(body, bg="#101418", padx=16, pady=4)
     behavior_frame.pack(fill=tk.X)
@@ -5488,11 +5553,18 @@ class OperatorConsole:
   def _clear_stat_weights_window(self):
     self._stat_weights_window = None
     self._stat_weights_entries = {}
+    self._stat_caps_entries = {}
+    self._stat_overcap_weight_var = None
 
   def _refresh_stat_weights_window(self):
     active = self._get_active_stat_weights()
     for stat, var in self._stat_weights_entries.items():
       var.set(str(active.get(stat, 1.0)))
+    active_caps = self._get_active_stat_caps()
+    for stat, var in self._stat_caps_entries.items():
+      var.set(str(active_caps.get(stat, self._DEFAULT_STAT_CAPS.get(stat, 1200))))
+    if self._stat_overcap_weight_var is not None:
+      self._stat_overcap_weight_var.set(str(getattr(config, "STAT_OVERCAP_WEIGHT", 0.15)))
     behavior = self._get_active_training_behavior()
     if self._wit_gate_supports_var is not None:
       self._wit_gate_supports_var.set(str(behavior.get("wit_failure_gate_min_supports", 2)))
@@ -5538,6 +5610,29 @@ class OperatorConsole:
       except ValueError:
         self._message_value.set(f"Invalid weight for {self._STAT_LABELS.get(stat, stat)}.")
         return
+
+    caps = dict(self._get_active_stat_caps())
+    for stat, var in self._stat_caps_entries.items():
+      try:
+        caps[stat] = int(round(float(var.get())))
+      except ValueError:
+        self._message_value.set(f"Invalid stat cap for {self._STAT_LABELS.get(stat, stat)}.")
+        return
+
+    overcap_weight = getattr(config, "STAT_OVERCAP_WEIGHT", 0.15)
+    if self._stat_overcap_weight_var is not None:
+      try:
+        overcap_weight = max(0.0, min(1.0, round(float(self._stat_overcap_weight_var.get()), 2)))
+      except ValueError:
+        self._message_value.set("Invalid over-cap gain weight (use 0.0–1.0).")
+        return
+
+    if not self._persist_config_value("stat_caps", caps):
+      self._message_value.set("Failed to save stat caps.")
+      return
+    if not self._persist_config_value("stat_overcap_weight", overcap_weight):
+      self._message_value.set("Failed to save over-cap gain weight.")
+      return
 
     if not self._persist_config_value("trackblazer.stat_weights", weights):
       self._message_value.set("Failed to save stat weights.")
@@ -5677,6 +5772,12 @@ class OperatorConsole:
     current_policy = normalize_item_use_policy(getattr(config, "TRACKBLAZER_ITEM_USE_POLICY", None))
     if not self._persist_config_value("trackblazer.stat_weights", dict(self._DEFAULT_STAT_WEIGHTS)):
       self._message_value.set("Failed to reset stat weights.")
+      return
+    if not self._persist_config_value("stat_caps", dict(self._DEFAULT_STAT_CAPS)):
+      self._message_value.set("Failed to reset stat caps.")
+      return
+    if not self._persist_config_value("stat_overcap_weight", 0.15):
+      self._message_value.set("Failed to reset over-cap gain weight.")
       return
 
     policy = {

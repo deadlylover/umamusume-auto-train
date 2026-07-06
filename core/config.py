@@ -141,6 +141,7 @@ def reload_config(print_config=True):
     load_var('USE_RACE_SCHEDULE', config["use_race_schedule"])
     load_var('CANCEL_CONSECUTIVE_RACE', config["cancel_consecutive_race"])
     load_var('STAT_CAPS', config["stat_caps"])
+    load_var('STAT_OVERCAP_WEIGHT', config.get("stat_overcap_weight", 0.15))
     normalized_skill_list = normalize_skill_list(config["skill"]["skill_list"])
     normalized_skill_presets = normalize_skill_presets(config["skill"].get("presets"))
     active_skill_preset = str(config["skill"].get("active_preset", "") or "").strip()

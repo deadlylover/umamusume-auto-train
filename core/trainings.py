@@ -14,6 +14,28 @@ from core.trackblazer_item_use import (
 # Training function names:
 # max_out_friendships, most_support_cards, most_stat_gain, rainbow_training, meta_training, stat_weight_training
 
+def effective_stat_gain(stat, gain, current_stat):
+  """Return the score-effective value of a raw ``gain`` on ``stat`` after
+  applying the over-cap de-weight.
+
+  The portion of the gain that keeps the stat at or below its cap counts at
+  full value; the portion that pushes past the cap is multiplied by
+  ``config.STAT_OVERCAP_WEIGHT``. This lets a training still earn credit for a
+  useful secondary stat (e.g. the power gained while clicking speed) even when
+  the primary stat is already capped, instead of the gain being discarded.
+
+  ``STAT_OVERCAP_WEIGHT`` of 0 reproduces the old hard behavior (over-cap gains
+  are worth nothing); 1 disables the de-weight entirely.
+  """
+  stat_cap = config.STAT_CAPS.get(stat) if hasattr(config.STAT_CAPS, "get") else config.STAT_CAPS[stat]
+  if stat_cap is None:
+    return gain
+  overcap_weight = getattr(config, "STAT_OVERCAP_WEIGHT", 0.0)
+  headroom = max(0, stat_cap - current_stat)
+  below_cap = min(gain, headroom)
+  above_cap = gain - below_cap
+  return below_cap + above_cap * overcap_weight
+
 def create_training_score_entry(training_name, training_data, score_tuple):
   """
   Create a standardized training score entry with enforced required fields.
@@ -273,12 +295,14 @@ def stat_weight_training(state, training_template, action):
     for stat, gain in stat_gains.items():
       if stat == "sp":
         continue
-      stat_cap = config.STAT_CAPS[stat]
       current_stat = state['current_stats'][stat]
-      if current_stat >= stat_cap:
+      # De-weight over-cap gains instead of discarding them, so e.g. clicking a
+      # capped speed training still scores the power it also raises.
+      eff_gain = effective_stat_gain(stat, gain, current_stat)
+      if eff_gain == 0:
         continue
       weight = stat_weights.get(stat, 1)
-      total_value += gain * weight
+      total_value += eff_gain * weight
 
     weighted_stat_score = total_value
     # Bond boost: +10 per blue/green friend on this training (+15 on wit).
@@ -488,10 +512,15 @@ def filter_safe_trainings(state, training_template, use_risk_taking=False, check
     current_stat = current_stats[training_name]
     is_capped = current_stat >= stat_cap
 
-    # Handle stat cap filtering
+    # Handle stat cap filtering. With over-cap de-weighting enabled we keep the
+    # training instead of discarding it: scoring de-weights the capped primary
+    # stat but still credits secondary stat gains (e.g. power off speed) fully.
     if check_stat_caps and is_capped:
-      info(f"Skipping {training_name.upper()} training: stat at cap ({current_stat}/{stat_cap})")
-      continue
+      overcap_weight = getattr(config, "STAT_OVERCAP_WEIGHT", 0.0)
+      if overcap_weight <= 0:
+        info(f"Skipping {training_name.upper()} training: stat at cap ({current_stat}/{stat_cap})")
+        continue
+      debug(f"{training_name.upper()} primary at cap ({current_stat}/{stat_cap}); keeping with over-cap de-weight {overcap_weight}")
 
     max_allowed_failure = config.MAX_FAILURE
     # Calculate max allowed failure (with or without risk bonuses)
@@ -570,20 +599,21 @@ def most_stat_score(x, state, training_template):
     if stat == "sp":
       continue
 
-    stat_cap = config.STAT_CAPS[stat]
     current_stat = state['current_stats'][stat]
 
-    # Skip this stat's contribution if at cap
-    if current_stat >= stat_cap:
+    # De-weight (rather than discard) the portion of the gain above the cap so a
+    # capped stat still contributes something and secondary stats count fully.
+    eff_gain = effective_stat_gain(stat, gain, current_stat)
+    if eff_gain == 0:
       continue
 
     weight = training_template["stat_weight_set"][stat]
 
     # Handle negative weights like most_support_score handles negative priorities
     if weight >= 0:
-      total_value += gain * (1 + weight)
+      total_value += eff_gain * (1 + weight)
     else:
-      total_value += gain / (1 + abs(weight))
+      total_value += eff_gain / (1 + abs(weight))
 
   # Use negative priority index as tiebreaker (higher priority = lower index number = higher tiebreaker)
   priority_index = get_priority_index(x)

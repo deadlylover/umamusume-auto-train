@@ -21,6 +21,7 @@
     "guts": 600,
     "wit": 900
   },
+  "stat_overcap_weight": 0.15,
   "sleep_time_multiplier": 1.1,
   "execution_mode": "auto",
   "planner": {
