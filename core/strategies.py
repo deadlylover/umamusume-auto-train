@@ -682,8 +682,12 @@ class Strategy:
         action["training_name"] = "wit"
         action["training_data"] = available_trainings["wit"]
         info(f"[ENERGY_MGMT] → WIT TRAINING (energy gain): energy={current_energy}/{config.WIT_TRAINING_MIN_ENERGY} threshold, energy_value={wit_energy_value}/{wit_raw_energy} (headroom={energy_headroom}), rainbows={rainbow_count}, score_ratio={wit_score_ratio:.2f}/{config.WIT_TRAINING_SCORE_RATIO_THRESHOLD}")
-      # Rest if energy is below wit_training_min_energy and training isn't worth doing
-      elif current_energy < config.WIT_TRAINING_MIN_ENERGY and (training_score <= min_score or action["training_name"] == "wit"):
+      # Rest if energy is below wit_training_min_energy and the best training
+      # isn't worth doing. Score-gated: a wit turn is only rested when its own
+      # score is at/below min_score, same as any other training. Previously wit
+      # was auto-restable below this energy regardless of score, which threw away
+      # high-value wit turns (multiple supports, bond building, wit gates).
+      elif current_energy < config.WIT_TRAINING_MIN_ENERGY and training_score <= min_score:
         if state["date_event_available"]:
           action.func = "do_recreation"
         else:
