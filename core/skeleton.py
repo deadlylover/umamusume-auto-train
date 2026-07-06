@@ -4974,13 +4974,64 @@ def _handle_unity_post_race_result_screen(state_obj, action):
   }
 
 
+def _handle_unity_cup_button_popup(state_obj, action):
+  """Detect the Unity cup race prompt during post-action resolution.
+
+  After a committed turn the game can surface the Unity cup race button on the
+  lobby. Rather than idling until the resolver times out and hands control back
+  to the career-lobby scan (which owns the same detection at line ~7386), this
+  branch catches the button in place, enters the review-gated Unity cup flow
+  (opponent matchup scan -> commit), and resolves the race without the timeout
+  detour. Mirrors the career-lobby entry point so the two paths stay in sync.
+
+  Action-agnostic on purpose: the Unity prompt can follow any committed action.
+  Returns the standard post-action handler dict.
+  """
+  # Single-shot, non-blocking check so absent-button turns pay no search wait.
+  if not device_action.locate("assets/unity/unity_cup_btn.png", region_ltrb=constants.GAME_WINDOW_BBOX):
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "unity_cup_prompt",
+      "reason": "no_unity_cup_button",
+      "deferred_work": [],
+    }
+  if not device_action.locate_and_click(
+    "assets/unity/unity_cup_btn.png",
+    min_search_time=get_secs(1),
+    region_ltrb=constants.GAME_WINDOW_BBOX,
+  ):
+    return {
+      "detected": True,
+      "handled": False,
+      "popup_type": "unity_cup_prompt",
+      "reason": "unity_cup_button_click_failed",
+      "deferred_work": [],
+    }
+  constants.SCENARIO_NAME = "unity"
+  info("Unity race detected during post-action resolution, entering review-gated unity cup flow.")
+  unity_result = _handle_unity_cup_with_review()
+  handled = unity_result not in ("skipped", "failed")
+  return {
+    "detected": True,
+    "handled": handled,
+    "popup_type": "unity_cup_prompt",
+    "reason": f"unity_cup_flow_{unity_result}",
+    "deferred_work": [],
+  }
+
+
 # Each goal-race completion advances through two celebration screens that both
 # slide in with a green banner animation and both need a Next click:
 #   1. "GOAL COMPLETE!"      -> goal_complete_banner
 #   2. the goals-list recap  -> goals_achieved_banner ("Goals Achieved N/M")
-# Detecting either banner triggers the same fast Next-wait below.
+# The final goal of a career instead shows a gold "GOAL COMPLETE!" banner with
+# an "All goals achieved!" line (all_goals_achieved_banner); it advances through
+# the same single Next click, so it folds into the same fast fork.
+# Detecting any banner triggers the same fast Next-wait below.
 _GOAL_COMPLETE_BANNER_TEMPLATES = (
   ("goal_complete", "assets/ui/goal_complete_banner.png"),
+  ("all_goals_achieved", "assets/ui/all_goals_achieved_banner.png"),
   ("goals_list", "assets/ui/goals_achieved_banner.png"),
 )
 
@@ -5705,6 +5756,27 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
         idle_loops = 0
         wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
         _record_post_action_wait(wait_result, label="after_unity_race_result", kind="followup_wait")
+        continue
+
+    branch_started_at = _time_mod.time()
+    unity_cup_result = _handle_unity_cup_button_popup(state_obj, action)
+    branch_duration = _time_mod.time() - branch_started_at
+    metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+    _record_popup_branch("unity_cup_prompt", unity_cup_result, branch_duration)
+    if unity_cup_result.get("detected"):
+      _update_post_action_resolution_snapshot(
+        state_obj,
+        action,
+        message="Resolved Unity cup race prompt." if unity_cup_result.get("handled") else "Unity cup race prompt detected but the Unity flow did not complete cleanly.",
+        sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+        popup_type=unity_cup_result.get("popup_type"),
+        deferred_work=unity_cup_result.get("deferred_work"),
+        reasoning_notes=unity_cup_result.get("reason"),
+      )
+      if unity_cup_result.get("handled"):
+        idle_loops = 0
+        wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+        _record_post_action_wait(wait_result, label="after_unity_cup_prompt", kind="followup_wait")
         continue
 
     branch_started_at = _time_mod.time()
