@@ -743,6 +743,7 @@ def _format_training_lines(ranked_trainings, selected_action):
         "unity_gauge_fills": entry.get("unity_gauge_fills"),
         "unity_spirit_explosions": entry.get("unity_spirit_explosions"),
         "unity_gimmick_bonus": entry.get("unity_gimmick_bonus"),
+        "bond_boost": entry.get("bond_boost"),
         "filtered_out": bool(entry.get("filtered_out")),
         "excluded_reason": entry.get("excluded_reason"),
         "max_allowed_failure": entry.get("max_allowed_failure"),
@@ -768,6 +769,9 @@ def _format_training_lines(ranked_trainings, selected_action):
     if entry["total_gain"]:
       parts.append(f"total+{entry['total_gain']}")
     parts.extend(_format_unity_bubble_parts(entry))
+    bond_boost = _safe_float(entry.get("bond_boost"))
+    if bond_boost:
+      parts.append(f"bond +{_format_number(bond_boost)}")
     if entry.get("rainbows") is not None:
       parts.append(f"rainbows {entry['rainbows']}")
     if entry.get("supports") is not None:

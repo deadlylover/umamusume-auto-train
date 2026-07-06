@@ -162,6 +162,34 @@ def score_training_for_display(training_name, training_data, state_obj, training
     return None
 
 
+def _bond_boost_for_display(training_name, training_data, state_obj):
+  """Bond-building points for a training, matching stat_weight_training's
+  +10/blue-green friend (+15 on wit) rule and the active-window/enable gates.
+  Used so the review lines can show the bond incentive (e.g. easy wit gate)
+  even for filtered trainings that were not scored. Returns 0 when inactive."""
+  if constants.SCENARIO_NAME == "unity":
+    bond_enabled = bool(getattr(config, "UNITY_BOND_BOOST_ENABLED", True))
+    bond_cutoff = getattr(config, "UNITY_BOND_BOOST_CUTOFF", "") or ""
+  else:
+    bond_enabled = bot.get_trackblazer_bond_boost_enabled()
+    bond_cutoff = bot.get_trackblazer_bond_boost_cutoff()
+  if not bond_enabled:
+    return 0
+  current_year = state_obj.get("year", "")
+  try:
+    active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(bond_cutoff)
+  except ValueError:
+    return 0
+  if not active:
+    return 0
+  friendship_levels = training_data.get("total_friendship_levels", {}) or {}
+  raiseable = friendship_levels.get("blue", 0) + friendship_levels.get("green", 0)
+  if raiseable <= 0:
+    return 0
+  per_friend = 15 if training_name == "wit" else 10
+  return raiseable * per_friend
+
+
 def _unity_gimmick_bonus_for_display(training_data, state_obj):
   """Points contributed by Unity gauge fills for a training, matching
   stat_weight_training's per-gauge-fill gimmick weighting. Spirit explosions are
@@ -221,6 +249,7 @@ def build_ranked_training_snapshot(state_obj, available_trainings, training_func
       "unity_gauge_fills": training_data.get("unity_gauge_fills"),
       "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
       "unity_gimmick_bonus": _unity_gimmick_bonus_for_display(training_data, state_obj),
+      "bond_boost": _bond_boost_for_display(training_name, training_data, state_obj),
       "filtered_out": True,
       "excluded_reason": exclusion_reason,
     }
@@ -239,6 +268,11 @@ def build_ranked_training_snapshot(state_obj, available_trainings, training_func
       "unity_gauge_fills": training_data.get("unity_gauge_fills"),
       "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
       "unity_gimmick_bonus": _unity_gimmick_bonus_for_display(training_data, state_obj),
+      "bond_boost": (
+        training_data.get("bond_boost")
+        if training_data.get("bond_boost") is not None
+        else _bond_boost_for_display(training_name, training_data, state_obj)
+      ),
       "filtered_out": False,
       "excluded_reason": None,
       "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),
