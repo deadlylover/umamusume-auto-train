@@ -228,6 +228,17 @@ def reload_config(print_config=True):
     planner_config = config.get("planner", {})
     load_var('PLANNER_CONFIG', planner_config)
     load_var('PLANNER_USE_NEW_PLANNER', bool(planner_config.get("use_new_planner", False)))
+
+    # Unity Cup scenario tuning. Unity runs on the classic decision path but can
+    # borrow the stat-weight training scoring used by Trackblazer's stat_focused
+    # mode. Weights + gimmick weight are tunable from the operator console.
+    unity_config = config.get("unity", {})
+    load_var('UNITY_CONFIG', unity_config)
+    load_var('UNITY_STAT_WEIGHTS', unity_config.get("stat_weights"))
+    load_var('UNITY_USE_STAT_WEIGHT_SCORING', bool(unity_config.get("use_stat_weight_scoring", True)))
+    load_var('UNITY_BOND_BOOST_ENABLED', bool(unity_config.get("bond_boost_enabled", True)))
+    load_var('UNITY_BOND_BOOST_CUTOFF', unity_config.get("bond_boost_cutoff", "Classic Year Early Jun"))
+    load_var('UNITY_GIMMICK_WEIGHT_BY_YEAR', unity_config.get("gimmick_weight_by_year"))
       
   except KeyError as e:
     raise RuntimeError(f"Missing config key: {e.args[0]}, please copy it to config.json from config.template.json and try again")

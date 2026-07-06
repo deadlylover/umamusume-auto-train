@@ -32,6 +32,23 @@ def _remember_training_fallback(action):
   remember_trackblazer_training_fallback(action)
 
 
+def _use_stat_weight_scoring():
+  """Whether the current scenario should score trainings with stat_weight_training.
+
+  Trackblazer uses it when the operator selects the 'stat_focused' scoring mode.
+  Unity borrows the same stat-weight scoring (tunable via the console Unity
+  window) when UNITY_USE_STAT_WEIGHT_SCORING is enabled. Every other scenario
+  keeps the template's configured training function.
+  """
+  import core.bot as _bot
+  scenario = constants.SCENARIO_NAME or "default"
+  if scenario in ("mant", "trackblazer"):
+    return _bot.get_trackblazer_scoring_mode() == "stat_focused"
+  if scenario == "unity":
+    return bool(getattr(config, "UNITY_USE_STAT_WEIGHT_SCORING", True))
+  return False
+
+
 def _allows_unreadable_current_stats(state):
   if constants.SCENARIO_NAME not in ("mant", "trackblazer"):
     return False
@@ -72,8 +89,7 @@ class Strategy:
     action["energy_level"] = state["energy_level"]
     action["date_event_available"] = state.get("date_event_available")
     # Store the actual training function used (may be overridden by scoring mode)
-    import core.bot as _bot
-    if constants.SCENARIO_NAME in ("mant", "trackblazer") and _bot.get_trackblazer_scoring_mode() == "stat_focused":
+    if _use_stat_weight_scoring():
       action["training_function"] = "stat_weight_training"
     else:
       action["training_function"] = training_template["training_function"]
@@ -202,13 +218,10 @@ class Strategy:
 
     training_function_name = training_template['training_function']
 
-    # Trackblazer scoring mode override
-    import core.bot as bot
-    if constants.SCENARIO_NAME in ("mant", "trackblazer"):
-      scoring_mode = bot.get_trackblazer_scoring_mode()
-      if scoring_mode == "stat_focused":
-        training_function_name = "stat_weight_training"
-        info(f"Trackblazer scoring override: {scoring_mode} → {training_function_name}")
+    # Stat-weight scoring override (Trackblazer stat_focused mode, or Unity).
+    if _use_stat_weight_scoring():
+      training_function_name = "stat_weight_training"
+      info(f"Stat-weight scoring override → {training_function_name} (scenario={constants.SCENARIO_NAME})")
 
     info(f"Selected training: {training_function_name}")
 

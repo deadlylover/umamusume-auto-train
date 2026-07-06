@@ -699,6 +699,27 @@ def _format_trackblazer_race_entry_lines(planned):
   return lines
 
 
+def _format_unity_bubble_parts(entry):
+  """Render Unity gauge fills / spirit explosions and their gimmick point value.
+  Returns [] when the training has no Unity bubble data (e.g. other scenarios)."""
+  gauge_fills = int(entry.get("unity_gauge_fills") or 0)
+  spirit_explosions = int(entry.get("unity_spirit_explosions") or 0)
+  gimmick_bonus = _safe_float(entry.get("unity_gimmick_bonus"))
+  if not gauge_fills and not spirit_explosions and not gimmick_bonus:
+    return []
+  bubble_bits = []
+  if gauge_fills:
+    bubble_bits.append(f"gauge {gauge_fills}")
+  if spirit_explosions:
+    bubble_bits.append(f"spirit {spirit_explosions}")
+  parts = []
+  if bubble_bits:
+    parts.append(" ".join(bubble_bits))
+  if gimmick_bonus:
+    parts.append(f"gimmick +{_format_number(gimmick_bonus)}")
+  return parts
+
+
 def _format_training_lines(ranked_trainings, selected_action):
   if not ranked_trainings:
     return []
@@ -719,6 +740,9 @@ def _format_training_lines(ranked_trainings, selected_action):
         "rainbows": entry.get("total_rainbow_friends"),
         "total_gain": total_gain,
         "stat_gains": gains,
+        "unity_gauge_fills": entry.get("unity_gauge_fills"),
+        "unity_spirit_explosions": entry.get("unity_spirit_explosions"),
+        "unity_gimmick_bonus": entry.get("unity_gimmick_bonus"),
         "filtered_out": bool(entry.get("filtered_out")),
         "excluded_reason": entry.get("excluded_reason"),
         "max_allowed_failure": entry.get("max_allowed_failure"),
@@ -743,6 +767,7 @@ def _format_training_lines(ranked_trainings, selected_action):
     parts.extend(_format_training_gain_parts(entry["name"], entry.get("stat_gains") or {}))
     if entry["total_gain"]:
       parts.append(f"total+{entry['total_gain']}")
+    parts.extend(_format_unity_bubble_parts(entry))
     if entry.get("rainbows") is not None:
       parts.append(f"rainbows {entry['rainbows']}")
     if entry.get("supports") is not None:

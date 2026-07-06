@@ -1669,7 +1669,7 @@ def get_turn(*, use_last_known=True):
     turn_value = _read_turn_digits_from_region(
       full_region_xywh,
       debug_key="turn_full",
-      resize_factors=(4, 6),
+      resize_factors=(2, 4, 6),
       thresholds=(None, 0.6, 0.3),
     )
     debug(f"Turn full-region OCR: {turn_value}")
@@ -1759,8 +1759,12 @@ def is_number(text):
     return False
 
 def get_current_stats(turn, enable_debug=True):
+  # Unity shares Trackblazer's aptitude-icon + separate Skill-Pts lobby layout.
+  icon_layout = constants.SCENARIO_NAME in ("trackblazer", "unity")
   if constants.SCENARIO_NAME == "trackblazer":
     stats_region = constants.MANT_CURRENT_STATS_REGION
+  elif constants.SCENARIO_NAME == "unity":
+    stats_region = constants.UNITY_CURRENT_STATS_REGION
   else:
     stats_region = constants.CURRENT_STATS_REGION
   if turn == "Race Day":
@@ -1768,7 +1772,7 @@ def get_current_stats(turn, enable_debug=True):
   image = device_action.screenshot(region_xywh=stats_region)
 
   # Arcane numbers that divide the screen into boxes with ratios. Left, top, width, height
-  if constants.SCENARIO_NAME == "trackblazer":
+  if icon_layout:
     # Trackblazer lobby has aptitude grade icons (D/C/E+) left of each number,
     # shifting the number positions right compared to the base layout.
     # Positions derived from blue-text column projection on the MANT region.
@@ -1792,7 +1796,7 @@ def get_current_stats(turn, enable_debug=True):
 
   h, w = image.shape[:2]
   current_stats={}
-  trackblazer_left_expand_px = max(0, int(round(w * 0.009))) if constants.SCENARIO_NAME == "trackblazer" else 0
+  trackblazer_left_expand_px = max(0, int(round(w * 0.009))) if icon_layout else 0
   trackblazer_right_trim_px = trackblazer_left_expand_px
   for key, (xr, yr, wr, hr) in boxes.items():
     x, y, ww, hh = int(xr*w), int(yr*h), int(wr*w), int(hr*h)
@@ -1837,9 +1841,14 @@ def get_current_stats(turn, enable_debug=True):
       final_stat_value = -1
     current_stats[key] = final_stat_value
   
-  # Read SP: Trackblazer has a separate Skill Pts box on the lobby
-  if constants.SCENARIO_NAME == "trackblazer" and "sp" not in current_stats:
-    sp_image = device_action.screenshot(region_xywh=constants.MANT_LOBBY_SKILL_PTS_REGION)
+  # Read SP: Trackblazer and Unity have a separate Skill Pts box on the lobby
+  if icon_layout and "sp" not in current_stats:
+    sp_region = (
+      constants.UNITY_LOBBY_SKILL_PTS_REGION
+      if constants.SCENARIO_NAME == "unity"
+      else constants.MANT_LOBBY_SKILL_PTS_REGION
+    )
+    sp_image = device_action.screenshot(region_xywh=sp_region)
     if enable_debug:
       debug_window(sp_image, save_name="stat_sp_cropped")
     sp_value = extract_text(

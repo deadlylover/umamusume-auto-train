@@ -252,8 +252,13 @@ def stat_weight_training(state, training_template, action):
     info("No safe training found for stat weight training.")
     return action
 
-  # Use Trackblazer-specific weights from config if set, else fall back to template
-  stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+  # Scenario-specific stat weights from config if set, else fall back to template.
+  # Unity gets its own weight set; Trackblazer uses its own; anything else uses
+  # the timeline template's stat_weight_set.
+  if constants.SCENARIO_NAME == "unity":
+    stat_weights = getattr(config, "UNITY_STAT_WEIGHTS", None)
+  else:
+    stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
   if not isinstance(stat_weights, dict) or not stat_weights:
     stat_weights = training_template["stat_weight_set"]
 
@@ -273,13 +278,20 @@ def stat_weight_training(state, training_template, action):
       total_value += gain * weight
 
     weighted_stat_score = total_value
-    # Bond boost: +10 per blue/green friend on this training (+15 on wit)
+    # Bond boost: +10 per blue/green friend on this training (+15 on wit).
+    # Unity uses its own config-driven enable/cutoff (defaults pre-1st-summer);
+    # Trackblazer keeps its live operator-console runtime toggle.
     bond_boost = 0
-    if bot.get_trackblazer_bond_boost_enabled():
-      cutoff = bot.get_trackblazer_bond_boost_cutoff()
+    if constants.SCENARIO_NAME == "unity":
+      bond_enabled = bool(getattr(config, "UNITY_BOND_BOOST_ENABLED", True))
+      bond_cutoff = getattr(config, "UNITY_BOND_BOOST_CUTOFF", "") or ""
+    else:
+      bond_enabled = bot.get_trackblazer_bond_boost_enabled()
+      bond_cutoff = bot.get_trackblazer_bond_boost_cutoff()
+    if bond_enabled:
       current_year = state.get("year", "")
       try:
-        active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
+        active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(bond_cutoff)
       except ValueError:
         active = False
       if active:
@@ -290,6 +302,19 @@ def stat_weight_training(state, training_template, action):
           bond_boost = raiseable_friends * per_friend
           total_value += bond_boost
 
+    # Unity scenario gimmick bonus: each Unity gauge fill is worth a flat,
+    # stat-equivalent number of points set by the per-year gimmick weight
+    # (default 5 ≈ 5 stat points per gauge fill). Spirit explosions are NOT
+    # counted here — their value is already reflected in the boosted stat gains
+    # the explosion produces, so counting them again would double-count. No year
+    # curve or priority multiplier here — that's intentional so the weight reads
+    # directly as "stat points per gauge fill". No-op for other scenarios.
+    gimmick_bonus = 0
+    if constants.SCENARIO_NAME == "unity":
+      gimmick_year = state["year"].split()[0]
+      gimmick_bonus = training_data.get("unity_gauge_fills", 0) * unity_gimmick_weight_for_year(gimmick_year)
+      total_value += gimmick_bonus
+
     priority_index = get_priority_index((training_name, training_data))
     tiebreaker = -priority_index
 
@@ -298,6 +323,8 @@ def stat_weight_training(state, training_template, action):
     )
     training_scores[training_name]["weighted_stat_score"] = weighted_stat_score
     training_scores[training_name]["bond_boost"] = bond_boost
+    if gimmick_bonus:
+      training_scores[training_name]["unity_gimmick_bonus"] = round(gimmick_bonus, 2)
     bond_str = f" bond_boost=+{bond_boost}" if bond_boost else ""
     debug(
       f"stat_weight_training: {training_name} -> weighted_score={weighted_stat_score:.1f} "
@@ -642,7 +669,27 @@ def rainbow_training_score(x):
   debug(f"Rainbow training score: {training_name} -> {rainbow_points} -> {total_rainbow_friends}")
   return (rainbow_points, -priority_index)
 
+def unity_gimmick_weight_for_year(year):
+  """Resolve the per-year Unity gimmick weight (junior/classic/senior). Finale
+  reuses the senior weight. Falls back to the flat SCENARIO_GIMMICK_WEIGHT when
+  no per-year map is configured."""
+  default = getattr(config, "SCENARIO_GIMMICK_WEIGHT", 1.0)
+  weights = getattr(config, "UNITY_GIMMICK_WEIGHT_BY_YEAR", None)
+  if not isinstance(weights, dict) or not weights:
+    return default
+  key = str(year).strip().lower()
+  if key == "finale":
+    key = "senior"
+  try:
+    return float(weights.get(key, default))
+  except (TypeError, ValueError):
+    return default
+
+
 def add_scenario_gimmick_score(training_dict, score_tuple, state):
+  # Legacy meta/rainbow scoring path: keeps the year/priority-curved
+  # unity_training_score scaled by the flat SCENARIO_GIMMICK_WEIGHT. The flat
+  # per-bubble weighting lives only in stat_weight_training.
   score = 0
   if constants.SCENARIO_NAME == "unity":
     score = unity_training_score(training_dict, state["year"].split()[0]) * config.SCENARIO_GIMMICK_WEIGHT

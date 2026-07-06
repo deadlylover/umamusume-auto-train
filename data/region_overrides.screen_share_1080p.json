@@ -132,16 +132,16 @@
     7
   ],
   "UNITY_ENERGY_BBOX": [
-    23,
-    36,
-    88,
-    44
+    233,
+    271,
+    650,
+    325
   ],
   "UNITY_ENERGY_REGION": [
-    23,
-    36,
-    64,
-    7
+    233,
+    271,
+    417,
+    54
   ],
   "MANT_ENERGY_BBOX": [
     231,
@@ -180,16 +180,16 @@
     10
   ],
   "UNITY_TURN_BBOX": [
-    3,
-    26,
-    13,
-    34
+    19,
+    198,
+    95,
+    256
   ],
   "UNITY_TURN_REGION": [
-    3,
-    26,
-    10,
-    8
+    19,
+    198,
+    76,
+    58
   ],
   "MANT_TURN_BBOX": [
     12,
@@ -204,16 +204,16 @@
     67
   ],
   "UNITY_TURN_FULL_BBOX": [
-    2,
-    26,
-    23,
-    34
+    21,
+    199,
+    156,
+    255
   ],
   "UNITY_TURN_FULL_REGION": [
-    2,
-    27,
     21,
-    8
+    199,
+    135,
+    56
   ],
   "MANT_TURN_FULL_BBOX": [
     10,
@@ -228,16 +228,16 @@
     100
   ],
   "UNITY_RACE_TURNS_BBOX": [
-    5,
-    36,
-    12,
-    40
+    19,
+    264,
+    86,
+    296
   ],
   "UNITY_RACE_TURNS_REGION": [
-    4,
-    36,
-    7,
-    3
+    19,
+    264,
+    67,
+    32
   ],
   "FAILURE_BBOX": [
     4,
@@ -252,16 +252,16 @@
     12
   ],
   "UNITY_FAILURE_BBOX": [
-    8,
-    154,
-    99,
-    160
+    49,
+    1122,
+    708,
+    1148
   ],
   "UNITY_FAILURE_REGION": [
-    8,
-    154,
-    90,
-    6
+    49,
+    1122,
+    659,
+    26
   ],
   "MANT_FAILURE_BBOX": [
     35,
@@ -288,16 +288,16 @@
     4
   ],
   "UNITY_YEAR_BBOX": [
-    23,
-    22,
-    53,
-    26
+    167,
+    168,
+    411,
+    196
   ],
   "UNITY_YEAR_REGION": [
-    24,
-    22,
-    29,
-    3
+    167,
+    168,
+    244,
+    28
   ],
   "MANT_YEAR_BBOX": [
     8,
@@ -324,16 +324,16 @@
     10
   ],
   "UNITY_CRITERIA_BBOX": [
-    34,
-    27,
-    91,
-    36
+    246,
+    208,
+    645,
+    262
   ],
   "UNITY_CRITERIA_REGION": [
-    34,
-    27,
-    57,
-    10
+    246,
+    208,
+    399,
+    54
   ],
   "MANT_CRITERIA_BBOX": [
     243,
@@ -371,6 +371,18 @@
     558,
     34
   ],
+  "UNITY_CURRENT_STATS_BBOX": [
+    66,
+    1047,
+    624,
+    1081
+  ],
+  "UNITY_CURRENT_STATS_REGION": [
+    66,
+    1047,
+    558,
+    34
+  ],
   "MANT_LOBBY_SKILL_PTS_BBOX": [
     641,
     1053,
@@ -378,6 +390,18 @@
     1095
   ],
   "MANT_LOBBY_SKILL_PTS_REGION": [
+    641,
+    1053,
+    95,
+    42
+  ],
+  "UNITY_LOBBY_SKILL_PTS_BBOX": [
+    641,
+    1053,
+    736,
+    1095
+  ],
+  "UNITY_LOBBY_SKILL_PTS_REGION": [
     641,
     1053,
     95,
@@ -420,28 +444,28 @@
     6
   ],
   "UNITY_STAT_GAINS_BBOX": [
-    4,
-    135,
-    105,
-    140
+    24,
+    981,
+    737,
+    1021
   ],
   "UNITY_STAT_GAINS_REGION": [
-    3,
-    135,
-    101,
-    5
+    24,
+    981,
+    713,
+    40
   ],
   "UNITY_STAT_GAINS_2_BBOX": [
-    4,
-    129,
-    105,
-    135
+    43,
+    936,
+    737,
+    984
   ],
   "UNITY_STAT_GAINS_2_REGION": [
-    3,
-    129,
-    101,
-    6
+    43,
+    936,
+    694,
+    48
   ],
   "MANT_STAT_GAINS_BBOX": [
     32,
@@ -504,16 +528,16 @@
     97
   ],
   "UNITY_SUPPORT_CARD_ICON_BBOX": [
-    84,
-    43,
-    108,
-    143
+    589,
+    326,
+    755,
+    926
   ],
   "UNITY_SUPPORT_CARD_ICON_REGION": [
-    84,
-    41,
-    24,
-    101
+    589,
+    326,
+    166,
+    600
   ],
   "MANT_SUPPORT_CARD_ICON_BBOX": [
     606,
@@ -528,16 +552,16 @@
     660
   ],
   "UNITY_TEAM_MATCHUP_BBOX": [
-    6,
-    116,
-    102,
-    123
+    70,
+    850,
+    700,
+    905
   ],
   "UNITY_TEAM_MATCHUP_REGION": [
-    6,
-    116,
-    95,
-    7
+    70,
+    850,
+    630,
+    55
   ],
   "MANT_SHOP_COIN_BBOX": [
     582,
@@ -790,6 +814,30 @@
     800,
     800,
     280
+  ],
+  "TRACKBLAZER_INSPIRATION_GO_BBOX": [
+    880,
+    1102,
+    1003,
+    1165
+  ],
+  "TRACKBLAZER_INSPIRATION_GO_REGION": [
+    880,
+    1102,
+    123,
+    63
+  ],
+  "TRACKBLAZER_INSUFFICIENT_GOAL_RACE_RESULT_POINTS_BBOX": [
+    867,
+    566,
+    1070,
+    732
+  ],
+  "TRACKBLAZER_INSUFFICIENT_GOAL_RACE_RESULT_POINTS_REGION": [
+    867,
+    566,
+    203,
+    166
   ],
   "TRACKBLAZER_LOBBY_BUFF_BBOX": [
     13,

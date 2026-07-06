@@ -111,7 +111,13 @@ def score_training_for_display(training_name, training_data, state_obj, training
     if training_function == "most_stat_gain":
       return most_stat_score(x, state_obj, training_template)
     if training_function == "stat_weight_training":
-      stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
+      # Mirror stat_weight_training's scenario-specific weights/bond/gimmick so a
+      # filtered training's displayed score matches what it would have scored.
+      is_unity = constants.SCENARIO_NAME == "unity"
+      if is_unity:
+        stat_weights = getattr(config, "UNITY_STAT_WEIGHTS", None)
+      else:
+        stat_weights = getattr(config, "TRACKBLAZER_STAT_WEIGHTS", None)
       if not isinstance(stat_weights, dict) or not stat_weights:
         stat_weights = training_template.get("stat_weight_set", {})
       stat_gains = td.get("stat_gains", {})
@@ -124,11 +130,16 @@ def score_training_for_display(training_name, training_data, state_obj, training
           continue
         weight = stat_weights.get(stat, 1)
         total_value += gain * weight
-      if bot.get_trackblazer_bond_boost_enabled():
-        cutoff = bot.get_trackblazer_bond_boost_cutoff()
+      if is_unity:
+        bond_enabled = bool(getattr(config, "UNITY_BOND_BOOST_ENABLED", True))
+        bond_cutoff = getattr(config, "UNITY_BOND_BOOST_CUTOFF", "") or ""
+      else:
+        bond_enabled = bot.get_trackblazer_bond_boost_enabled()
+        bond_cutoff = bot.get_trackblazer_bond_boost_cutoff()
+      if bond_enabled:
         current_year = state_obj.get("year", "")
         try:
-          active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(cutoff)
+          active = constants.TIMELINE.index(current_year) <= constants.TIMELINE.index(bond_cutoff)
         except ValueError:
           active = False
         if active:
@@ -137,6 +148,7 @@ def score_training_for_display(training_name, training_data, state_obj, training
           if raiseable > 0:
             per_friend = 15 if training_name == "wit" else 10
             total_value += raiseable * per_friend
+      total_value += _unity_gimmick_bonus_for_display(td, state_obj)
       from core.trainings import get_priority_index
       priority_index = get_priority_index(x)
       return (total_value, -priority_index)
@@ -148,6 +160,20 @@ def score_training_for_display(training_name, training_data, state_obj, training
     return most_stat_score(x, state_obj, training_template)
   except Exception:
     return None
+
+
+def _unity_gimmick_bonus_for_display(training_data, state_obj):
+  """Points contributed by Unity gauge fills for a training, matching
+  stat_weight_training's per-gauge-fill gimmick weighting. Spirit explosions are
+  excluded (their value is already in the boosted stat gains). Returns 0 outside
+  the Unity scenario so other scenarios render unchanged."""
+  if constants.SCENARIO_NAME != "unity":
+    return 0
+  from core.trainings import unity_gimmick_weight_for_year
+
+  gimmick_year = str(state_obj.get("year", "")).split()[0] if state_obj.get("year") else ""
+  gauge_fills = training_data.get("unity_gauge_fills", 0) or 0
+  return gauge_fills * unity_gimmick_weight_for_year(gimmick_year)
 
 
 def build_ranked_training_snapshot(state_obj, available_trainings, training_function):
@@ -194,6 +220,7 @@ def build_ranked_training_snapshot(state_obj, available_trainings, training_func
       "stat_gains": training_data.get("stat_gains"),
       "unity_gauge_fills": training_data.get("unity_gauge_fills"),
       "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+      "unity_gimmick_bonus": _unity_gimmick_bonus_for_display(training_data, state_obj),
       "filtered_out": True,
       "excluded_reason": exclusion_reason,
     }
@@ -211,6 +238,7 @@ def build_ranked_training_snapshot(state_obj, available_trainings, training_func
       "stat_gains": training_data.get("stat_gains"),
       "unity_gauge_fills": training_data.get("unity_gauge_fills"),
       "unity_spirit_explosions": training_data.get("unity_spirit_explosions"),
+      "unity_gimmick_bonus": _unity_gimmick_bonus_for_display(training_data, state_obj),
       "filtered_out": False,
       "excluded_reason": None,
       "failure_bypassed_by_items": bool(training_data.get("failure_bypassed_by_items")),

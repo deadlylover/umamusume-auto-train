@@ -15,7 +15,7 @@ import core.config as config
 from PIL import ImageGrab
 from core.actions import Action
 import utils.constants as constants
-from scenarios.unity import unity_cup_function
+from scenarios.unity import scan_unity_matchups
 from core.events import find_event_choice_icon, select_event
 from core.claw_machine import play_claw_machine
 from core.skill import (
@@ -4895,6 +4895,55 @@ def _stop_for_trackblazer_complete_career(state_obj=None, action=None, context="
   raise BotStopException(reason)
 
 
+def _handle_unity_post_race_result_screen(state_obj, action):
+  """Fast-poll the Unity race-result screens for the advance button.
+
+  After a Unity showdown the game plays a victory / gauge-fill animation for
+  several seconds before a green ``Next`` (or a ``Close``) appears. The generic
+  advance sweep eventually catches it, but only after grinding through eight
+  blocking template searches per loop (~3s each pass), which adds a few seconds
+  of tail latency and, on the first idle cycles, a safe-space nudge. This
+  dedicated branch does a single non-blocking check for just the buttons the
+  Unity result chain actually uses, so the moment one appears it is clicked.
+
+  Guarded to the ``do_unity_race`` action so it never fires for other actions.
+  Returns the standard post-action handler dict.
+  """
+  if _action_func(action) != "do_unity_race":
+    return {
+      "detected": False,
+      "handled": False,
+      "popup_type": "unity_race_result",
+      "reason": "action_not_unity_race",
+      "deferred_work": [],
+    }
+  for label, template_path in (
+    ("next", "assets/buttons/next_btn.png"),
+    ("next2", "assets/buttons/next2_btn.png"),
+    ("close", "assets/buttons/close_btn.png"),
+  ):
+    # min_search_time=0 -> single-shot, non-blocking match (no 0.4s wait when absent).
+    if device_action.locate_and_click(
+      template_path,
+      min_search_time=0,
+      region_ltrb=constants.GAME_WINDOW_BBOX,
+    ):
+      return {
+        "detected": True,
+        "handled": True,
+        "popup_type": "unity_race_result",
+        "reason": f"clicked_{label}",
+        "deferred_work": [],
+      }
+  return {
+    "detected": False,
+    "handled": False,
+    "popup_type": "unity_race_result",
+    "reason": "no_advance_button",
+    "deferred_work": [],
+  }
+
+
 def _generic_post_action_return_to_lobby_step():
   for label, template_path, region_ltrb in _POST_ACTION_GENERIC_ADVANCE_TEMPLATES:
     if label == "cancel":
@@ -5507,6 +5556,27 @@ def _resolve_post_action_resolution(state_obj, action, max_wait=None):
           wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_RECOVERY_WAIT_SECONDS)
           _record_post_action_wait(wait_result, label="after_insufficient_goal_points", kind="followup_wait")
           continue
+
+    if _action_func(action) == "do_unity_race":
+      branch_started_at = _time_mod.time()
+      unity_result = _handle_unity_post_race_result_screen(state_obj, action)
+      branch_duration = _time_mod.time() - branch_started_at
+      metrics["timing_popup_checks"] = round(metrics.get("timing_popup_checks", 0.0) + branch_duration, 4)
+      _record_popup_branch("unity_race_result", unity_result, branch_duration)
+      if unity_result.get("detected") and unity_result.get("handled"):
+        _update_post_action_resolution_snapshot(
+          state_obj,
+          action,
+          message="Resolved Unity race result screen.",
+          sub_phase=SUB_PHASE_RESOLVE_POST_ACTION_POPUP,
+          popup_type=unity_result.get("popup_type"),
+          deferred_work=unity_result.get("deferred_work"),
+          reasoning_notes=unity_result.get("reason"),
+        )
+        idle_loops = 0
+        wait_result = _wait_for_post_action_actionable_state(_POST_ACTION_HANDLED_POPUP_WAIT_SECONDS)
+        _record_post_action_wait(wait_result, label="after_unity_race_result", kind="followup_wait")
+        continue
 
     generic_started_at = _time_mod.time()
     generic_step = _generic_post_action_return_to_lobby_step()
@@ -7046,6 +7116,64 @@ def _wait_for_execute_intent(state_obj, action, message_prefix, reasoning_notes=
       info("[REVIEW] Continue pressed in check_only mode; executing this turn as one-shot execute.")
       return "execute"
 
+def _handle_unity_cup_with_review():
+  """Run the Unity cup race through the execution-intent review gate.
+
+  Mirrors the Trackblazer scheduled-race pattern so Unity respects check_only:
+  the opponent matchup scan (read-only) runs first and is surfaced in the
+  operator console, then the actual race start is deferred to
+  ``run_action_with_review``. Under check_only the plan is previewed and the bot
+  waits at the confirmation screen; Continue commits the race exactly once.
+
+  Returns the review result string ("executed" / "previewed" / "failed" /
+  "blocked") or "skipped" when there is nothing to race.
+  """
+  try:
+    plan = scan_unity_matchups()
+  except Exception as exc:
+    warning(f"[UNITY] Matchup scan failed: {exc}")
+    return "failed"
+  kind = (plan or {}).get("kind")
+  if not plan or kind in (None, "none"):
+    return "skipped"
+
+  state_obj = CleanDefaultDict()
+  state_obj["scenario_name"] = "unity"
+
+  best_match = plan.get("best_match") or {}
+  action = Action()
+  action.func = "do_unity_race"
+  action["unity_race_plan"] = plan
+  action["unity_race_kind"] = kind
+  action["unity_race_summary"] = plan.get("reason")
+  action["unity_matchup_score"] = best_match.get("score")
+
+  if kind == "zenith":
+    review_message = "Unity zenith (S-rank) race detected. Review before race entry."
+  else:
+    review_message = (
+      f"Unity cup opponent selected (matchup score {best_match.get('score')}). "
+      "Review before race entry."
+    )
+
+  update_operator_snapshot(
+    state_obj,
+    action,
+    phase="pre_race",
+    message=review_message,
+    sub_phase="preview_unity_race",
+  )
+  result = run_action_with_review(
+    state_obj,
+    action,
+    review_message,
+    sub_phase="preview_unity_race",
+  )
+  if result == "executed":
+    record_and_finalize_turn(state_obj, action)
+  return result
+
+
 def career_lobby(dry_run_turn=False):
   global last_state, action_count, non_match_count, scenario_detection_attempts, last_trackblazer_shop_refresh_turn, _cached_trackblazer_inventory, _cached_trackblazer_inventory_turn, _cached_trackblazer_shop_state
   non_match_count = 0
@@ -7101,8 +7229,10 @@ def career_lobby(dry_run_turn=False):
         info("Trying to find what scenario we're on.")
         if device_action.locate_and_click("assets/unity/unity_cup_btn.png", min_search_time=get_secs(1)):
           constants.SCENARIO_NAME = "unity"
-          info("Unity race detected, calling unity cup function. If this is not correct, please report this.")
-          unity_cup_function()
+          info("Unity race detected, entering review-gated unity cup flow. If this is not correct, please report this.")
+          unity_result = _handle_unity_cup_with_review()
+          if unity_result != "skipped":
+            non_match_count = 0
           continue
 
       matches = device_action.match_cached_templates(cached_templates, region_ltrb=constants.GAME_WINDOW_BBOX, threshold=0.9, stop_after_first_match=True)
@@ -7201,7 +7331,7 @@ def career_lobby(dry_run_turn=False):
         unity_matches = device_action.match_cached_templates(cached_unity_templates, region_ltrb=constants.GAME_WINDOW_BBOX)
         if click_match(unity_matches.get("unity_cup_btn")):
           info("Pressed unity cup.")
-          unity_cup_function()
+          _handle_unity_cup_with_review()
           non_match_count = 0
           continue
         if click_match(unity_matches.get("close_btn")):

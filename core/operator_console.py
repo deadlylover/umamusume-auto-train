@@ -136,6 +136,9 @@ class OperatorConsole:
   FLOW_PANE_MIN_WIDTH = 220
   NARROW_PANE_MIN_WIDTH = 154
   NARROW_TEXT_WIDTH = 56
+  # Startup scenario override choices exposed in the picker. These map directly
+  # to config.STARTUP_SCENARIO_OVERRIDE / constants.SCENARIO_NAME canonical names.
+  SCENARIO_OVERRIDE_OPTIONS = ("trackblazer", "unity", "default")
 
   def __init__(self):
     self._queue = queue.Queue()
@@ -161,6 +164,8 @@ class OperatorConsole:
     self._trackblazer_use_new_planner_var = None
     self._skill_auto_buy_var = None
     self._skip_scenario_detection_var = None
+    self._scenario_override_var = None
+    self._scenario_override_menu = None
     self._skip_full_stats_aptitude_check_var = None
     self._trackblazer_scoring_mode_var = None
     self._strong_training_score_threshold_var = None
@@ -246,6 +251,12 @@ class OperatorConsole:
     self._planner_flow_node_items = {}
     self._stat_weights_window = None
     self._stat_weights_entries = {}
+    self._unity_weights_window = None
+    self._unity_weights_entries = {}
+    self._unity_gimmick_year_vars = {}
+    self._unity_use_stat_weight_var = None
+    self._unity_bond_boost_var = None
+    self._unity_bond_boost_cutoff_var = None
     self._bond_boost_var = None
     self._wit_gate_supports_var = None
     self._wit_gate_rainbows_var = None
@@ -388,6 +399,7 @@ class OperatorConsole:
     tk.Button(primary_controls, text="Asset Creator", command=self._launch_asset_creator).pack(side=tk.LEFT)
     tk.Button(primary_controls, text="Training", command=self._open_stat_weights_window).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(primary_controls, text="Planner Flow", command=self._open_planner_flow_window).pack(side=tk.LEFT, padx=(4, 0))
+    tk.Button(primary_controls, text="Unity", command=self._open_unity_weights_window).pack(side=tk.LEFT, padx=(4, 0))
     self._execution_intent_var = tk.StringVar(value=bot.get_execution_intent())
     for intent in ("check_only", "execute"):
       tk.Radiobutton(
@@ -427,6 +439,27 @@ class OperatorConsole:
       activebackground="#101418",
       activeforeground="white",
     ).pack(side=tk.LEFT, padx=(12, 0))
+    tk.Label(secondary_controls, text="Scenario:", fg="#9aa4ad", bg="#101418").pack(side=tk.LEFT, padx=(12, 4))
+    self._scenario_override_var = tk.StringVar(
+      value=(getattr(config, "STARTUP_SCENARIO_OVERRIDE", "") or "default")
+    )
+    self._scenario_override_menu = tk.OptionMenu(
+      secondary_controls,
+      self._scenario_override_var,
+      *self.SCENARIO_OVERRIDE_OPTIONS,
+      command=self._set_startup_scenario_override,
+    )
+    self._scenario_override_menu.configure(
+      bg="#192028",
+      fg="white",
+      highlightthickness=0,
+      activebackground="#192028",
+      activeforeground="white",
+      borderwidth=1,
+      relief=tk.FLAT,
+    )
+    self._scenario_override_menu["menu"].configure(bg="#192028", fg="white")
+    self._scenario_override_menu.pack(side=tk.LEFT)
     tk.Checkbutton(
       secondary_controls,
       text="Skip full stats/aptitude",
@@ -2425,6 +2458,19 @@ class OperatorConsole:
     config.SKIP_SCENARIO_DETECTION = enabled
     if self._persist_config_value("skip_scenario_detection", enabled):
       self._message_value.set(f"Skip scenario detection {'enabled' if enabled else 'disabled'}.")
+    self.publish()
+
+  def _set_startup_scenario_override(self, _selected=None):
+    if self._scenario_override_var is None:
+      return
+    value = str(self._scenario_override_var.get() or "").strip() or "default"
+    config.STARTUP_SCENARIO_OVERRIDE = "" if value == "default" else value
+    if self._persist_config_value("startup_scenario_override", config.STARTUP_SCENARIO_OVERRIDE):
+      label = value if value != "default" else "default (auto/URA)"
+      note = ""
+      if not bool(getattr(config, "SKIP_SCENARIO_DETECTION", True)):
+        note = " (enable 'Skip scenario detect' to force it)"
+      self._message_value.set(f"Startup scenario override: {label}.{note}")
     self.publish()
 
   def _toggle_skip_full_stats_aptitude_check(self):
@@ -4516,6 +4562,231 @@ class OperatorConsole:
         pass
 
   # ── Stat Weights / Training Behavior window ────────────────────────
+
+  # --- Unity scenario weights window ---
+
+  def _get_active_unity_stat_weights(self):
+    weights = getattr(config, "UNITY_STAT_WEIGHTS", None)
+    if isinstance(weights, dict) and weights:
+      return weights
+    return dict(self._DEFAULT_STAT_WEIGHTS)
+
+  def _get_active_unity_gimmick_weights(self):
+    defaults = {"junior": 5.0, "classic": 5.0, "senior": 5.0}
+    weights = getattr(config, "UNITY_GIMMICK_WEIGHT_BY_YEAR", None)
+    if isinstance(weights, dict) and weights:
+      return {key: weights.get(key, defaults[key]) for key in defaults}
+    return defaults
+
+  def _clear_unity_weights_window(self):
+    self._unity_weights_window = None
+    self._unity_weights_entries = {}
+    self._unity_gimmick_year_vars = {}
+    self._unity_use_stat_weight_var = None
+    self._unity_bond_boost_var = None
+    self._unity_bond_boost_cutoff_var = None
+
+  def _open_unity_weights_window(self):
+    if self._root is None:
+      return
+    existing = self._unity_weights_window
+    if existing is not None:
+      try:
+        if existing.winfo_exists():
+          existing.lift()
+          return
+      except Exception:
+        pass
+
+    window = tk.Toplevel(self._root)
+    window.title("Unity Cup Weights")
+    window.configure(bg="#101418")
+    window.geometry("380x620")
+    window.minsize(340, 560)
+    self._unity_weights_window = window
+    window.bind(
+      "<Destroy>",
+      lambda event, root_window=window: self._clear_unity_weights_window() if event.widget is root_window else None,
+    )
+    window.bind("<Command-s>", lambda event: self._save_unity_weights())
+    window.bind("<Control-s>", lambda event: self._save_unity_weights())
+
+    body = tk.Frame(window, bg="#101418", padx=16, pady=12)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(
+      body,
+      text="Unity Cup training scoring",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 11, "bold"),
+      anchor="w",
+    ).pack(fill=tk.X, pady=(0, 2))
+    tk.Label(
+      body,
+      text=(
+        "Unity runs on the classic decision path. When stat-weight scoring is on,\n"
+        "trainings are ranked by weighted stat gains plus a Unity gimmick bonus.\n"
+        "Each bubble (gauge fill / spirit explosion) adds the per-year weight below\n"
+        "as flat stat-equivalent points (default 5 = worth ~5 stat points)."
+      ),
+      fg="#9aa4ad",
+      bg="#101418",
+      justify=tk.LEFT,
+      anchor="w",
+    ).pack(fill=tk.X, pady=(0, 10))
+
+    self._unity_use_stat_weight_var = tk.BooleanVar(
+      value=bool(getattr(config, "UNITY_USE_STAT_WEIGHT_SCORING", True))
+    )
+    tk.Checkbutton(
+      body,
+      text="Use stat-weight scoring (off = timeline template scoring)",
+      variable=self._unity_use_stat_weight_var,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+      anchor="w",
+    ).pack(fill=tk.X, pady=(0, 10))
+
+    tk.Label(
+      body,
+      text="Gimmick weight per year (stat points per Unity bubble)",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).pack(fill=tk.X, pady=(0, 4))
+    gimmick_frame = tk.Frame(body, bg="#101418")
+    gimmick_frame.pack(fill=tk.X, pady=(0, 10))
+    active_gimmick = self._get_active_unity_gimmick_weights()
+    self._unity_gimmick_year_vars = {}
+    for col_idx, (year_key, year_label) in enumerate(
+      (("junior", "Junior"), ("classic", "Classic"), ("senior", "Senior"))
+    ):
+      cell = tk.Frame(gimmick_frame, bg="#101418")
+      cell.grid(row=0, column=col_idx, sticky="w", padx=(0, 12))
+      tk.Label(
+        cell, text=year_label, fg="#9aa4ad", bg="#101418", anchor="w",
+      ).pack(anchor="w")
+      var = tk.StringVar(value=str(active_gimmick.get(year_key, 5.0)))
+      tk.Entry(
+        cell, textvariable=var, width=6,
+        bg="#192028", fg="white", insertbackground="white",
+      ).pack(anchor="w")
+      self._unity_gimmick_year_vars[year_key] = var
+
+    bond_frame = tk.Frame(body, bg="#101418")
+    bond_frame.pack(fill=tk.X, pady=(0, 6))
+    self._unity_bond_boost_var = tk.BooleanVar(
+      value=bool(getattr(config, "UNITY_BOND_BOOST_ENABLED", True))
+    )
+    tk.Checkbutton(
+      bond_frame,
+      text="Bond boost (+10/friend, +15 on wit)",
+      variable=self._unity_bond_boost_var,
+      fg="white",
+      bg="#101418",
+      selectcolor="#192028",
+      activebackground="#101418",
+      activeforeground="white",
+      anchor="w",
+    ).pack(fill=tk.X)
+    cutoff_frame = tk.Frame(body, bg="#101418")
+    cutoff_frame.pack(fill=tk.X, pady=(0, 10))
+    tk.Label(
+      cutoff_frame, text="Active until:", fg="#9aa4ad", bg="#101418",
+    ).pack(side=tk.LEFT)
+    self._unity_bond_boost_cutoff_var = tk.StringVar(
+      value=getattr(config, "UNITY_BOND_BOOST_CUTOFF", "Classic Year Early Jun")
+    )
+    cutoff_menu = tk.OptionMenu(
+      cutoff_frame,
+      self._unity_bond_boost_cutoff_var,
+      *constants.TIMELINE[:-1],
+    )
+    cutoff_menu.configure(
+      bg="#192028", fg="white", activebackground="#2a3540",
+      activeforeground="white", highlightthickness=0, width=22,
+    )
+    cutoff_menu["menu"].configure(
+      bg="#192028", fg="white", activebackground="#2a3540", activeforeground="white",
+    )
+    cutoff_menu.pack(side=tk.LEFT, padx=(4, 0))
+
+    tk.Label(
+      body,
+      text="Stat weights (gain × weight)",
+      fg="#d6dde5",
+      bg="#101418",
+      font=("Helvetica", 10, "bold"),
+      anchor="w",
+    ).pack(fill=tk.X, pady=(0, 4))
+    weights_frame = tk.Frame(body, bg="#101418")
+    weights_frame.pack(fill=tk.X)
+    active = self._get_active_unity_stat_weights()
+    self._unity_weights_entries = {}
+    for row_idx, stat in enumerate(self._DEFAULT_STAT_WEIGHTS):
+      label = self._STAT_LABELS.get(stat, stat)
+      tk.Label(
+        weights_frame, text=label, fg="#d6dde5", bg="#101418", width=10, anchor="w",
+      ).grid(row=row_idx, column=0, sticky="w", pady=2)
+      var = tk.StringVar(value=str(active.get(stat, 1.0)))
+      tk.Entry(
+        weights_frame, textvariable=var, width=8,
+        bg="#192028", fg="white", insertbackground="white",
+      ).grid(row=row_idx, column=1, sticky="w", padx=(8, 0), pady=2)
+      self._unity_weights_entries[stat] = var
+
+    buttons = tk.Frame(body, bg="#101418")
+    buttons.pack(fill=tk.X, pady=(16, 0))
+    tk.Button(buttons, text="Save", command=self._save_unity_weights).pack(side=tk.LEFT)
+    tk.Button(buttons, text="Close", command=window.destroy).pack(side=tk.LEFT, padx=(8, 0))
+
+  def _save_unity_weights(self):
+    weights = {}
+    for stat, var in self._unity_weights_entries.items():
+      try:
+        weights[stat] = round(float(var.get()), 2)
+      except ValueError:
+        self._message_value.set(f"Invalid Unity weight for {self._STAT_LABELS.get(stat, stat)}.")
+        return
+
+    gimmick_by_year = {}
+    for year_key, var in self._unity_gimmick_year_vars.items():
+      try:
+        gimmick_by_year[year_key] = round(float(var.get()), 2)
+      except ValueError:
+        self._message_value.set(f"Invalid Unity gimmick weight for {year_key.capitalize()}.")
+        return
+
+    use_stat_weight = bool(self._unity_use_stat_weight_var.get()) if self._unity_use_stat_weight_var is not None else True
+    bond_enabled = bool(self._unity_bond_boost_var.get()) if self._unity_bond_boost_var is not None else True
+    bond_cutoff = (
+      self._unity_bond_boost_cutoff_var.get()
+      if self._unity_bond_boost_cutoff_var is not None
+      else getattr(config, "UNITY_BOND_BOOST_CUTOFF", "Classic Year Early Jun")
+    )
+
+    ok = self._persist_config_value("unity.stat_weights", weights)
+    ok = self._persist_config_value("unity.use_stat_weight_scoring", use_stat_weight) and ok
+    ok = self._persist_config_value("unity.bond_boost_enabled", bond_enabled) and ok
+    ok = self._persist_config_value("unity.bond_boost_cutoff", bond_cutoff) and ok
+    if gimmick_by_year:
+      ok = self._persist_config_value("unity.gimmick_weight_by_year", gimmick_by_year) and ok
+    if not ok:
+      self._message_value.set("Failed to save Unity weights.")
+      return
+
+    try:
+      config.reload_config(print_config=False)
+    except Exception as exc:
+      self._message_value.set(f"Saved Unity weights, but reload failed: {exc}")
+      return
+    self._message_value.set("Saved Unity scenario weights.")
+    self.publish()
 
   def _open_stat_weights_window(self):
     if self._root is None:

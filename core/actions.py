@@ -190,6 +190,20 @@ def do_race(options=None):
   return bool(start_race())
 
 
+def do_unity_race(options=None):
+  # Commits a Unity cup race from a plan produced by scan_unity_matchups().
+  # The read-only opponent scan already ran during state collection/review; this
+  # only performs the destructive click-through + race start, so it must be
+  # dispatched through the execution-intent review like any other committed turn.
+  options = options or {}
+  plan = options.get("unity_race_plan")
+  if not plan:
+    error("do_unity_race called without a unity_race_plan; nothing to commit.")
+    return False
+  from scenarios.unity import commit_unity_race
+  return commit_unity_race(plan)
+
+
 def skip_turn(options=None):
   options["training_name"] = "wit"
   return do_training(options)
@@ -244,7 +258,7 @@ def race_day(options=None):
 def go_to_racebox_top():
   for i in range(10):
     screenshot1 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
-    device_action.swipe(constants.RACE_SCROLL_TOP_MOUSE_POS, constants.RACE_SCROLL_BOTTOM_MOUSE_POS)
+    device_action.swipe(constants.RACE_SCROLL_TOP_MOUSE_POS, constants.RACE_SCROLL_BOTTOM_MOUSE_POS, duration=0.5)
     device_action.click(constants.RACE_SCROLL_BOTTOM_MOUSE_POS)
     sleep(0.25)
     screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
@@ -491,10 +505,12 @@ def _select_and_confirm_race_from_open_list(race_name="any", race_image_path="",
 
       sleep(0.5)
       debug("Scrolling races...")
-      device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS)
+      device_action.swipe(constants.RACE_SCROLL_BOTTOM_MOUSE_POS, constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0.5)
       device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
       sleep(0.25)
       screenshot2 = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+      if _click_visible_race_entry_on_current_page(race_image_path, options=options):
+        break
       if are_screenshots_same(screenshot1, screenshot2, diff_threshold=15):
         if prefer_rival:
           info("[RIVAL] No rival race found in list, falling back to generic match.")

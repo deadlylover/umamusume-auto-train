@@ -5453,6 +5453,7 @@ _RIVAL_TO_APTITUDE_DY = 71
 # How far the aptitude match can deviate from the expected position.
 _APTITUDE_PAIR_TOLERANCE = 40
 _APTITUDE_MATCH_THRESHOLD = 0.7
+_RACE_ENTRY_CLICK_X_RATIO = 0.45
 _RIVAL_BUTTON_INDICATOR_THRESHOLD = 0.75
 
 # VS icon templates that appear on the race button when a rival race exists.
@@ -5658,6 +5659,17 @@ def check_rival_race_indicator(state_obj=None):
     return False
 
 
+def _race_entry_click_target_from_aptitude(aptitude_match, screenshot):
+    """Return a race-row body target for a matched aptitude badge."""
+    _ax, ay, _aw, ah = [int(v) for v in aptitude_match[:4]]
+    screenshot_h, screenshot_w = screenshot.shape[:2]
+    row_x = int(screenshot_w * _RACE_ENTRY_CLICK_X_RATIO)
+    row_y = ay + ah // 2
+    row_x = max(1, min(screenshot_w - 2, row_x))
+    row_y = max(1, min(screenshot_h - 2, row_y))
+    return (row_x, row_y)
+
+
 def find_rival_races_with_aptitude(screenshot=None):
     """Scan the visible race list for rival races with 2 matching aptitudes.
 
@@ -5716,13 +5728,10 @@ def find_rival_races_with_aptitude(screenshot=None):
                 break
 
         if paired_apt:
-            # Click target is the centre of the aptitude stars.
-            apt_cx = paired_apt[0] + paired_apt[2] // 2
-            apt_cy = paired_apt[1] + paired_apt[3] // 2
             results.append({
                 "rival": rival,
                 "aptitude": paired_apt,
-                "click_target": (apt_cx, apt_cy),
+                "click_target": _race_entry_click_target_from_aptitude(paired_apt, screenshot),
             })
             debug(
                 f"[TB_RIVAL] Paired rival at ({rx},{ry}) with aptitude at "
@@ -5753,11 +5762,9 @@ def find_race_aptitude_matches(screenshot=None):
 
     results = []
     for apt in aptitude_matches:
-        apt_cx = apt[0] + apt[2] // 2
-        apt_cy = apt[1] + apt[3] // 2
         results.append({
             "aptitude": apt,
-            "click_target": (apt_cx, apt_cy),
+            "click_target": _race_entry_click_target_from_aptitude(apt, screenshot),
         })
     return results
 
@@ -5835,9 +5842,6 @@ def scan_open_race_list_for_rival_matches():
     leaves the UI in-place for planner-owned preflight/commit flows.
     """
     from utils.screenshot import are_screenshots_same
-    from core.actions import go_to_racebox_top
-
-    go_to_racebox_top()
 
     all_matches = []
     rivals_without_aptitude = 0
@@ -5862,10 +5866,15 @@ def scan_open_race_list_for_rival_matches():
         device_action.swipe(
             constants.RACE_SCROLL_BOTTOM_MOUSE_POS,
             constants.RACE_SCROLL_TOP_MOUSE_POS,
+            duration=0.5,
         )
         device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
         sleep(0.25)
         screenshot_after = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        page_results = find_rival_races_with_aptitude(screenshot_after)
+        all_matches.extend(page_results)
+        if all_matches:
+            break
         if are_screenshots_same(screenshot_before, screenshot_after, diff_threshold=15):
             break
 
@@ -5887,9 +5896,6 @@ def scan_open_race_list_for_aptitude_matches():
     the race list open on the page where a matching aptitude asset was found.
     """
     from utils.screenshot import are_screenshots_same
-    from core.actions import go_to_racebox_top
-
-    go_to_racebox_top()
 
     all_matches = []
     for _ in range(10):
@@ -5904,10 +5910,15 @@ def scan_open_race_list_for_aptitude_matches():
         device_action.swipe(
             constants.RACE_SCROLL_BOTTOM_MOUSE_POS,
             constants.RACE_SCROLL_TOP_MOUSE_POS,
+            duration=0.5,
         )
         device_action.click(constants.RACE_SCROLL_TOP_MOUSE_POS, duration=0)
         sleep(0.25)
         screenshot_after = device_action.screenshot(region_ltrb=constants.RACE_LIST_BOX_BBOX)
+        page_results = find_race_aptitude_matches(screenshot_after)
+        all_matches.extend(page_results)
+        if all_matches:
+            break
         if are_screenshots_same(screenshot_before, screenshot_after, diff_threshold=15):
             break
 

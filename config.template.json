@@ -73,6 +73,23 @@
   },
   "use_skip_claw_machine": false,
   "scenario_gimmick_weight": 1.0,
+  "unity": {
+    "use_stat_weight_scoring": true,
+    "bond_boost_enabled": true,
+    "bond_boost_cutoff": "Classic Year Early Jun",
+    "gimmick_weight_by_year": {
+      "junior": 5,
+      "classic": 5,
+      "senior": 5
+    },
+    "stat_weights": {
+      "spd": 1.0,
+      "sta": 1.0,
+      "pwr": 1.0,
+      "guts": 1.0,
+      "wit": 1.0
+    }
+  },
   "trackblazer": {
     "shop_policy": {},
     "item_use_policy": {}

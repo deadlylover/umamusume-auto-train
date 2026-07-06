@@ -146,6 +146,14 @@ MANT_CURRENT_STATS_REGION = CURRENT_STATS_REGION
 MANT_LOBBY_SKILL_PTS_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (650, 723, -20, -315))
 MANT_LOBBY_SKILL_PTS_REGION = convert_xyxy_to_xywh(MANT_LOBBY_SKILL_PTS_BBOX)
 
+# Unity lobby shares Trackblazer's icon+number stats layout and a separate
+# Skill Pts box, so default these to the MANT coordinates (adjust via overrides).
+UNITY_CURRENT_STATS_BBOX = MANT_CURRENT_STATS_BBOX
+UNITY_CURRENT_STATS_REGION = MANT_CURRENT_STATS_REGION
+
+UNITY_LOBBY_SKILL_PTS_BBOX = MANT_LOBBY_SKILL_PTS_BBOX
+UNITY_LOBBY_SKILL_PTS_REGION = MANT_LOBBY_SKILL_PTS_REGION
+
 RACE_INFO_TEXT_BBOX = add_tuple_elements(GAME_WINDOW_BBOX, (135, 335, -140, -710))
 RACE_INFO_TEXT_REGION = convert_xyxy_to_xywh(RACE_INFO_TEXT_BBOX)
 
@@ -610,8 +618,8 @@ def update_race_scroll_positions():
   width = max(1, x2 - x1)
   height = max(1, y2 - y1)
   x = x1 + width // 2
-  top_y = y1 + int(height * 0.25)
-  bottom_y = y1 + int(height * 0.85)
+  top_y = y1 + int(height * 0.12)
+  bottom_y = y1 + int(height * 0.92)
   min_y = y1 + 1
   max_y = y2 - 1
   top_y = max(min_y, min(max_y, top_y))
@@ -795,8 +803,12 @@ ADJUSTABLE_COORDINATE_ORDER = (
   "MANT_CRITERIA_REGION",
   "CURRENT_STATS_BBOX",
   "CURRENT_STATS_REGION",
+  "UNITY_CURRENT_STATS_BBOX",
+  "UNITY_CURRENT_STATS_REGION",
   "MANT_CURRENT_STATS_BBOX",
   "MANT_CURRENT_STATS_REGION",
+  "UNITY_LOBBY_SKILL_PTS_BBOX",
+  "UNITY_LOBBY_SKILL_PTS_REGION",
   "MANT_LOBBY_SKILL_PTS_BBOX",
   "MANT_LOBBY_SKILL_PTS_REGION",
   "RACE_INFO_TEXT_BBOX",

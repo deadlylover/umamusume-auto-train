@@ -17,13 +17,14 @@ if not hasattr(config, "UNITY_MINIMUM_MATCHUP_SCORE"):
 
 def find_best_match(matchups):
   best_match = matchups[0]
-  best_match_score = best_match["score"]
+  best_match_score = int(best_match["score"])
   for matchup in matchups:
-    if matchup["score"] > config.UNITY_MINIMUM_MATCHUP_SCORE:
+    score = int(matchup["score"])
+    if score > config.UNITY_MINIMUM_MATCHUP_SCORE:
       return matchup
-    elif matchup["score"] > best_match_score:
+    elif score > best_match_score:
       best_match = matchup
-      best_match_score = matchup["score"]
+      best_match_score = score
   return best_match
 
 def click_zenith_race_button():
@@ -37,7 +38,21 @@ def click_zenith_race_button():
     sleep(0.5)
   return False
 
-def unity_cup_function():
+def scan_unity_matchups():
+  """Read-only Unity cup opponent scan.
+
+  Detects the matchup screen, evaluates team affinity against each candidate
+  opponent, and returns a plan describing what a commit *would* do — without
+  starting a race. Navigating into each opponent's affinity view and cancelling
+  back out is non-destructive, so this is safe to run under check_only for a
+  preview. The returned plan is consumed by ``commit_unity_race``.
+
+  Returns a dict with ``kind`` one of:
+    - ``"opponent_select"``: opponents scored; includes ``best_match``,
+      ``matchups``, and ``select_opponent_mouse_pos``.
+    - ``"zenith"``: S-rank / zenith race, no opponent selection needed.
+  Raises ``ValueError`` for the same unrecoverable states the legacy flow did.
+  """
   tries = 0
   while True:
     device_action.flush_screenshot_cache()
@@ -58,13 +73,12 @@ def unity_cup_function():
   elif select_opponent_btn:
     select_opponent_mouse_pos = (select_opponent_btn[0], select_opponent_btn[1])
   elif s_rank_opponent:
-    info(f"Zenith indicator detected (S rank opponent) at {s_rank_opponent}, looking for Zenith Race button.")
-    sleep(1)
-    if click_zenith_race_button():
-      unity_race_start()
-      return True
-    warning("Zenith Race button not found; skipping Unity race start.")
-    return False
+    info(f"Zenith indicator detected (S rank opponent) at {s_rank_opponent}.")
+    return {
+      "kind": "zenith",
+      "s_rank_opponent": s_rank_opponent,
+      "reason": "Zenith (S-rank) race — no opponent selection required.",
+    }
   if len(rank_matches) == 0:
     raise ValueError("Team rank not found, please report this.")
   matchups = []
@@ -89,28 +103,75 @@ def unity_cup_function():
       if tries > 10:
         raise ValueError("Affinity screen not found, please report this.")
       device_action.flush_screenshot_cache()
-    
-    screenshot = device_action.screenshot(region_xywh=constants.UNITY_TEAM_MATCHUP_REGION)
-    debug_window(screenshot, save_name="unity_team_matchup")
-    
+
+    matchup_screenshot = device_action.screenshot(region_xywh=constants.UNITY_TEAM_MATCHUP_REGION)
+    debug_window(matchup_screenshot, save_name="unity_team_matchup")
+
     # find all affinity vs opponent team
     for name, path in TEAM_MATCHUP_TEMPLATES.items():
-      matches = device_action.match_template(path, screenshot)
+      matches = device_action.match_template(path, matchup_screenshot)
       # if affinity found, count it
       for match in matches:
         count["score"] += int(name.split("_")[1])
         count[name] += 1
     matchups.append(count)
+    # Cancel back out to the opponent list — read-only navigation.
     device_action.locate_and_click("assets/buttons/cancel_btn.png")
     # max of 5 matches, if all is double circle, stop looking at the others since they're the same
     if count["affinity_3"] > 4:
       break
   debug(f"Unity matchups: {matchups}")
   best_match = find_best_match(matchups)
-  device_action.click(target=(best_match["mouse_pos"][0], best_match["mouse_pos"][1]))
-  device_action.click(select_opponent_mouse_pos)
-  unity_race_start()
-  return True
+  return {
+    "kind": "opponent_select",
+    "select_opponent_mouse_pos": select_opponent_mouse_pos,
+    "best_match": best_match,
+    "matchups": matchups,
+    "reason": f"Best matchup score {best_match['score']} at team {best_match['mouse_pos']}.",
+  }
+
+
+def commit_unity_race(plan):
+  """Destructive commit of a plan produced by ``scan_unity_matchups``.
+
+  Clicks through the chosen opponent (or the zenith race button) and starts the
+  race. This is the only part of the Unity cup flow that actually enters a race,
+  so it must run only after the execution-intent review has approved the turn.
+  """
+  plan = plan or {}
+  kind = plan.get("kind")
+  if kind == "zenith":
+    sleep(1)
+    if click_zenith_race_button():
+      unity_race_start()
+      return True
+    warning("Zenith Race button not found; skipping Unity race start.")
+    return False
+  if kind == "opponent_select":
+    best_match = plan.get("best_match") or {}
+    select_opponent_mouse_pos = plan.get("select_opponent_mouse_pos")
+    mouse_pos = best_match.get("mouse_pos")
+    if not mouse_pos or not select_opponent_mouse_pos:
+      warning("Unity commit missing click targets; skipping race start.")
+      return False
+    device_action.click(target=(mouse_pos[0], mouse_pos[1]))
+    device_action.click(select_opponent_mouse_pos)
+    unity_race_start()
+    return True
+  warning(f"Unity commit called with unknown plan kind: {kind!r}")
+  return False
+
+
+def unity_cup_function():
+  """Backward-compatible one-shot Unity cup flow: scan then immediately commit.
+
+  Prefer the split ``scan_unity_matchups`` / ``commit_unity_race`` pair when the
+  race start needs to be gated behind the execution-intent review.
+  """
+  plan = scan_unity_matchups()
+  if not plan or plan.get("kind") in (None, "none"):
+    return False
+  return commit_unity_race(plan)
 
 def unity_race_start():
   sleep(1)
