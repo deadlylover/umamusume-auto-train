@@ -695,7 +695,14 @@ class Strategy:
         else:
           debug(f"[ENERGY_MGMT] → STICK WITH TRAINING: No compelling alternatives (wit effective energy: {wit_energy_value})")
     elif current_energy < config.SKIP_TRAINING_ENERGY:
-      if state["date_event_available"]:
+      # Low-energy failsafe: normally rest because unreadable/high fail chances make
+      # training risky at this energy. Exception: a Unity purple super-spirit explosion
+      # forces the selected training to a 0% fail that is *pixel-verified* (detected by
+      # template, not by the fail-chance OCR this failsafe distrusts), so it is
+      # guaranteed-safe and worth taking even here rather than wasting the explosion.
+      if action.func == "do_training" and (action.get("training_data") or {}).get("unity_purple_spirit_explosions"):
+        info(f"[ENERGY_MGMT] → KEEP TRAINING at low energy: '{action['training_name']}' has a Unity purple super-spirit (pixel-verified 0% fail).")
+      elif state["date_event_available"]:
         action.func = "do_recreation"
       else:
         action.func = "do_rest"

@@ -49,6 +49,9 @@ def create_training_score_entry(training_name, training_data, score_tuple):
     entry["unity_gauge_fills"] = training_data["unity_gauge_fills"]
     entry["unity_trainings"] = training_data["unity_trainings"]
     entry["unity_spirit_explosions"] = training_data["unity_spirit_explosions"]
+    # Pixel-verified purple super-spirit (forces 0% fail). Carried through so the
+    # low-energy rest failsafe can tell a guaranteed-safe turn from an OCR misread.
+    entry["unity_purple_spirit_explosions"] = training_data.get("unity_purple_spirit_explosions")
 
   return entry
 
